@@ -369,7 +369,7 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   assert.equal([...files.keys()].filter(p=>p.endsWith('.jsonl')).length,0);
   const priorIds=JSON.parse(files.get(cardPath).text).map(c=>c.id);
   config.groups.test.templates[0].front='Edited {{word}}';put('srs/config.json',JSON.stringify(config));
-  button('Refresh').onclick();await tick();
+  button('Reload reviewer').onclick();await tick();
   for(let i=0;i<100&&!button('Show answer');i++)await tick();
   button('Show answer').onclick();
   const rate=root.querySelectorAll('button').find(b=>b.textContent.startsWith('Good ('));
@@ -467,7 +467,7 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   put(cardPath,JSON.stringify(separated));put('srs/data/notes/notes-00000.json',JSON.stringify(bindings));
   put('srs/data/manifest.json',JSON.stringify({...m,revision:'r2',catalog_layout:'flat',note_partition_count:1}));
   files.delete('srs/config.json');files.delete('srs/study.json');
-  button('Refresh').onclick();
+  button('Reload reviewer').onclick();
   for(let i=0;i<100&&!button('Profiles');i++)await tick();
   await tick();button('Profiles').onclick();
   for(let i=0;i<100&&!button('Save profile');i++)await tick();
@@ -948,4 +948,187 @@ test('bulk historical indexing still rejects conflicts atomically and preserves 
   await assert.rejects(()=>index.ingest([two,different],known),/Conflicting/);
   assert.equal((await index.historyFor('card-0')).length,1);
   index.close();
+});
+
+test('catalog journal recovers interrupted writes and rejects conflicting manifests',async()=>{
+  const files=new Map([['data/manifest.json',JSON.stringify({revision:'a'})]]);
+  let fail=true;
+  const storage={read:async p=>files.get(p)??null,remove:async p=>files.delete(p),write:async(p,t)=>{if(p.includes('cards/')&&fail){fail=false;throw Error('interrupted');}files.set(p,t);}};
+  const publisher=new SRS.CatalogPublisher(storage,'data');
+  await assert.rejects(publisher.publish({revision:'a'},{revision:'b'},{'notes/notes-00000.json':[{id:'n'}],'cards/cards-00000.json':[{id:'c',note_id:'n'}]}),/interrupted/);
+  assert.equal(JSON.parse(files.get('data/manifest.json')).revision,'a');
+  assert.equal(await publisher.recover(),true);
+  assert.equal(JSON.parse(files.get('data/manifest.json')).revision,'b');
+  assert.equal(await publisher.recover(),false);
+  await assert.rejects(publisher.publish({revision:'a'},{revision:'c'},{}),/changed/);
+  await assert.rejects(publisher.publish({revision:'b'},{revision:'c'},{'../bad':[]}),/partition/);
+});
+
+function maintenanceFixture(){
+  const files=new Map(),reads=[],writes=[];let clock=1;
+  const put=(path,text)=>files.set(path,{text:typeof text==='string'?text:JSON.stringify(text),mtime:clock++});
+  const rule={sources:['words.csv'],profile:'p',templates:['read'],fields:[{name:'Front',source:'word',transform:'text'}]};
+  const template={key:'read',enabled:true,anki_notetype:'Basic',anki_ordinal:0,front:'{{Front}}',back:'',required_fields:['Front']};
+  put('srs/config/sources.json',{format_version:1,rules:{words:rule}});
+  put('srs/config/cards.json',{format_version:1,rules:{words:{profile:'p',templates:['read']}},groups:{words:{templates:[template]}}});
+  put('srs/config/decks.json',{format_version:1,decks:{}});put('srs/config/profile-rules.json',{format_version:1,rules:[]});
+  put('srs/data/profiles.json',{format_version:1,default_profile:'p',profiles:{p:{settings:options,reviews_per_day:200}}});
+  put('srs/data/manifest.json',{...manifest(),revision:'initial',catalog_layout:'flat',partition_count:1,note_partition_count:1});put('srs/data/cards/cards-00000.json',[]);put('srs/data/notes/notes-00000.json',[]);
+  put('words.csv','anki_note_id,word\n1,one\n');
+  const info=(path,f)=>({path,file:true,mtime:f.mtime,size:f.text.length});
+  const io={read:async path=>{reads.push(path);return files.get(path)?.text??null;},write:async(path,text)=>{writes.push(path);put(path,text);},remove:async path=>files.delete(path),files:()=>[...files].map(([p,f])=>info(p,f)),stat:path=>files.has(path)?info(path,files.get(path)):[...files.keys()].some(p=>p.startsWith(path+'/'))?{path,file:false}:null,
+    metadata:async(path,text)=>JSON.parse(text.match(/^---\n([\s\S]*?)\n---/)[1]),
+    replace:async(path,expected,text)=>{assert.equal(files.get(path).text,expected);writes.push(path);put(path,text);}};
+  const cache={rows:new Map(),async get(key){return this.rows.get(key);},async put(key,value){this.rows.set(key,structuredClone(value));}};
+  const engine=opts=>new SRS.CardMaintenance(io,'srs',cache,{now:()=>now,...opts});
+  const json=path=>JSON.parse(files.get(path).text);
+  return {files,put,io,cache,engine,json,reads,writes,rule,template};
+}
+
+test('maintenance refresh preserves identities and baseline, and unchanged checkpoint skips catalog/source reads',async()=>{
+  const f=maintenanceFixture(),engine=f.engine(),plan=await engine.plan();assert.equal(plan.result.added,1);await engine.apply(plan);
+  const card=f.json('srs/data/cards/cards-00000.json')[0],note=f.json('srs/data/notes/notes-00000.json')[0];
+  assert.equal(card.note_id,note.id);assert.equal(note.uid,'anki:1');assert.equal(card.added_at,new Date(now).toISOString());assert.equal(card.baseline.reps,0);
+  assert.equal(card.id,await SRS.maintenanceCardId('words','anki:1','read'));
+  assert.equal(card.source,undefined);assert.equal(note.locator.fields,undefined);
+  const second=f.engine(),noChange=await second.plan();assert.equal(noChange.result.added,0);await second.apply(noChange);
+  f.reads.length=0;const warm=await f.engine().plan();assert.equal(warm.result.scan.parsed_files,0);
+  assert.ok(!f.reads.includes('words.csv'));assert.ok(!f.reads.some(p=>p.includes('/cards/')||p.includes('/notes/')));
+  assert.deepEqual(f.json('srs/data/cards/cards-00000.json')[0],card);
+});
+
+test('maintenance seeds CSV IDs, opts structural notes in, and puts block markers immediately below quote',async()=>{
+  const f=maintenanceFixture();f.put('words.csv','anki_note_id,word\n,new\n');let e=f.engine();await e.apply(await e.plan());assert.match(f.files.get('words.csv').text,/srs_note_id/);
+  const first=f.json('srs/data/cards/cards-00000.json')[0].id;await f.engine().apply(await f.engine().plan());assert.equal(f.json('srs/data/cards/cards-00000.json')[0].id,first);
+  f.put('srs/config/sources.json',{format_version:1,rules:{words:{...f.rule,sources:['notes']}}});
+  f.put('notes/no.md','---\n{"word":"not opted in"}\n---\n');f.put('notes/yes.md','---\n{"anki_note_id":2,"word":"yes"}\n---\n');
+  const plan=await f.engine().plan();assert.equal(plan.result.added,1);assert.equal(plan.files['notes/notes-00000.json'].length,2);
+  const g=maintenanceFixture();g.put('srs/config/sources.json',{format_version:1,rules:{words:{...g.rule,sources:['blocks'],kind:'block',fields:[{name:'Front',source:'$front',transform:'text'}]}}});
+  g.put('blocks/a.md','> [!anki]- Question\n> #tag\n\n');g.io.metadata=async()=>({});await g.engine().plan();assert.match(g.files.get('blocks/a.md').text,/> #tag\n<!-- SRS-ID: [^\n]+ -->\n\n/);
+});
+
+test('maintenance prune protects imported and referenced cards and rejects incomplete roots',async()=>{
+  const f=maintenanceFixture();f.put('words.csv','anki_note_id,word\n,one\n,two\n');let e=f.engine();await e.apply(await e.plan());const cards=f.json('srs/data/cards/cards-00000.json');
+  f.put('srs/data/reviews/computer-2026-11.jsonl',JSON.stringify({kind:'card_settings',card_id:cards[0].id})+'\n');f.put('words.csv','anki_note_id,word\n');
+  e=f.engine();const plan=await e.plan(true);assert.equal(plan.result.removable_cards,1);assert.equal(plan.result.protected_cards.length,1);await e.apply(plan);assert.deepEqual(f.json('srs/data/cards/cards-00000.json').map(c=>c.id),[cards[0].id]);
+  f.files.delete('words.csv');await assert.rejects(f.engine().plan(true),/Source unavailable/);
+});
+
+test('maintenance rejects stale apply and duplicate identities without catalog writes',async()=>{
+  const f=maintenanceFixture(),e=f.engine(),plan=await e.plan();f.put('words.csv','anki_note_id,word\n1,changed\n');await assert.rejects(e.apply(plan),/changed/);assert.equal(f.json('srs/data/cards/cards-00000.json').length,0);
+  f.put('words.csv','anki_note_id,word\n1,one\n1,two\n');await assert.rejects(f.engine().plan(),/Duplicate source identity/);
+  await assert.rejects(f.engine({cancelled:()=>true}).plan(),/cancelled/);
+});
+
+test('maintenance filters conditional geography fronts and generates cloze ordinals',async()=>{
+  const f=maintenanceFixture();f.template.front='{{#Front}}{{Front}}{{/Front}}';f.put('words.csv','anki_note_id,word\n1,\n2,yes\n');let config=f.json('srs/config/cards.json');config.groups.words.templates=[f.template];f.put('srs/config/cards.json',config);assert.equal((await f.engine().plan()).result.added,1);
+  f.template.front='{{cloze:Front}}';config.groups.words.templates=[f.template];f.put('srs/config/cards.json',config);f.put('words.csv','anki_note_id,word\n1,{{c1::one}} and {{c3::three}}\n');const plan=await f.engine().plan();assert.equal(plan.result.added,2);assert.deepEqual(plan.files['cards/cards-00000.json'].map(c=>c.anki_ordinal),[0,2]);
+});
+
+test('maintenance batches type changes and preserves card IDs, note IDs, history and timestamps',async()=>{
+  const f=maintenanceFixture();let e=f.engine();await e.apply(await e.plan());const before=f.json('srs/data/cards/cards-00000.json')[0];
+  const sources=f.json('srs/config/sources.json');sources.rules.other={...f.rule,sources:['other.csv']};f.put('srs/config/sources.json',sources);
+  const config=f.json('srs/config/cards.json');config.rules.other={profile:'p',templates:['read']};config.groups.other={templates:[{...f.template,anki_notetype:'Other'}]};f.put('srs/config/cards.json',config);f.put('other.csv',f.files.get('words.csv').text);f.put('words.csv','anki_note_id,word\n');
+  let calls=0;e=f.engine({chooseMapping:async plan=>{calls++;assert.equal(plan.notes,1);return {read:'read'};}});const plan=await e.plan();assert.equal(plan.result.added,0);await e.apply(plan);assert.equal(calls,1);
+  const after=f.json('srs/data/cards/cards-00000.json')[0];assert.equal(after.id,before.id);assert.equal(after.note_id,before.note_id);assert.equal(after.added_at,before.added_at);assert.deepEqual(after.baseline,before.baseline);assert.equal(f.json('srs/data/notes/notes-00000.json')[0].rule_id,'other');
+});
+
+test('maintenance validates identities and UUIDv5 matches Python reference',async()=>{
+  assert.equal(SRS.maintenanceIdentity({anki_note_id:'00123',srs_note_id:'garbage'}),'anki:123');assert.throws(()=>SRS.maintenanceIdentity({anki_note_id:'-1'}));assert.throws(()=>SRS.maintenanceIdentity({srs_note_id:'bad'}));
+  assert.equal(await SRS.maintenanceCardId('words','anki:1','read'),'8756ff58-0f9f-5c7d-a1ec-b8d9f77b173b');
+});
+
+test('maintenance reuses touched identical files, reparses edits, and refuses additions during scanning',async()=>{
+  const f=maintenanceFixture();let e=f.engine();await e.apply(await e.plan());await f.engine().plan();
+  f.put('words.csv',f.files.get('words.csv').text);let plan=await f.engine().plan();assert.equal(plan.result.scan.parsed_files,0);assert.equal(plan.result.scan.hashed_files,1);
+  f.put('words.csv','anki_note_id,word\n1,one\n2,two\n');plan=await f.engine().plan();assert.equal(plan.result.added,1);assert.equal(plan.result.scan.parsed_files,1);
+  f.put('srs/config/sources.json',{format_version:1,rules:{words:{...f.rule,sources:['notes']}}});f.put('notes/a.md','---\n{"anki_note_id":1,"word":"one"}\n---\n');
+  await assert.rejects(f.engine({progress:()=>f.put('notes/b.md','---\n{"anki_note_id":2,"word":"two"}\n---\n')}).plan(),/changed during scan/);
+});
+
+test('structural seeding changes only the blank opt-in and retains an existing Anki identity',async()=>{
+  const f=maintenanceFixture();f.io.metadata=async(path,text)=>text.includes('anki_note_id:')?{anki_note_id:3,srs_note_id:null,word:'three'}:{srs_note_id:null,word:'one'};
+  f.put('note.md','---\nsrs_note_id:\nword: one\n---\nBody\n');const e=f.engine();const records=await e.source('note.md',f.rule,true);assert.equal(records.length,1);assert.match(records[0].identity,/^local:/);assert.match(f.files.get('note.md').text,/word: one\n---\nBody\n$/);
+  f.put('anki.md','---\nanki_note_id: 3\nsrs_note_id:\nword: three\n---\n');const original=f.files.get('anki.md').text;const existing=await e.source('anki.md',f.rule,true);assert.equal(existing[0].identity,'anki:3');assert.equal(f.files.get('anki.md').text,original);
+});
+
+test('mapping cancellation and retirement retain history; imported identities are never pruned',async()=>{
+  const f=maintenanceFixture();let e=f.engine();await e.apply(await e.plan());const before=f.files.get('srs/data/cards/cards-00000.json').text;
+  const sources=f.json('srs/config/sources.json');sources.rules.other={...f.rule,sources:['other.csv']};f.put('srs/config/sources.json',sources);const cfg=f.json('srs/config/cards.json');cfg.rules.other={profile:'p',templates:['read']};cfg.groups.other={templates:[f.template]};f.put('srs/config/cards.json',cfg);f.put('other.csv',f.files.get('words.csv').text);f.put('words.csv','anki_note_id,word\n');
+  await assert.rejects(f.engine({chooseMapping:()=>null}).plan(),/cancelled/);assert.equal(f.files.get('srs/data/cards/cards-00000.json').text,before);
+  e=f.engine({chooseMapping:()=>({read:null})});await e.apply(await e.plan());const cards=f.json('srs/data/cards/cards-00000.json');assert.equal(cards.length,2);assert.equal(cards[0].retired,true);f.put('other.csv','anki_note_id,word\n');const pruned=await f.engine().plan(true);assert.equal(pruned.result.removable_cards,0);
+});
+
+test('maintenance parses real YAML without require or Obsidian module access',async()=>{
+  const context={TextEncoder,__SRS_TEST__:true,require:()=>{throw Error("Cannot find module 'obsidian'");}};
+  vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'../../view.js'),'utf8'),context);
+  const text=`---
+anki_note_id: 1001
+aliases:
+  - 示例別名
+srs_note_id:
+map: '![[attachments/map.svg]]'
+terms:
+  - order: 2
+    party: Federalist
+text: |-
+  First line
+  Second line
+---
+Body
+`;
+  const metadata=context.SRS.maintenanceMetadata('note.md',text);
+  assert.equal(metadata.anki_note_id,1001);assert.equal(metadata.aliases[0],'示例別名');assert.equal(metadata.srs_note_id,null);assert.equal(metadata.terms[0].order,2);assert.equal(metadata.text,'First line\nSecond line');assert.equal(metadata.map,'![[attachments/map.svg]]');
+  assert.equal(Object.keys(context.SRS.maintenanceMetadata('ordinary.md','No frontmatter')).length,0);
+  assert.throws(()=>context.SRS.maintenanceMetadata('bad.md','---\nkey: [broken\n---\n'),/Invalid frontmatter: bad.md/);
+  assert.throws(()=>context.SRS.maintenanceMetadata('list.md','---\n- value\n---\n'),/expected a mapping/);
+  const f=maintenanceFixture();f.io.metadata=async(path,text)=>context.SRS.maintenanceMetadata(path,text);
+  f.put('note.md','---\nsrs_note_id:\nword: one\n---\nBody\n');
+  const result=await f.engine().source('note.md',f.rule,true);assert.equal(result.length,1);assert.match(result[0].identity,/^local:/);
+});
+
+test('refresh and prune share source parsing in either order without persisting note content',async()=>{
+  for(const firstPrune of [false,true]){
+    const f=maintenanceFixture();f.io.metadata=async(path,text)=>SRS.maintenanceMetadata(path,text);
+    f.put('srs/config/sources.json',{format_version:1,rules:{words:{...f.rule,sources:['notes']}}});
+    f.put('notes/a.md','---\nanki_note_id: 1\nword: private-source-content\n---\nPrivate body\n');
+    let parses=0;const metadata=f.io.metadata;f.io.metadata=async(...args)=>{parses++;return metadata(...args);};
+    const first=f.engine(),plan=await first.plan(firstPrune);await first.apply(plan);
+    assert.equal(parses,1);f.reads.length=0;
+    const second=await f.engine().plan(!firstPrune);
+    assert.equal(parses,1);assert.equal(second.result.scan.parsed_files,0);assert.equal(second.result.scan.reused_files,1);
+    assert.ok(!f.reads.includes('notes/a.md'),'other operation does not reread source');
+    const saved=JSON.stringify([...f.cache.rows]);assert.ok(!saved.includes('private-source-content'));assert.ok(!saved.includes('Private body'));
+  }
+});
+
+test('prune-first sharing still lets refresh seed missing CSV, structural, and block IDs',async()=>{
+  for(const kind of ['csv','markdown','block']){
+    const f=maintenanceFixture();f.io.metadata=async(path,text)=>SRS.maintenanceMetadata(path,text);
+    const rule=kind==='csv'?f.rule:{...f.rule,sources:['notes'],...(kind==='block'?{kind:'block',fields:[{name:'Front',source:'$front',transform:'text'}]}:{})};
+    f.put('srs/config/sources.json',{format_version:1,rules:{words:rule}});
+    const path=kind==='csv'?'words.csv':'notes/a.md';
+    const original=kind==='csv'?'word\nnew\n':kind==='markdown'?'---\nsrs_note_id:\nword: new\n---\n':'> [!anki]- new\n> #tag\n\n';f.put(path,original);
+    await f.engine().plan(true);assert.equal(f.files.get(path).text,original,'prune does not seed IDs');
+    const refresh=f.engine(),plan=await refresh.plan();assert.equal(plan.result.added,1);assert.equal(plan.result.scan.parsed_files,1);assert.notEqual(f.files.get(path).text,original);
+    await refresh.apply(plan);f.reads.length=0;const prune=await f.engine().plan(true);assert.equal(prune.result.scan.parsed_files,0);assert.ok(!f.reads.includes(path));
+  }
+});
+
+test('shared identity cache survives generation changes and touched-identical files',async()=>{
+  const f=maintenanceFixture();let e=f.engine();await e.apply(await e.plan());
+  const config=f.json('srs/config/cards.json');config.groups.words.templates[0].front='Updated {{Front}}';f.put('srs/config/cards.json',config);
+  f.reads.length=0;let plan=await f.engine().plan(true);assert.equal(plan.result.scan.parsed_files,0);assert.ok(!f.reads.includes('words.csv'));
+  plan=await f.engine().plan();assert.equal(plan.result.scan.parsed_files,1,'changed generation inputs need reevaluation');
+  f.put('words.csv',f.files.get('words.csv').text);plan=await f.engine().plan(true);assert.equal(plan.result.scan.parsed_files,0);assert.equal(plan.result.scan.hashed_files,1);
+  f.reads.length=0;plan=await f.engine().plan();assert.equal(plan.result.scan.parsed_files,0);assert.ok(!f.reads.includes('words.csv'));
+  f.put('words.csv','anki_note_id,word\n1,changed\n2,two\n');await f.engine().plan(true);f.reads.length=0;plan=await f.engine().plan();assert.equal(plan.result.added,1);assert.equal(plan.result.scan.parsed_files,0);assert.ok(!f.reads.includes('words.csv'));
+});
+
+test('shared maintenance scans survive closing and reopening IndexedDB',async()=>{
+  const f=maintenanceFixture(),identity='shared-maintenance-'+crypto.randomUUID();
+  let persistent=await SRS.MaintenanceCache.open(identity,indexedDB);
+  f.cache.get=key=>persistent.get(key);f.cache.put=(key,value)=>persistent.put(key,value);
+  let e=f.engine();await e.apply(await e.plan());persistent.close();persistent=await SRS.MaintenanceCache.open(identity,indexedDB);
+  try{f.reads.length=0;const plan=await f.engine().plan(true);assert.equal(plan.result.scan.parsed_files,0);assert.equal(plan.result.scan.reused_files,1);assert.ok(!f.reads.includes('words.csv'));}finally{persistent.close();}
 });

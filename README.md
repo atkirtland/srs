@@ -72,8 +72,8 @@ replace existing source rules.
 ### Changing a note type
 
 Move the source row or Markdown note into its new source rule and edit its fields,
-keeping its existing note ID. Run `uv run python srs.py refresh-cards` from
-`tools/` in an interactive terminal. Refresh prompts once for each old source rule
+keeping its existing note ID. Choose **Tools → Refresh cards** in the reviewer.
+A mapping dialog appears once for each old source rule
 → new source rule pair, showing the affected note and card counts. Map each old
 template to a destination template, or choose **Retire**, then confirm the batch.
 Mappings apply to this refresh only.
@@ -162,18 +162,12 @@ See [schemas/config.schema.json](schemas/config.schema.json).
 
 ## Add cards without Anki
 
-Keep adding your normal Obsidian notes, CSV rows, or callouts. From `tools/`, run:
-
-```sh
-uv sync --locked
-uv run python srs.py refresh-cards
-```
-
-The desktop command scans the source rules and publishes metadata partitions of
-at most 250 cards. It needs neither Anki, an Anki snapshot, nor Node. Click
-**Refresh** in the reviewer afterward; additions load without resetting the
-review index or imported baseline. Reviewing remains standalone on Android and
-desktop; discovery and training currently run on desktop.
+Keep adding your normal Obsidian notes, CSV rows, or callouts. Choose
+**Tools → Refresh cards** in the reviewer on desktop or Android. This scans source
+rules and publishes metadata partitions of at most 250 cards, preserving schedules
+and review logs. No Python, Node, or Anki runtime is required. Maintenance runs
+only when selected. **Reload reviewer** reloads existing data without discovering cards.
+FSRS training still runs through the desktop Python tools.
 
 Structural Markdown notes are eligible only when they have an existing
 `anki_note_id` or a `srs_note_id` field. To opt a new note in, add a blank field:
@@ -194,15 +188,9 @@ CSV reordering and file moves. After moving sources, update the source rule path
 and run discovery again. Discovery preserves existing catalog entries and reviews;
 changing eligibility does not automatically delete previously generated cards.
 
-To inspect accidental additions whose source identities no longer exist:
-
-```sh
-uv run python srs.py prune-missing-sources
-uv run python srs.py prune-missing-sources --apply
-```
-
-The first command previews; the second removes the listed local cards and any
-notes left unreferenced. Imported cards, reviewed cards, and cards with settings
+Choose **Tools → Prune missing sources** to preview accidental additions whose
+source identities no longer exist. Inspect removable and protected records, then
+use **Remove these cards and notes** to apply the preview. Imported cards, reviewed cards, and cards with settings
 log entries are preserved. Review logs remain unchanged. All configured source
 locations must be available; cleanup refuses an incomplete mount. Source identity
 is checked across the configured locations, so a moved note with the same ID is
@@ -312,7 +300,7 @@ CSV rows resolve through `anki_note_id`, `srs_note_id`, or legacy `srs_uid`. Mar
 the same identities; ID-linked `[!anki]` callouts are supported too. Mapped text,
 media, vocabulary, taxonomy, and structured source transformations run against
 live vault properties. Note bindings retain source locators; configuration retains transformations.
-Neither stores note field values. `refresh-cards` automatically assigns missing CSV
+Neither stores note field values. **Tools → Refresh cards** automatically assigns missing CSV
 identities while preserving existing IDs; no separate seeding command is needed.
 
 Templates support fields, nested conditional/inverted sections, `FrontSide`,
@@ -495,3 +483,13 @@ Card questions and answers render when opened. The homepage shows **known conten
 Use **Tools → Performance details** to inspect recent stage timings and cumulative file-read, source-read, rendering, and index-sync counts. To compare desktop and Android, reopen the view and record the cold-load measurements; then open the same deck twice, Bury a card, and submit a review, inspecting the counters after each operation. Warm navigation should not reread unchanged catalog/configuration/log files or render unvisited cards. Record content-check measurements separately. Performance details also reports `schedulingBuilds`, `cardPreparations`, and scheduling-index counters: ordinary deck switches and answers should leave the first two unchanged. Cold opening, catalog/configuration changes, card-setting changes, study-day rollover, or replaced/deleted logs can rebuild the runtime index. Learning availability changes update the relevant cards via a time-ordered index. Refresh clears runtime caches; Rebuild local index rebuilds review projections. The scheduling index is currently in memory; the review-log index remains persistent across openings.
 
 For a synthetic 30,000-card scheduling benchmark, run `tools/.venv/bin/node tools/tests/benchmark-reviewer.cjs` from the project root. It reports membership/count calculation, warm cache lookup, selected queue, and answer-refresh costs. It does not measure vault I/O or predict device-specific load times.
+
+Maintenance caches hashes and generated identity metadata in device-local IndexedDB;
+source content is never retained there. Unchanged runs skip source-content and
+catalog reads. Changed runs hash touched sources and reparse changed content;
+new/deleted paths, configuration edits, catalog changes, and relevant review logs
+invalidate results. **Rebuild local index** also clears the maintenance cache.
+Progress reports parsed/reused/hashed files. Cancellation before publication leaves
+the catalog unchanged; source IDs already inserted remain. Once publication starts,
+the recovery journal finishes it on reopening. Run maintenance on one syncing
+device at a time; simultaneous maintenance across devices is unsupported.

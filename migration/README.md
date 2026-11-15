@@ -33,7 +33,7 @@ converts imported metadata to study configuration. `lib/catalog.py`, `srs.py`,
 `scheduling.py`, and `verification.py` handle native import and verification.
 Shared vault parsers and identity helpers come from `../tools/srs_tools/`.
 
-Old `train` and `refresh-cards` invocations
+Old `train` invocations
 through `migrate.py` forward to `../tools/srs.py` and its uv environment.
 `build.py` and `verify-browser.cjs` are compatibility entry points for their
 implementations under `tools/`. Migration's uv environment contains the legacy

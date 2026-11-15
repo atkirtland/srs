@@ -5,7 +5,8 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from srs_tools import layout, study, training
+from srs_tools import layout, training
+from maintenance_reference import study
 import test_study as fixtures
 
 

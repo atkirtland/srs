@@ -14,7 +14,7 @@
     tools.createEl("summary",{text:"Tools"});
     const toolBody = tools.createDiv();
     const deviceSelect = toolBody.createEl("select",{attr:{"aria-label":"This device"}});
-    const refresh = toolBody.createEl("button",{text:"Refresh"});
+    const refresh = toolBody.createEl("button",{text:"Reload reviewer"});
     const rebuild = toolBody.createEl("button",{text:"Rebuild local index"});
     const content = host.createDiv({cls:"srs-content"});
     const context = content.createDiv({cls:"srs-context"});
@@ -138,13 +138,88 @@
       async list(directory) {return directory===`${dataRoot}/reviews`?[...reviewFileMap().values()]:api.vault.getFiles().filter(f=>f.path.startsWith(directory+"/"));},
       async read(path) {counters.fileReads++;const f=api.vault.getAbstractFileByPath(path);return f ? api.vault.read(f) : null;},
       async create(path,text) {await api.vault.create(path,text);},
+      async write(path,text) {
+        await this.mkdir(path.slice(0,path.lastIndexOf('/')));
+        const file=api.vault.getAbstractFileByPath(path);
+        if(file)await api.vault.modify(file,text);else await api.vault.create(path,text);
+      },
+      async remove(path) {const file=api.vault.getAbstractFileByPath(path);if(file)await api.vault.delete(file);},
       async mkdir(path) {if(!api.vault.getAbstractFileByPath(path))try{await api.vault.createFolder(path);}catch(error){if(!api.vault.getAbstractFileByPath(path))throw error;}},
       async append(path,text) {const f=api.vault.getAbstractFileByPath(path);if(!f)throw Error(`Missing log: ${path}`);await api.vault.append(f,text);}
     };
+    const maintenanceVersions=globalThis.__srsMaintenanceVersions||(globalThis.__srsMaintenanceVersions=new WeakMap());
+    if(!maintenanceVersions.has(api.vault)){
+      const versions=new Map();maintenanceVersions.set(api.vault,versions);
+      for(const name of ['create','modify','delete','rename'])api.vault.on(name,(file,oldPath)=>{if(file?.path)versions.set(file.path,(versions.get(file.path)||0)+1);if(oldPath)versions.set(oldPath,(versions.get(oldPath)||0)+1);});
+    }
+    const sourceVersions=maintenanceVersions.get(api.vault);
+    let maintenanceActive=false,maintenanceCancelled=false,maintenanceDialogCancel=null;
+    const refreshCardsButton=toolBody.createEl('button',{text:'Refresh cards'});
+    const pruneSourcesButton=toolBody.createEl('button',{text:'Prune missing sources'});
+    const cancelMaintenanceButton=toolBody.createEl('button',{text:'Cancel maintenance'});cancelMaintenanceButton.hidden=true;
+    cancelMaintenanceButton.onclick=()=>{maintenanceCancelled=true;maintenanceDialogCancel?.();};
+    component.register(()=>{maintenanceCancelled=true;maintenanceDialogCancel?.();});
+    async function maintenanceDialog(title,render){
+      if(disposed||maintenanceCancelled)return null;
+      const dialog=host.createDiv({cls:'srs-maintenance-dialog',attr:{role:'dialog','aria-modal':'true','aria-label':title}});
+      dialog.createEl('h3',{text:title});
+      return new Promise(resolve=>{let finished=false;const finish=value=>{if(finished)return;finished=true;maintenanceDialogCancel=null;dialog.remove();resolve(value);};maintenanceDialogCancel=()=>finish(null);render(dialog,finish);});
+    }
+    async function runMaintenance(prune){
+      if(busy||checking||managerDirty||maintenanceActive)return;
+      maintenanceActive=true;maintenanceCancelled=false;busy=true;let maintenanceCache;
+      const buttons=[...host.querySelectorAll('button,select,input,textarea')],disabled=buttons.map(b=>b.disabled);
+      buttons.forEach(b=>b.disabled=true);cancelMaintenanceButton.disabled=false;cancelMaintenanceButton.hidden=false;
+      try{
+        await withStoreLock(identity,async()=>{
+          maintenanceCache=await MaintenanceCache.open(identity);
+          const io={...store,
+            files:()=>api.vault.getFiles().map(f=>({path:f.path,file:true,mtime:f.stat.mtime,size:f.stat.size,version:sourceVersions.get(f.path)||0})),
+            stat:path=>{const f=api.vault.getAbstractFileByPath(path);return f?{path,file:!!f.stat,mtime:f.stat?.mtime,size:f.stat?.size,version:sourceVersions.get(path)||0}:null;},
+            metadata:async(path,text)=>maintenanceMetadata(path,text),
+            replace:async(path,expected,replacement)=>{
+              if(disposed||maintenanceCancelled)throw Error('Maintenance cancelled');
+              const file=api.vault.getAbstractFileByPath(path);if(!file)throw Error(`Source unavailable: ${path}`);
+              if(!api.vault.process)throw Error('This Obsidian version does not support safe source updates');
+              await api.vault.process(file,current=>{if(current!==expected)throw Error(`Source changed: ${path}`);return replacement;});
+            }
+          };
+          const engine=new CardMaintenance(io,root,maintenanceCache,{
+            cancelled:()=>disposed||maintenanceCancelled,
+            progress:stats=>{notice.textContent=`Scanning ${stats.path} · ${stats.parsed_files} parsed · ${stats.reused_files} reused`;},
+            chooseMapping:plan=>maintenanceDialog(`${plan.old_type} → ${plan.new_type}`, (dialog,finish)=>{
+              dialog.createEl('p',{text:`${plan.notes} notes, ${plan.cards} existing cards. Unmapped destination templates create new cards.`});
+              const selectors=new Map();for(const key of plan.old_templates){const row=dialog.createDiv();row.createEl('span',{text:key+' → '});const select=row.createEl('select');select.createEl('option',{value:'',text:'Retire (keep history)'});for(const target of plan.new_templates)select.createEl('option',{value:target,text:target});selectors.set(key,select);}
+              const error=dialog.createEl('p');const apply=dialog.createEl('button',{text:'Apply mapping to these notes'});
+              apply.onclick=()=>{const mapping=Object.fromEntries([...selectors].map(([key,select])=>[key,select.value||null])),targets=Object.values(mapping).filter(Boolean);if(new Set(targets).size!==targets.length){error.textContent='Each destination may be used once.';return;}finish(mapping);};
+              dialog.createEl('button',{text:'Cancel'}).onclick=()=>finish(null);
+            })
+          });
+          const plan=await engine.plan(prune);
+          if(prune){const confirmed=await maintenanceDialog('Prune missing sources',(dialog,finish)=>{
+            dialog.createEl('p',{text:`${plan.result.removable_cards} cards and ${plan.result.removable_notes} notes removable. ${plan.result.protected_cards.length} cards protected.`});
+            for(const [label,records]of [['Removable',plan.result.cards],['Protected',plan.result.protected_cards]]){const details=dialog.createEl('details');details.createEl('summary',{text:label});for(const record of records){const row=details.createDiv();row.createEl('span',{text:`${record.rule} · ${record.card_id} `});if(record.source)row.createEl('a',{text:'Open source',href:`obsidian://open?vault=${encodeURIComponent(api.vault.getName())}&file=${encodeURIComponent(record.source)}`,attr:{target:'_blank',rel:'noopener'}});}}
+            if(plan.result.removable_cards)dialog.createEl('button',{text:'Remove these cards and notes'}).onclick=()=>finish(true);
+            dialog.createEl('button',{text:'Close'}).onclick=()=>finish(false);
+          });if(!confirmed)return;}
+          const result=await engine.apply(plan);notice.textContent=JSON.stringify(result);
+          sessionCache.invalidate();reviewFiles=null;cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;presidents=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;invalidateScanProgress();sourceGeneration++;resetQueues();
+          const scan=result.scan;
+          maintenanceResult=(prune?`Pruned ${result.removable_cards} cards and ${result.removable_notes} notes.`:`Refresh complete: ${result.added} added · ${result.updated} updated · ${result.cards} total cards.`)+` ${scan.parsed_files} files parsed · ${scan.reused_files} reused · ${scan.hashed_files} hashed.`;
+          maintenanceIssues=result.issues||[];
+        });
+      }catch(error){maintenanceResult=error.message;}
+      finally{maintenanceCache?.close();maintenanceActive=false;busy=false;cancelMaintenanceButton.hidden=true;buttons.forEach((b,i)=>b.disabled=disabled[i]);pending=false;if(!disposed){await guardedDraw();notice.textContent=maintenanceResult||'Maintenance closed.';
+        if(maintenanceIssues.length){const details=notice.createEl('details');details.createEl('summary',{text:`${maintenanceIssues.length} source issues`});for(const issue of maintenanceIssues)details.createEl('p',{text:`${issue.rule} · ${issue.path}: ${issue.error}`});}
+      }maintenanceResult='';maintenanceIssues=[];}
+    }
+    let maintenanceResult='',maintenanceIssues=[];
+    refreshCardsButton.onclick=()=>runMaintenance(false);pruneSourcesButton.onclick=()=>runMaintenance(true);
+
     async function json(path) {const text=await store.read(path);if(text===null)throw Error(`Missing SRS file: ${path}`);return JSON.parse(text);}
     async function cachedConfiguration(){if(!runtimeCache||runtimeDirty){runtimeCache=await measure("Configuration",runtimeConfiguration);runtimeDirty=false;}return runtimeCache;}
     async function runtimeConfiguration(){
-      if(await store.read(`${dataRoot}/catalog.pending.json`)!==null)throw Error("Catalog update in progress; rerun discovery if it was interrupted.");
+      if(await store.read(`${dataRoot}/catalog.pending.json`)!==null)throw Error("Catalog update in progress; reopen this view to recover it.");
       if(await store.read(`${root}/config/sources.json`)!==null){
         const parts={};
         await Promise.all(Object.entries({sources:"config/sources.json",cards:"config/cards.json",decks:"config/decks.json",assignments:"config/profile-rules.json",profiles:"data/profiles.json"}).map(async([key,path])=>{parts[key]=await json(`${root}/${path}`);}));
@@ -521,7 +596,7 @@
       homepage.createEl("button",{text:panel==="profiles"?"Open scheduling profiles":"Open source rules"}).onclick=()=>api.workspace.openLinkText(`${root}/${studyParts?(panel==="profiles"?"data/profiles.json":"config/sources.json"):"study.json"}`,"","tab");
       if(section==="sources"){
         homepage.createEl("p",{text:"Rules create cards from your vault content. Templates define the questions; study decks select which cards to practice."});
-        homepage.createEl("p",{text:"Discover additions on desktop from tools/: uv run python srs.py refresh-cards. Then Refresh here to load them. This preserves existing schedules and review logs."});
+        homepage.createEl("p",{text:"Use Tools → Refresh cards to discover additions. Existing schedules and review logs are preserved."});
         for(const [id,rule] of Object.entries(studyConfig.source_rules)){
           const row=homepage.createDiv({cls:"srs-card-editor"});row.createEl("h3",{text:id});
           row.createEl("p",{text:rule.sources.join(", ")});row.createEl("p",{text:`Templates: ${rule.templates.join(", ")}`});
@@ -646,6 +721,7 @@
       profilesButton.setAttribute("aria-pressed",String(panel==="profiles"));
       sourcesButton.setAttribute("aria-pressed",String(panel==="sources"));
       manage.setAttribute("aria-pressed",String(managing));
+      if(catalogDirty)await withStoreLock(identity,()=>new CatalogPublisher(store,dataRoot).recover());
       const freshManifest=catalogDirty?await json(`${dataRoot}/manifest.json`):baseManifest;
       if(freshManifest.import_id!==baseManifest.import_id)throw Error("Imported baseline changed; reopen this view");
       if(freshManifest.revision!==baseManifest.revision){invalidateScanProgress();await loadCatalog(freshManifest);resolvedCards=null;contentCache.clear();metadataCache.clear();resetQueues();}
@@ -855,7 +931,7 @@
     manage.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=true;managerDirty=false;guardedDraw();};
     select.onchange=()=>{operation++;checking=false;if(!leaveEditor()){select.value=activeGroup;return;}activeGroup=select.value;panel="";managing=false;managerDirty=false;reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
     refresh.onclick=()=>{if(managerDirty){notice.textContent="Save or discard changes before refreshing.";return;}reviewFiles=null;cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;presidents=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;invalidateScanProgress();sourceGeneration++;operation++;checking=false;resetQueues();guardedDraw();};
-    rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,async()=>{sessionCache.invalidate();await index.clear();await catalogCache?.clear();});}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
+    rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,async()=>{sessionCache.invalidate();await index.clear();await catalogCache?.clear();const maintenanceCache=await MaintenanceCache.open(identity);try{await maintenanceCache.cache.clear();}finally{maintenanceCache.close();}});}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     profilesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="profiles";guardedDraw();};
     sourcesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="sources";guardedDraw();};
     function catalogDirectory(value,kind){
@@ -881,6 +957,7 @@
       baseManifest=value;rawCards=nextCards;noteBindings=nextNotes;cards=hydrated;knownCardIds=new Set(cards.map(c=>c.id));
     }
     try {
+      await withStoreLock(identity,()=>new CatalogPublisher(store,dataRoot).recover());
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");
       if(manifest.partition_count!==undefined && (!Number.isSafeInteger(manifest.partition_count)||manifest.partition_count<0))throw Error("Invalid card partition count");
       catalogCache=await CatalogCache.open(identity);

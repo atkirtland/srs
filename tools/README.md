@@ -4,48 +4,32 @@ Run from this directory:
 
 ```sh
 uv sync --locked
-uv run python srs.py refresh-cards
 uv run python srs.py train --profile preset-1 --apply
 ```
 
 Defaults point to `../config/`, `../data/`, and the containing vault.
 Profiles live in `../data/profiles.json`. `--config` selects another configuration
 directory; `--data` selects its store. Legacy `--study <study.json>` remains
-available for compatibility. `refresh-cards` automatically assigns missing IDs to CSV rows, eligible structural
-notes, and blocks while retaining existing identities. No separate seeding step is needed.
+available for compatibility.
 
-`refresh-cards` and `prune-missing-sources` cache per-file discovery results in
-`tools/.cache/source-scans.sqlite3` (relative to the selected data directory's
-parent). The cache contains IDs and generated bindings, never source text or field
-values. Both commands still enumerate configured paths to detect additions,
-moves, and deletions. Unchanged filesystem signatures skip reading and parsing;
-changed signatures trigger a content hash, and only changed content is reparsed.
-Refresh also invalidates affected results when source rules/templates change;
-parser changes invalidate all results. Files receiving newly seeded IDs are
-verified again on the next run. Each command reports `scan` counts for parsed,
-reused, and hashed files. The first run builds its cache; later runs reuse it.
-Delete this disposable cache to force a full scan. No command syntax changes.
-An unchanged run checks input file signatures and returns its previous no-change
-result without loading catalogs or reconstructing card bindings. Catalog partitions,
-configuration, source paths/stat signatures, parser code, and (for prune) review-log
-paths/stat signatures invalidate that checkpoint. Directory enumeration still runs
-to detect new/deleted files. Changed runs reconcile the catalog as before.
-Prune loads each catalog partition once and reads review logs only if there are
-missing-source candidates without baseline reviews. Per-log caches retain only
-referenced card IDs; changed/deleted logs are detected on subsequent runs. Missing
-configured source roots still prevent pruning, including on the fast path.
+Refresh and prune are UI-only: **Tools → Refresh cards** and **Tools → Prune missing
+sources** in the reviewer, on desktop or Android. The prune preview requires an
+explicit removal action. No Python or Node is required for these operations.
+The browser maintenance engine uses device-local IndexedDB for disposable scan
+results containing identities and bindings, never source content. Unchanged runs
+skip catalog/source reads; changed files are hashed before reparsing. Rebuild local
+index clears this cache. See the root README for cancellation and recovery behavior.
+Run maintenance on only one syncing device at a time.
 
 Omit `--apply` to train and evaluate without updating a profile.
 
 | Command | Purpose |
 | --- | --- |
 | `srs.py audit-decks` | Flag cards matching a parent but none of its descendants; report IDs without changing decks. Exit 0: clear; 1: gaps; 2: failure. |
-| `srs.py prune-missing-sources` | Preview removal of unreviewed generated cards with missing sources; `--apply` removes eligible cards. |
-| `srs.py refresh-cards` | Discover source/template card variants while preserving identities, schedules, and logs. |
 | `srs.py train --profile <id>` | Train and evaluate standalone FSRS from unified reviews; `--apply` updates future answers. |
 | `build.py` | Rebuild the standalone reviewer from browser sources. |
 
-The `srs_tools/` package contains the ongoing CLI, source discovery, training,
+The `srs_tools/` package contains the ongoing CLI, training,
 vault parsers/transformations, identity helpers, and metadata-store helpers.
 It does not import migration modules or load the old Anki export registry.
 Its environment has no Anki, BeautifulSoup, markdownify, or PyTorch dependency.
@@ -95,3 +79,19 @@ Completed-file checkpoints remain compatible. Imported-history database requests
 are batched, and indexing yields between batches so mobile views can respond to
 lifecycle events. The displayed indexing counter counts records processed in the
 current pass, so it restarts on reopening even when earlier work is reused.
+
+`browser/browser-maintenance.js` owns ongoing discovery and pruning. The Python
+implementation is frozen under `tests/maintenance_reference/` solely as a parity
+oracle; runtime commands do not import it. Bump the maintenance cache namespace
+when changing generation or identity behavior.
+
+Refresh and prune share per-file content hashes and source identities. The first
+operation also computes metadata-only generation results for reuse by refresh;
+no source text, bodies, or field values are cached. Running the other operation
+against unchanged files therefore needs no source reads or parsing, including
+after reopening the reviewer. Generation-rule edits invalidate generation results
+but preserve reusable source identities. Prune never inserts IDs: if it encounters
+unidentified notes, refresh must revisit those files to seed them. Final no-change
+checkpoints remain operation-specific because prune also depends on review logs.
+The shared-cache format uses a new namespace, so the first run after this update
+rebuilds the disposable cache once.

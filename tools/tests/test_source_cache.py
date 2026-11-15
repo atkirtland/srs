@@ -5,9 +5,10 @@ import unittest
 from unittest.mock import patch
 
 import test_study as fixtures
-from srs_tools import layout, study
-from srs_tools.prune import prune
-from srs_tools.source_cache import source_cache
+from srs_tools import layout
+from maintenance_reference import study
+from maintenance_reference.prune import prune
+from maintenance_reference.source_cache import source_cache
 
 
 class IncrementalTests(unittest.TestCase):

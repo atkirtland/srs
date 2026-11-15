@@ -3,7 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-from srs_tools import study, core
+from srs_tools import core
+from maintenance_reference import study
 
 class BlockIdentityTest(unittest.TestCase):
     def test_existing_anki_marker_wins_without_rewriting(self):

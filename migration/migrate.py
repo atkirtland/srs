@@ -38,7 +38,7 @@ def forward_ongoing(argv):
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] in {'refresh-cards', 'train'}:
+    if argv and argv[0] in {'train'}:
         return forward_ongoing(argv)
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)

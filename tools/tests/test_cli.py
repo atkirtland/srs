@@ -27,30 +27,13 @@ class CliTests(unittest.TestCase):
         with redirect_stdout(output),self.assertRaises(SystemExit) as result:
             cli.main(['--help'])
         self.assertEqual(result.exception.code,0)
-        self.assertIn('refresh-cards',output.getvalue())
+        self.assertNotIn('refresh-cards',output.getvalue())
+        self.assertNotIn('prune-missing-sources',output.getvalue())
         self.assertIn('train',output.getvalue())
         self.assertNotIn('init-study',output.getvalue())
         self.assertNotIn('inspect',output.getvalue())
         for removed in ('install-view', 'upgrade-layout', 'seed-csv-uids'):
             self.assertNotIn(removed, output.getvalue())
-
-    def test_refresh_works_from_another_directory_without_legacy_imports(self):
-        fixture=self.fixture()
-        (fixture.root/'words.csv').write_text('word,definition\nspume,foam\n')
-        code='''import sys
-class NoMigrationImports:
- def find_spec(self,name,*args):
-  if name.split('.')[0] in {'anki','catalog','scheduling','sources','configuration','bootstrap'}:
-   raise AssertionError('Ongoing tools imported migration module: '+name)
-sys.meta_path.insert(0,NoMigrationImports())
-from srs_tools.cli import main
-raise SystemExit(main(sys.argv[1:]))
-'''
-        result=subprocess.run([sys.executable,'-c',code,'refresh-cards','--data',str(fixture.data),
-                               '--study',str(fixture.study),'--config',str(fixture.config),'--vault',str(fixture.root)],
-                              cwd=fixture.root,env={**__import__('os').environ,'PYTHONPATH':str(TOOLS)},capture_output=True,text=True)
-        self.assertEqual(result.returncode,0,result.stderr)
-        self.assertEqual(json.loads(result.stdout)['added'],1)
 
     def test_training_cli_applies_in_ongoing_environment(self):
         fixture=self.fixture();fixture.training_fixture()

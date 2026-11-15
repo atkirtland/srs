@@ -10,7 +10,8 @@ import uuid
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from srs_tools import study, training, core as srs
+from srs_tools import training, core as srs
+from maintenance_reference import study
 
 WEIGHTS=[0.4, 0.6, 2.4, 5.8, 4.9, 0.9, 0.8, 0.01, 1.5, 0.1, 0.9, 2.0, 0.1, 0.3, 1.6, 0.2, 2.9, 0.5, 0.6]
 
@@ -91,7 +92,7 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(self.refresh()['added'],0)
 
     def test_type_conversion_prompt_and_noninteractive_refusal(self):
-        from srs_tools.conversion import prompt_mapping
+        from maintenance_reference.conversion import prompt_mapping
         plan=dict(old_type='old',new_type='new',notes=3,cards=6,
                   old_templates=['read','speak'],new_templates=['recognition','production'])
         with patch('sys.stdin.isatty',return_value=True), patch('builtins.input',side_effect=['1','0','y']), patch('sys.stderr'):
@@ -386,5 +387,5 @@ training.train(__import__('pathlib').Path(sys.argv[1]), __import__('pathlib').Pa
 assert not any(name == 'anki' or name.startswith('anki.') for name in sys.modules)
 """
         self.training_fixture()
-        result=subprocess.run([sys.executable,'-c',code,str(self.data),str(self.study)],env={**__import__('os').environ,'PYTHONPATH':str(Path(study.__file__).parent.parent)},capture_output=True,text=True)
+        result=subprocess.run([sys.executable,'-c',code,str(self.data),str(self.study)],env={**__import__('os').environ,'PYTHONPATH':str(Path(__file__).resolve().parents[1])},capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)

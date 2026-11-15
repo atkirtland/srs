@@ -1,7 +1,8 @@
 import unittest
 import test_study as fixtures
-from srs_tools import layout, study
-from srs_tools.prune import prune
+from srs_tools import layout
+from maintenance_reference import study
+from maintenance_reference.prune import prune
 
 class PruneTests(unittest.TestCase):
     def setUp(self):
