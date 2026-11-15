@@ -38,6 +38,8 @@
     globalThis.addEventListener?.("resize",sizeReviewer);
     globalThis.visualViewport?.addEventListener("resize",sizeReviewer);
     component.register(()=>{globalThis.removeEventListener?.("resize",sizeReviewer);globalThis.visualViewport?.removeEventListener("resize",sizeReviewer);});
+    const sessionCache=ReviewerSessionCache.forVault(api.vault,api.metadataCache);
+    let readyEpoch=-1;
     const dirty = new Set(), cache = new Map(), skipped = new Set();
     let taxonomy, presidents;
     let progressStorage;try{progressStorage=globalThis.sessionStorage;}catch{}
@@ -52,16 +54,16 @@
     }
     function invalidateScanProgress(){scanSignature=undefined;scanProgress.invalidate();}
 
-    const contentCache=new Map(), metadataCache=new Map(), metrics=[];
-    const counters={fileReads:0,sourceReads:0,renders:0,indexSyncs:0,schedulingBuilds:0,cardPreparations:0};
+    let contentCache=new Map(), metadataCache=new Map();const metrics=[];
+    const counters={fileReads:0,sourceReads:0,renders:0,indexSyncs:0,schedulingBuilds:0,cardPreparations:0,sessionRestores:0};
     let hydrationKey, statesSnapshot, statesRevision;
-    const profileCache=new Map();
+    let profileCache=new Map();
     let runtimeCache, snapshotCache, runtimeDirty=true, indexDirty=true, catalogDirty=true;
     let operation=0, checking=false, membershipCache=new Map();
     let schedulingIndex, runtimeCards, runtimeSources, runtimeSnapshot;
-    const runtimePositions=new Map(), knownErrors=new Map();
+    let runtimePositions=new Map(), knownErrors=new Map();
     let runtimeLoaded, runtimeBase;
-    let knownCardIds, reviewFiles;
+    let knownCardIds, reviewFiles, catalogCache;
     const clock=()=>globalThis.performance?.now?.()??Date.now();
     async function measure(name,fn){const start=clock();try{return await fn();}finally{metrics.push({name,ms:Math.round((clock()-start)*100)/100});if(metrics.length>60)metrics.shift();}}
     const performanceButton=toolBody.createEl("button",{text:"Performance details"});
@@ -131,7 +133,7 @@
     deviceSelect.value=deviceId;
     localStorage.setItem(`${identity}:device-name`,deviceId);
     deviceSelect.onchange=()=>{deviceId=deviceSelect.value;localStorage.setItem(`${identity}:device-name`,deviceId);};
-    component.register(() => {scanProgress.save();disposed=true;operation++;clearTimeout(refreshTimer);index?.close();});
+    component.register(() => {saveRuntime();scanProgress.save();disposed=true;operation++;clearTimeout(refreshTimer);index?.close();catalogCache?.close();});
     const store = {
       async list(directory) {return directory===`${dataRoot}/reviews`?[...reviewFileMap().values()]:api.vault.getFiles().filter(f=>f.path.startsWith(directory+"/"));},
       async read(path) {counters.fileReads++;const f=api.vault.getAbstractFileByPath(path);return f ? api.vault.read(f) : null;},
@@ -231,7 +233,9 @@
       }
       const file=api.vault.getAbstractFileByPath(path);
       if(!file)throw Error(`Missing vault source: ${path}`);
-      const data=await noteAt(file);
+      // Membership needs raw properties/tags, never rendered fields or taxonomy preparation.
+      const cachedMetadata=metadataOnly&&card.source.kind!=="block"&&!path.endsWith(".csv")?api.metadataCache.getFileCache(file)?.frontmatter:null;
+      const data=cachedMetadata?{metadata:cachedMetadata}:await noteAt(file);
       let metadata=data.rows?data.rows.get(card.note_uid):data.metadata;
       if(card.source.prepare==="prepare_taxonomy_notes") {
         if(!taxonomy) {
@@ -285,12 +289,23 @@
       const generation=sourceGeneration;
 
       const result=[];
-      const needsMetadata=/"(?:tags|tag_prefixes|properties)"/.test(JSON.stringify({decks:studyConfig?.decks,rules:studyConfig?.profile_rules}));
-      for(const configured of configuredCards(cards,config)) {
+      const metadataFilters=[...Object.values(studyConfig?.decks||{}).map(d=>d.filter),...(studyConfig?.profile_rules||[]).map(r=>r.filter)].filter(filter=>/"(?:tags|tag_prefixes|properties)"/.test(JSON.stringify(filter)));
+      const prepared=configuredCards(cards,config).map(configured=>{
         const rule=studyConfig?.source_rules[configured.group];
         const card=rule && configured.source ? {...configured,source:{...configured.source,fields:rule.fields,prepare:rule.prepare||null}}:configured;
+        return {card,needsMetadata:!card.retired&&metadataFilters.some(filter=>studyFilterNeedsMetadata(card,filter,manifest))};
+      });
+      // Fetch each directly located text source once, with bounded concurrency.
+      // Resolution below still reports source errors on the individual card.
+      const files=new Map();
+      for(const {card,needsMetadata} of prepared)if(needsMetadata&&!metadataCache.has(card.id)&&card.source?.path){
+        const file=api.vault.getAbstractFileByPath(card.source.path);
+        if(file&&(card.source.kind==="block"||file.path.endsWith(".csv")||!api.metadataCache.getFileCache(file)?.frontmatter))files.set(file.path,file);
+      }
+      await readCatalogPartitions([...files.values()],async file=>{try{await noteAt(file);}catch{}return [];});
+      for(const {card,needsMetadata} of prepared){
         try {
-          if(needsMetadata&&!card.retired){if(!metadataCache.has(card.id))metadataCache.set(card.id,await resolveSource({...card},true));result.push(metadataCache.get(card.id));}
+          if(needsMetadata){if(!metadataCache.has(card.id))metadataCache.set(card.id,await resolveSource({...card},true));result.push(metadataCache.get(card.id));}
           else result.push({...card,validation:"unchecked"});
         }
         catch(e) {result.push({...card,content_error:e.message});}
@@ -616,7 +631,12 @@
       }catch(e){message(e);homepage.querySelectorAll("button").forEach(button=>button.disabled=false);}
       finally{busy=false;if(pending && !managerDirty){pending=false;scheduleRefresh();}}
     }
-    async function draw() {
+    async function draw(){
+      const epoch=sessionCache.epoch;readyEpoch=-1;
+      await drawContents();
+      if(epoch===sessionCache.epoch)readyEpoch=epoch;
+    }
+    async function drawContents() {
       if(disposed)return;
       clearCard();counts.empty();notice.textContent="";
       host.setAttribute("data-reviewing",String(reviewing&&!managing&&!panel));
@@ -763,6 +783,25 @@
       }catch(e){clearCard();message(e);notice.textContent+=" — review paused. Refresh to retry.";}
       finally{busy=false;if(pending){pending=false;scheduleRefresh();}}
     }
+    function saveRuntime(){
+      if(disposed||busy||checking||pending||runtimeDirty||indexDirty||catalogDirty||!schedulingIndex)return;
+      sessionCache.save(identity,readyEpoch,{baseManifest,rawCards,noteBindings,cards,knownCardIds,
+        runtimeCache,snapshotCache,hydrationKey,statesSnapshot,statesRevision,states,
+        runtimeLoaded,runtimeBase,studyConfig,studyParts,studyKey,manifest,config,configKey,
+        resolvedCards,resolvedConfig,resolvedGeneration,sourceGeneration,
+        runtimeCards,runtimeSources,runtimeSnapshot,runtimePositions,knownErrors,
+        membershipCache,profileCache,schedulingIndex,contentCache,metadataCache,scanSignature});
+    }
+    function restoreRuntime(saved){
+      ({baseManifest,rawCards,noteBindings,cards,knownCardIds,
+        runtimeCache,snapshotCache,hydrationKey,statesSnapshot,statesRevision,states,
+        runtimeLoaded,runtimeBase,studyConfig,studyParts,studyKey,manifest,config,configKey,
+        resolvedCards,resolvedConfig,resolvedGeneration,sourceGeneration,
+        runtimeCards,runtimeSources,runtimeSnapshot,runtimePositions,knownErrors,
+        membershipCache,profileCache,schedulingIndex,contentCache,metadataCache,scanSignature}=saved);
+      runtimeDirty=false;catalogDirty=false;indexDirty=true;
+      schedulingIndex.clearBuried();counters.sessionRestores++;
+    }
     async function guardedDraw(){if(disposed)return;if(checking || busy || managerDirty){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
     undoButton.onclick=async()=>{
       if(busy||!undoReview)return;
@@ -816,7 +855,7 @@
     manage.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=true;managerDirty=false;guardedDraw();};
     select.onchange=()=>{operation++;checking=false;if(!leaveEditor()){select.value=activeGroup;return;}activeGroup=select.value;panel="";managing=false;managerDirty=false;reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
     refresh.onclick=()=>{if(managerDirty){notice.textContent="Save or discard changes before refreshing.";return;}reviewFiles=null;cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;presidents=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;invalidateScanProgress();sourceGeneration++;operation++;checking=false;resetQueues();guardedDraw();};
-    rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
+    rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,async()=>{sessionCache.invalidate();await index.clear();await catalogCache?.clear();});}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     profilesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="profiles";guardedDraw();};
     sourcesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="sources";guardedDraw();};
     function catalogDirectory(value,kind){
@@ -824,15 +863,19 @@
       if(value.catalog_layout==="flat")return kind;
       return `${value.catalog_layout==="split"?kind:"imports"}/${value.revision}`;
     }
-    async function readPartitions(paths){return measure("Catalog partitions",()=>readCatalogPartitions(paths,json));}
+    async function readPartitions(paths,kind){
+      const versions=paths.map(path=>{const f=api.vault.getAbstractFileByPath(path);return f?.stat?[path,f.stat.mtime,f.stat.size]:null;});
+      const signature=versions.every(Boolean)?JSON.stringify(versions):null;
+      return measure("Catalog partitions",()=>catalogCache.read(kind,signature,()=>readCatalogPartitions(paths,json)));
+    }
     async function loadCatalog(value){
 
       const paths=value.partition_count===undefined?value.partitions:Array.from({length:value.partition_count},(_,i)=>`${catalogDirectory(value,"cards")}/cards-${String(i).padStart(5,"0")}.json`);
-      const nextCards=await readPartitions(paths.map(path=>`${dataRoot}/${path}`));
+      const nextCards=await readPartitions(paths.map(path=>`${dataRoot}/${path}`),"cards");
       let nextNotes=[];
       if(value.note_partition_count!==undefined){
         if(!Number.isSafeInteger(value.note_partition_count)||value.note_partition_count<0)throw Error("Invalid note partition count");
-        nextNotes=await readPartitions(Array.from({length:value.note_partition_count},(_,i)=>`${dataRoot}/${catalogDirectory(value,"notes")}/notes-${String(i).padStart(5,"0")}.json`));
+        nextNotes=await readPartitions(Array.from({length:value.note_partition_count},(_,i)=>`${dataRoot}/${catalogDirectory(value,"notes")}/notes-${String(i).padStart(5,"0")}.json`),"notes");
       }
       const hydrated=value.note_partition_count===undefined?nextCards:hydrateCatalog(nextCards,nextNotes,(await cachedConfiguration()).study);
       baseManifest=value;rawCards=nextCards;noteBindings=nextNotes;cards=hydrated;knownCardIds=new Set(cards.map(c=>c.id));
@@ -840,7 +883,11 @@
     try {
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");
       if(manifest.partition_count!==undefined && (!Number.isSafeInteger(manifest.partition_count)||manifest.partition_count<0))throw Error("Invalid card partition count");
-      await loadCatalog(manifest);
+      catalogCache=await CatalogCache.open(identity);
+      if(disposed){catalogCache.close();return;}
+      const saved=sessionCache.take(identity);
+      if(saved&&canonical(saved.baseManifest)===canonical(manifest))restoreRuntime(saved);
+      else await loadCatalog(manifest);
       index=await ReviewIndex.open(identity,manifest.import_id,manifest.timing);if(disposed){index.close();return;}
       select.createEl("option",{text:"All template groups",value:""});
       for(const group of [...new Set(cards.map(c=>c.group).filter(Boolean))].sort())select.createEl("option",{text:group,value:group});

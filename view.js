@@ -2879,6 +2879,55 @@ class ContentCheckProgress {
   save(){try{this.storage.setItem(this.key,JSON.stringify({version:2,signature:this.signature,results:[...this.results],active:this.active,deck:this.deck,group:this.group}));}catch{}}
   invalidate(){this.signature=null;this.results.clear();this.active=false;this.save();}
 }
+// One unowned runtime per vault/root, kept only for this app session. Ownership is
+// transferred on reopen so two reviewer views never mutate the same indexes.
+class ReviewerSessionCache {
+  static forVault(vault,metadataCache) {
+    const stores=globalThis.__srsReviewerSessionsV1||(globalThis.__srsReviewerSessionsV1=new WeakMap());
+    if(!stores.has(vault)){
+      const cache=new ReviewerSessionCache();stores.set(vault,cache);
+      const invalidate=()=>cache.invalidate();
+      for(const event of ["create","modify","delete","rename"])vault.on(event,invalidate);
+      metadataCache?.on("changed",invalidate);
+    }
+    return stores.get(vault);
+  }
+  constructor(){this.epoch=0;this.entries=new Map();}
+  invalidate(){this.epoch++;this.entries.clear();}
+  save(key,epoch,value){if(epoch===this.epoch)this.entries.set(key,value);}
+  take(key){const value=this.entries.get(key);this.entries.delete(key);return value;}
+}
+// Disposable device-local metadata cache. Vault files remain authoritative.
+class CatalogCache {
+  static async open(name,factory=globalThis.indexedDB) {
+    try {
+      const db=await new Promise((resolve,reject)=>{
+        const request=factory.open(name+":catalog-cache",1);
+        request.onupgradeneeded=()=>request.result.createObjectStore("partitions");
+        request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
+      });
+      db.onversionchange=()=>db.close();return new CatalogCache(db);
+    }catch{return new CatalogCache(null);}
+  }
+  constructor(db){this.db=db;}
+  async transaction(mode,fn){
+    if(!this.db)return null;
+    return new Promise((resolve,reject)=>{
+      const tx=this.db.transaction("partitions",mode),request=fn(tx.objectStore("partitions"));
+      tx.oncomplete=()=>resolve(request?.result);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);
+    });
+  }
+  async read(key,signature,load) {
+    if(signature!==null){
+      try{const saved=await this.transaction("readonly",s=>s.get(key));if(saved?.signature===signature&&Array.isArray(saved.cards))return saved.cards;}catch{}
+    }
+    const cards=await load();
+    if(signature!==null)try{await this.transaction("readwrite",s=>s.put({signature,cards},key));}catch{}
+    return cards;
+  }
+  async clear(){try{await this.transaction("readwrite",s=>s.clear());}catch{}}
+  close(){this.db?.close();}
+}
 async function readCatalogPartitions(paths,read){
   const results=new Array(paths.length);let next=0;
   await Promise.all(Array.from({length:Math.min(4,paths.length)},async()=>{
@@ -2932,16 +2981,39 @@ function matchesStudyFilter(card,query,manifest) {
     while(query.include_children && deck?.parent_id){ids.add(deck.parent_id);deck=manifest.scheduling.decks[deck.parent_id];}
     if(!query.deck_ids.some(id=>ids.has(id)))return false;
   }
-  const tags=new Set([...(card.source_tags||[]),...(card.card_settings?.tags||[])]);
-  if(query.tags && !query.tags.every(tag=>tags.has(tag)))return false;
-  const normalizedTags=[...tags].map(tag=>tag.replaceAll("::","/"));
-  if(query.tag_prefixes && !query.tag_prefixes.every(prefix=>{const p=prefix.replaceAll("::","/");return normalizedTags.some(tag=>tag===p||tag.startsWith(p+"/"));}))return false;
+  if(query.tags?.length||query.tag_prefixes?.length){
+    const tags=new Set([...(card.source_tags||[]),...(card.card_settings?.tags||[])]);
+    if(query.tags && !query.tags.every(tag=>tags.has(tag)))return false;
+    if(query.tag_prefixes?.length){
+      const normalizedTags=[...tags].map(tag=>tag.replaceAll("::","/"));
+      if(!query.tag_prefixes.every(prefix=>{const p=prefix.replaceAll("::","/");return normalizedTags.some(tag=>tag===p||tag.startsWith(p+"/"));}))return false;
+    }
+  }
   for(const [key,expected] of Object.entries(query.properties||{})) {
     if(expected && typeof expected==="object" && !Array.isArray(expected)){
       if(Object.hasOwn(card.properties||{},key)!==expected.exists)return false;
     }else if(canonical(card.properties?.[key])!==canonical(expected))return false;
   }
   return true;
+}
+// Three-valued matching: null means source tags/properties can change the result.
+// Evaluate catalog-only constraints first, including within nested boolean filters.
+function studyFilterNeedsMetadata(card,query,manifest) {
+  function evaluate(q) {
+    const {all,any,not,tags,tag_prefixes,properties,...catalog}=q;
+    if(!matchesStudyFilter(card,catalog,manifest))return false;
+    const terms=[];
+    if(all)terms.push(combine(all.map(evaluate),false));
+    if(any)terms.push(combine(any.map(evaluate),true));
+    if(not){const value=evaluate(not);terms.push(value===null?null:!value);}
+    if(tags?.length||tag_prefixes?.length||Object.keys(properties||{}).length)terms.push(null);
+    return combine(terms,false);
+  }
+  function combine(values,or) {
+    if(values.includes(or))return or;
+    return values.includes(null)?null:!or;
+  }
+  return evaluate(query)===null;
 }
 function validateStudy(config) {
   if(config?.format_version!==1||!config.profiles||!Object.keys(config.profiles).length||!config.profiles[config.default_profile])throw Error("Invalid study configuration");
@@ -2996,7 +3068,12 @@ function studyMemberships(cards,config,manifest){
     if(!children.has(deck.parent_id))children.set(deck.parent_id,[]);
     children.get(deck.parent_id).push(id);
   }
-  for(const card of cards)if(!card.retired)for(const [id,deck] of Object.entries(config.decks))if(matchesStudyFilter(card,deck.filter,manifest))result.get(id).add(card.id);
+  const active=[],groups=new Map();
+  for(const card of cards)if(!card.retired){active.push(card);if(!groups.has(card.group))groups.set(card.group,[]);groups.get(card.group).push(card);}
+  for(const [id,deck] of Object.entries(config.decks)){
+    const candidates=deck.filter.groups?[...new Set(deck.filter.groups)].flatMap(group=>groups.get(group)||[]):active;
+    for(const card of candidates)if(matchesStudyFilter(card,deck.filter,manifest))result.get(id).add(card.id);
+  }
   const merge=id=>{const target=result.get(id);for(const child of children.get(id)||[])for(const cid of merge(child))target.add(cid);return target;};
   for(const id of children.get(null)||[])merge(id);
   // Root parent_id may be omitted in older documents.
@@ -3158,6 +3235,12 @@ class SchedulingIndex {
     const card=this.cards.get(id),kind=this.kinds.get(id);if(!kind)return;
     for(const key of this.reverse.get(id)||[]){const scope=this.scopes.get(key);scope.buckets.get(card.deck_id).orders[kind].remove(card);scope.orders[kind].remove(card);}
   }
+  clearBuried(){
+    const ids=[...this.buried];this.buried.clear();
+    for(const id of ids){const card=this.cards.get(id),kind=this.kinds.get(id);if(!card||!kind)continue;
+      for(const key of this.reverse.get(id)||[]){const scope=this.scopes.get(key);scope.buckets.get(card.deck_id).orders[kind].insert(card);scope.orders[kind].insert(card);}
+    }
+  }
   queue(id=null,group=''){
     this.stats.queueReads++;const scope=this.scopes.get(this.key(id,group));if(!scope)return {...this.counts(id,group),cards:[]};
     let best;const take=c=>{if(c&&(!best||this.compareDue(c,best)<0))best=c;};
@@ -3200,7 +3283,7 @@ class SchedulingIndex {
 }
 
   if (globalThis.__SRS_TEST__) {
-    globalThis.SRS = {ContentCheckProgress, preparePresidents, groupContentErrors, SchedulingIndex, SchedulingOrder, readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, schedulerV2, effectiveSettings, renderV2, templateScriptParts, runTemplateScripts, resolveImageEmbeds, transformField, fieldsFromNote,
+    globalThis.SRS = {ReviewerSessionCache, CatalogCache, ContentCheckProgress, preparePresidents, groupContentErrors, SchedulingIndex, SchedulingOrder, readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, studyFilterNeedsMetadata, schedulerV2, effectiveSettings, renderV2, templateScriptParts, runTemplateScripts, resolveImageEmbeds, transformField, fieldsFromNote,
       deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
       ReviewIndex, appendReview, validateEvent, saveSchedulerConfig, verifySchedulerConfig, parseCSV, indexRows, configuredCards, initialState};
     return;
@@ -3245,6 +3328,8 @@ class SchedulingIndex {
     globalThis.addEventListener?.("resize",sizeReviewer);
     globalThis.visualViewport?.addEventListener("resize",sizeReviewer);
     component.register(()=>{globalThis.removeEventListener?.("resize",sizeReviewer);globalThis.visualViewport?.removeEventListener("resize",sizeReviewer);});
+    const sessionCache=ReviewerSessionCache.forVault(api.vault,api.metadataCache);
+    let readyEpoch=-1;
     const dirty = new Set(), cache = new Map(), skipped = new Set();
     let taxonomy, presidents;
     let progressStorage;try{progressStorage=globalThis.sessionStorage;}catch{}
@@ -3259,16 +3344,16 @@ class SchedulingIndex {
     }
     function invalidateScanProgress(){scanSignature=undefined;scanProgress.invalidate();}
 
-    const contentCache=new Map(), metadataCache=new Map(), metrics=[];
-    const counters={fileReads:0,sourceReads:0,renders:0,indexSyncs:0,schedulingBuilds:0,cardPreparations:0};
+    let contentCache=new Map(), metadataCache=new Map();const metrics=[];
+    const counters={fileReads:0,sourceReads:0,renders:0,indexSyncs:0,schedulingBuilds:0,cardPreparations:0,sessionRestores:0};
     let hydrationKey, statesSnapshot, statesRevision;
-    const profileCache=new Map();
+    let profileCache=new Map();
     let runtimeCache, snapshotCache, runtimeDirty=true, indexDirty=true, catalogDirty=true;
     let operation=0, checking=false, membershipCache=new Map();
     let schedulingIndex, runtimeCards, runtimeSources, runtimeSnapshot;
-    const runtimePositions=new Map(), knownErrors=new Map();
+    let runtimePositions=new Map(), knownErrors=new Map();
     let runtimeLoaded, runtimeBase;
-    let knownCardIds, reviewFiles;
+    let knownCardIds, reviewFiles, catalogCache;
     const clock=()=>globalThis.performance?.now?.()??Date.now();
     async function measure(name,fn){const start=clock();try{return await fn();}finally{metrics.push({name,ms:Math.round((clock()-start)*100)/100});if(metrics.length>60)metrics.shift();}}
     const performanceButton=toolBody.createEl("button",{text:"Performance details"});
@@ -3338,7 +3423,7 @@ class SchedulingIndex {
     deviceSelect.value=deviceId;
     localStorage.setItem(`${identity}:device-name`,deviceId);
     deviceSelect.onchange=()=>{deviceId=deviceSelect.value;localStorage.setItem(`${identity}:device-name`,deviceId);};
-    component.register(() => {scanProgress.save();disposed=true;operation++;clearTimeout(refreshTimer);index?.close();});
+    component.register(() => {saveRuntime();scanProgress.save();disposed=true;operation++;clearTimeout(refreshTimer);index?.close();catalogCache?.close();});
     const store = {
       async list(directory) {return directory===`${dataRoot}/reviews`?[...reviewFileMap().values()]:api.vault.getFiles().filter(f=>f.path.startsWith(directory+"/"));},
       async read(path) {counters.fileReads++;const f=api.vault.getAbstractFileByPath(path);return f ? api.vault.read(f) : null;},
@@ -3438,7 +3523,9 @@ class SchedulingIndex {
       }
       const file=api.vault.getAbstractFileByPath(path);
       if(!file)throw Error(`Missing vault source: ${path}`);
-      const data=await noteAt(file);
+      // Membership needs raw properties/tags, never rendered fields or taxonomy preparation.
+      const cachedMetadata=metadataOnly&&card.source.kind!=="block"&&!path.endsWith(".csv")?api.metadataCache.getFileCache(file)?.frontmatter:null;
+      const data=cachedMetadata?{metadata:cachedMetadata}:await noteAt(file);
       let metadata=data.rows?data.rows.get(card.note_uid):data.metadata;
       if(card.source.prepare==="prepare_taxonomy_notes") {
         if(!taxonomy) {
@@ -3492,12 +3579,23 @@ class SchedulingIndex {
       const generation=sourceGeneration;
 
       const result=[];
-      const needsMetadata=/"(?:tags|tag_prefixes|properties)"/.test(JSON.stringify({decks:studyConfig?.decks,rules:studyConfig?.profile_rules}));
-      for(const configured of configuredCards(cards,config)) {
+      const metadataFilters=[...Object.values(studyConfig?.decks||{}).map(d=>d.filter),...(studyConfig?.profile_rules||[]).map(r=>r.filter)].filter(filter=>/"(?:tags|tag_prefixes|properties)"/.test(JSON.stringify(filter)));
+      const prepared=configuredCards(cards,config).map(configured=>{
         const rule=studyConfig?.source_rules[configured.group];
         const card=rule && configured.source ? {...configured,source:{...configured.source,fields:rule.fields,prepare:rule.prepare||null}}:configured;
+        return {card,needsMetadata:!card.retired&&metadataFilters.some(filter=>studyFilterNeedsMetadata(card,filter,manifest))};
+      });
+      // Fetch each directly located text source once, with bounded concurrency.
+      // Resolution below still reports source errors on the individual card.
+      const files=new Map();
+      for(const {card,needsMetadata} of prepared)if(needsMetadata&&!metadataCache.has(card.id)&&card.source?.path){
+        const file=api.vault.getAbstractFileByPath(card.source.path);
+        if(file&&(card.source.kind==="block"||file.path.endsWith(".csv")||!api.metadataCache.getFileCache(file)?.frontmatter))files.set(file.path,file);
+      }
+      await readCatalogPartitions([...files.values()],async file=>{try{await noteAt(file);}catch{}return [];});
+      for(const {card,needsMetadata} of prepared){
         try {
-          if(needsMetadata&&!card.retired){if(!metadataCache.has(card.id))metadataCache.set(card.id,await resolveSource({...card},true));result.push(metadataCache.get(card.id));}
+          if(needsMetadata){if(!metadataCache.has(card.id))metadataCache.set(card.id,await resolveSource({...card},true));result.push(metadataCache.get(card.id));}
           else result.push({...card,validation:"unchecked"});
         }
         catch(e) {result.push({...card,content_error:e.message});}
@@ -3823,7 +3921,12 @@ class SchedulingIndex {
       }catch(e){message(e);homepage.querySelectorAll("button").forEach(button=>button.disabled=false);}
       finally{busy=false;if(pending && !managerDirty){pending=false;scheduleRefresh();}}
     }
-    async function draw() {
+    async function draw(){
+      const epoch=sessionCache.epoch;readyEpoch=-1;
+      await drawContents();
+      if(epoch===sessionCache.epoch)readyEpoch=epoch;
+    }
+    async function drawContents() {
       if(disposed)return;
       clearCard();counts.empty();notice.textContent="";
       host.setAttribute("data-reviewing",String(reviewing&&!managing&&!panel));
@@ -3970,6 +4073,25 @@ class SchedulingIndex {
       }catch(e){clearCard();message(e);notice.textContent+=" — review paused. Refresh to retry.";}
       finally{busy=false;if(pending){pending=false;scheduleRefresh();}}
     }
+    function saveRuntime(){
+      if(disposed||busy||checking||pending||runtimeDirty||indexDirty||catalogDirty||!schedulingIndex)return;
+      sessionCache.save(identity,readyEpoch,{baseManifest,rawCards,noteBindings,cards,knownCardIds,
+        runtimeCache,snapshotCache,hydrationKey,statesSnapshot,statesRevision,states,
+        runtimeLoaded,runtimeBase,studyConfig,studyParts,studyKey,manifest,config,configKey,
+        resolvedCards,resolvedConfig,resolvedGeneration,sourceGeneration,
+        runtimeCards,runtimeSources,runtimeSnapshot,runtimePositions,knownErrors,
+        membershipCache,profileCache,schedulingIndex,contentCache,metadataCache,scanSignature});
+    }
+    function restoreRuntime(saved){
+      ({baseManifest,rawCards,noteBindings,cards,knownCardIds,
+        runtimeCache,snapshotCache,hydrationKey,statesSnapshot,statesRevision,states,
+        runtimeLoaded,runtimeBase,studyConfig,studyParts,studyKey,manifest,config,configKey,
+        resolvedCards,resolvedConfig,resolvedGeneration,sourceGeneration,
+        runtimeCards,runtimeSources,runtimeSnapshot,runtimePositions,knownErrors,
+        membershipCache,profileCache,schedulingIndex,contentCache,metadataCache,scanSignature}=saved);
+      runtimeDirty=false;catalogDirty=false;indexDirty=true;
+      schedulingIndex.clearBuried();counters.sessionRestores++;
+    }
     async function guardedDraw(){if(disposed)return;if(checking || busy || managerDirty){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
     undoButton.onclick=async()=>{
       if(busy||!undoReview)return;
@@ -4023,7 +4145,7 @@ class SchedulingIndex {
     manage.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=true;managerDirty=false;guardedDraw();};
     select.onchange=()=>{operation++;checking=false;if(!leaveEditor()){select.value=activeGroup;return;}activeGroup=select.value;panel="";managing=false;managerDirty=false;reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
     refresh.onclick=()=>{if(managerDirty){notice.textContent="Save or discard changes before refreshing.";return;}reviewFiles=null;cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;presidents=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;invalidateScanProgress();sourceGeneration++;operation++;checking=false;resetQueues();guardedDraw();};
-    rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
+    rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,async()=>{sessionCache.invalidate();await index.clear();await catalogCache?.clear();});}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     profilesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="profiles";guardedDraw();};
     sourcesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="sources";guardedDraw();};
     function catalogDirectory(value,kind){
@@ -4031,15 +4153,19 @@ class SchedulingIndex {
       if(value.catalog_layout==="flat")return kind;
       return `${value.catalog_layout==="split"?kind:"imports"}/${value.revision}`;
     }
-    async function readPartitions(paths){return measure("Catalog partitions",()=>readCatalogPartitions(paths,json));}
+    async function readPartitions(paths,kind){
+      const versions=paths.map(path=>{const f=api.vault.getAbstractFileByPath(path);return f?.stat?[path,f.stat.mtime,f.stat.size]:null;});
+      const signature=versions.every(Boolean)?JSON.stringify(versions):null;
+      return measure("Catalog partitions",()=>catalogCache.read(kind,signature,()=>readCatalogPartitions(paths,json)));
+    }
     async function loadCatalog(value){
 
       const paths=value.partition_count===undefined?value.partitions:Array.from({length:value.partition_count},(_,i)=>`${catalogDirectory(value,"cards")}/cards-${String(i).padStart(5,"0")}.json`);
-      const nextCards=await readPartitions(paths.map(path=>`${dataRoot}/${path}`));
+      const nextCards=await readPartitions(paths.map(path=>`${dataRoot}/${path}`),"cards");
       let nextNotes=[];
       if(value.note_partition_count!==undefined){
         if(!Number.isSafeInteger(value.note_partition_count)||value.note_partition_count<0)throw Error("Invalid note partition count");
-        nextNotes=await readPartitions(Array.from({length:value.note_partition_count},(_,i)=>`${dataRoot}/${catalogDirectory(value,"notes")}/notes-${String(i).padStart(5,"0")}.json`));
+        nextNotes=await readPartitions(Array.from({length:value.note_partition_count},(_,i)=>`${dataRoot}/${catalogDirectory(value,"notes")}/notes-${String(i).padStart(5,"0")}.json`),"notes");
       }
       const hydrated=value.note_partition_count===undefined?nextCards:hydrateCatalog(nextCards,nextNotes,(await cachedConfiguration()).study);
       baseManifest=value;rawCards=nextCards;noteBindings=nextNotes;cards=hydrated;knownCardIds=new Set(cards.map(c=>c.id));
@@ -4047,7 +4173,11 @@ class SchedulingIndex {
     try {
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");
       if(manifest.partition_count!==undefined && (!Number.isSafeInteger(manifest.partition_count)||manifest.partition_count<0))throw Error("Invalid card partition count");
-      await loadCatalog(manifest);
+      catalogCache=await CatalogCache.open(identity);
+      if(disposed){catalogCache.close();return;}
+      const saved=sessionCache.take(identity);
+      if(saved&&canonical(saved.baseManifest)===canonical(manifest))restoreRuntime(saved);
+      else await loadCatalog(manifest);
       index=await ReviewIndex.open(identity,manifest.import_id,manifest.timing);if(disposed){index.close();return;}
       select.createEl("option",{text:"All template groups",value:""});
       for(const group of [...new Set(cards.map(c=>c.group).filter(Boolean))].sort())select.createEl("option",{text:group,value:group});

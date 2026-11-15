@@ -1,3 +1,52 @@
+// One unowned runtime per vault/root, kept only for this app session. Ownership is
+// transferred on reopen so two reviewer views never mutate the same indexes.
+class ReviewerSessionCache {
+  static forVault(vault,metadataCache) {
+    const stores=globalThis.__srsReviewerSessionsV1||(globalThis.__srsReviewerSessionsV1=new WeakMap());
+    if(!stores.has(vault)){
+      const cache=new ReviewerSessionCache();stores.set(vault,cache);
+      const invalidate=()=>cache.invalidate();
+      for(const event of ["create","modify","delete","rename"])vault.on(event,invalidate);
+      metadataCache?.on("changed",invalidate);
+    }
+    return stores.get(vault);
+  }
+  constructor(){this.epoch=0;this.entries=new Map();}
+  invalidate(){this.epoch++;this.entries.clear();}
+  save(key,epoch,value){if(epoch===this.epoch)this.entries.set(key,value);}
+  take(key){const value=this.entries.get(key);this.entries.delete(key);return value;}
+}
+// Disposable device-local metadata cache. Vault files remain authoritative.
+class CatalogCache {
+  static async open(name,factory=globalThis.indexedDB) {
+    try {
+      const db=await new Promise((resolve,reject)=>{
+        const request=factory.open(name+":catalog-cache",1);
+        request.onupgradeneeded=()=>request.result.createObjectStore("partitions");
+        request.onsuccess=()=>resolve(request.result);request.onerror=()=>reject(request.error);
+      });
+      db.onversionchange=()=>db.close();return new CatalogCache(db);
+    }catch{return new CatalogCache(null);}
+  }
+  constructor(db){this.db=db;}
+  async transaction(mode,fn){
+    if(!this.db)return null;
+    return new Promise((resolve,reject)=>{
+      const tx=this.db.transaction("partitions",mode),request=fn(tx.objectStore("partitions"));
+      tx.oncomplete=()=>resolve(request?.result);tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);
+    });
+  }
+  async read(key,signature,load) {
+    if(signature!==null){
+      try{const saved=await this.transaction("readonly",s=>s.get(key));if(saved?.signature===signature&&Array.isArray(saved.cards))return saved.cards;}catch{}
+    }
+    const cards=await load();
+    if(signature!==null)try{await this.transaction("readwrite",s=>s.put({signature,cards},key));}catch{}
+    return cards;
+  }
+  async clear(){try{await this.transaction("readwrite",s=>s.clear());}catch{}}
+  close(){this.db?.close();}
+}
 async function readCatalogPartitions(paths,read){
   const results=new Array(paths.length);let next=0;
   await Promise.all(Array.from({length:Math.min(4,paths.length)},async()=>{
@@ -51,16 +100,39 @@ function matchesStudyFilter(card,query,manifest) {
     while(query.include_children && deck?.parent_id){ids.add(deck.parent_id);deck=manifest.scheduling.decks[deck.parent_id];}
     if(!query.deck_ids.some(id=>ids.has(id)))return false;
   }
-  const tags=new Set([...(card.source_tags||[]),...(card.card_settings?.tags||[])]);
-  if(query.tags && !query.tags.every(tag=>tags.has(tag)))return false;
-  const normalizedTags=[...tags].map(tag=>tag.replaceAll("::","/"));
-  if(query.tag_prefixes && !query.tag_prefixes.every(prefix=>{const p=prefix.replaceAll("::","/");return normalizedTags.some(tag=>tag===p||tag.startsWith(p+"/"));}))return false;
+  if(query.tags?.length||query.tag_prefixes?.length){
+    const tags=new Set([...(card.source_tags||[]),...(card.card_settings?.tags||[])]);
+    if(query.tags && !query.tags.every(tag=>tags.has(tag)))return false;
+    if(query.tag_prefixes?.length){
+      const normalizedTags=[...tags].map(tag=>tag.replaceAll("::","/"));
+      if(!query.tag_prefixes.every(prefix=>{const p=prefix.replaceAll("::","/");return normalizedTags.some(tag=>tag===p||tag.startsWith(p+"/"));}))return false;
+    }
+  }
   for(const [key,expected] of Object.entries(query.properties||{})) {
     if(expected && typeof expected==="object" && !Array.isArray(expected)){
       if(Object.hasOwn(card.properties||{},key)!==expected.exists)return false;
     }else if(canonical(card.properties?.[key])!==canonical(expected))return false;
   }
   return true;
+}
+// Three-valued matching: null means source tags/properties can change the result.
+// Evaluate catalog-only constraints first, including within nested boolean filters.
+function studyFilterNeedsMetadata(card,query,manifest) {
+  function evaluate(q) {
+    const {all,any,not,tags,tag_prefixes,properties,...catalog}=q;
+    if(!matchesStudyFilter(card,catalog,manifest))return false;
+    const terms=[];
+    if(all)terms.push(combine(all.map(evaluate),false));
+    if(any)terms.push(combine(any.map(evaluate),true));
+    if(not){const value=evaluate(not);terms.push(value===null?null:!value);}
+    if(tags?.length||tag_prefixes?.length||Object.keys(properties||{}).length)terms.push(null);
+    return combine(terms,false);
+  }
+  function combine(values,or) {
+    if(values.includes(or))return or;
+    return values.includes(null)?null:!or;
+  }
+  return evaluate(query)===null;
 }
 function validateStudy(config) {
   if(config?.format_version!==1||!config.profiles||!Object.keys(config.profiles).length||!config.profiles[config.default_profile])throw Error("Invalid study configuration");
@@ -115,7 +187,12 @@ function studyMemberships(cards,config,manifest){
     if(!children.has(deck.parent_id))children.set(deck.parent_id,[]);
     children.get(deck.parent_id).push(id);
   }
-  for(const card of cards)if(!card.retired)for(const [id,deck] of Object.entries(config.decks))if(matchesStudyFilter(card,deck.filter,manifest))result.get(id).add(card.id);
+  const active=[],groups=new Map();
+  for(const card of cards)if(!card.retired){active.push(card);if(!groups.has(card.group))groups.set(card.group,[]);groups.get(card.group).push(card);}
+  for(const [id,deck] of Object.entries(config.decks)){
+    const candidates=deck.filter.groups?[...new Set(deck.filter.groups)].flatMap(group=>groups.get(group)||[]):active;
+    for(const card of candidates)if(matchesStudyFilter(card,deck.filter,manifest))result.get(id).add(card.id);
+  }
   const merge=id=>{const target=result.get(id);for(const child of children.get(id)||[])for(const cid of merge(child))target.add(cid);return target;};
   for(const id of children.get(null)||[])merge(id);
   // Root parent_id may be omitted in older documents.

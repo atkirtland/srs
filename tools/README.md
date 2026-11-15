@@ -48,3 +48,21 @@ uv run --extra test npm test
 The optional `test` extra supplies Node for the browser checks. Browser test
 packages live in `node_modules/`. Neither Node nor Python is required while
 reviewing on desktop or Android.
+
+Reviewer startup keeps a disposable catalog cache in the device's IndexedDB.
+Unchanged card/note partitions are reused across view reopenings; partition paths,
+modification times, and sizes determine invalidation. The cache contains catalog
+metadata, not source text. Storage failure falls back to reading vault files.
+**Rebuild local index** clears this cache together with the review index.
+Source tags/properties are loaded only where they can affect deck/profile filters;
+structural frontmatter uses Obsidian's metadata cache when available. Deck
+membership narrows candidates by source group; remaining text reads run with
+bounded concurrency.
+
+Within one Obsidian app session, closing and reopening an unchanged reviewer
+transfers its prepared runtime (including memberships and scheduling queues).
+Vault/metadata events invalidate this cache. Learning availability advances
+incrementally; study-day rollover rebuilds the scheduling index. Session buries
+are cleared on reopening. This runtime cache stays in memory and does not survive
+restarting Obsidian. Performance details report `sessionRestores: 1` on reuse,
+with `schedulingBuilds: 0` and `cardPreparations: 0`.

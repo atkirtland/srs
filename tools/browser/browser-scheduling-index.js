@@ -121,6 +121,12 @@ class SchedulingIndex {
     const card=this.cards.get(id),kind=this.kinds.get(id);if(!kind)return;
     for(const key of this.reverse.get(id)||[]){const scope=this.scopes.get(key);scope.buckets.get(card.deck_id).orders[kind].remove(card);scope.orders[kind].remove(card);}
   }
+  clearBuried(){
+    const ids=[...this.buried];this.buried.clear();
+    for(const id of ids){const card=this.cards.get(id),kind=this.kinds.get(id);if(!card||!kind)continue;
+      for(const key of this.reverse.get(id)||[]){const scope=this.scopes.get(key);scope.buckets.get(card.deck_id).orders[kind].insert(card);scope.orders[kind].insert(card);}
+    }
+  }
   queue(id=null,group=''){
     this.stats.queueReads++;const scope=this.scopes.get(this.key(id,group));if(!scope)return {...this.counts(id,group),cards:[]};
     let best;const take=c=>{if(c&&(!best||this.compareDue(c,best)<0))best=c;};

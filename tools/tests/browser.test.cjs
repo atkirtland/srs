@@ -303,7 +303,8 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   put('srs/data/manifest.json',JSON.stringify(m));put(cardPath,JSON.stringify(cs));put('srs/config.json',JSON.stringify(config));
   put('vocab.csv','anki_note_id,word,definition\n1,broken,\n2,ready,answer\n');
   let scans=0;const reads=[];const listeners=new Map();
-  const vault={getName:()=>`test-ui-${crypto.randomUUID()}`,getFiles:()=>{scans++;return [...files.values()];},getAbstractFileByPath:p=>files.get(p),read:async f=>{reads.push(f.path);return f.text;},
+  const vaultName=`test-ui-${crypto.randomUUID()}`;
+  const vault={getName:()=>vaultName,getFiles:()=>{scans++;return [...files.values()];},getAbstractFileByPath:p=>files.get(p),read:async f=>{reads.push(f.path);return f.text;},
     create:async(p,t)=>put(p,t),modify:async(f,t)=>put(f.path,t),createFolder:async p=>files.set(p,{path:p}),append:async(f,t)=>{f.text+=t;f.stat.mtime++;f.stat.size=f.text.length;},on:(name,fn)=>{listeners.set(name,fn);return ()=>{};}};
   const component={register:f=>cleanups.push(f),registerEvent:()=>{},registerInterval:()=>{}};
   class FixedDate extends Date {constructor(...args){super(...(args.length?args:[now]));}static now(){return now;}}
@@ -317,6 +318,16 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   assert.ok(button('Review'),'default deck homepage appears');
   assert.equal(reads.filter(p=>p==='vocab.csv').length,0,'homepage does not read or render source content');
   assert.ok(root.querySelectorAll('div').some(e=>e.textContent.includes('3 unchecked')));
+  for(const cleanup of cleanups.splice(0))cleanup();root.empty();
+  vm.runInNewContext(fs.readFileSync(require('node:path').join(__dirname,'../../view.js'),'utf8'),context);
+  for(let i=0;i<100&&!button('Review');i++)await tick();
+  button('Performance details').onclick();
+  const restored=JSON.parse(root.querySelectorAll('div').find(e=>e.textContent.startsWith('{"fileReads"')).textContent.split(' · ')[0]);
+  assert.equal(restored.sessionRestores,1,'reopening transfers the prepared runtime');
+  assert.equal(restored.schedulingBuilds,0,'reopening does not rebuild scheduling');
+  assert.equal(restored.cardPreparations,0,'reopening does not prepare the catalog');
+  assert.equal(restored.sourceReads,0,'reopening does not reread source metadata');
+
   const beforeUnrelated=reads.length;
   listeners.get('modify')({path:'unrelated.md'});await tick();
   assert.equal(reads.length,beforeUnrelated,'unrelated edits cause no data reads');
@@ -728,7 +739,7 @@ test('background redraws wait for content checking to finish without cancelling 
   const sandbox={setTimeout,checked:[],draws:0};
   vm.createContext(sandbox);
   vm.runInContext(`let checking=false,busy=false,managerDirty=false,disposed=false,operation=0,pending=false;
-    let selectedDeck=null;const managing=false,managerDeck=null,notice={},select={value:""};
+    let selectedDeck=null,readyEpoch=-1;const sessionCache={epoch:0};const managing=false,managerDeck=null,notice={},select={value:""};
     const scanProgress={active:false,results:new Map(),save(){}};function bindScanProgress(){}
     async function readSources(){return Array.from({length:80},(_,id)=>({id}));}
     function inScope(){return true;}
@@ -837,4 +848,63 @@ test('an interrupted content scan resumes from completed cards after the view is
  const resumed=await run(false);assert.equal(resumed.active,false);assert.equal(resumed.results.size,60);
  assert.equal(checked.length,60);assert.equal(new Set(checked).size,60);
  assert.equal(resumed.results.get(5),'Missing field');
+});
+
+test('metadata loading is restricted by catalog constraints and nested boolean filters',()=>{
+ const c={id:'c',group:'vocab',template_key:'read',source:{path:'words.csv'}};
+ const needs=q=>SRS.studyFilterNeedsMetadata(c,q,manifest());
+ assert.equal(needs({groups:['blocks'],tags:['proof']}),false);
+ assert.equal(needs({all:[{groups:['blocks']},{tags:['proof']}]}),false);
+ assert.equal(needs({all:[{groups:['vocab']},{tags:['proof']}]}),true);
+ assert.equal(needs({any:[{groups:['vocab']},{tags:['proof']}]}),false);
+ assert.equal(needs({not:{all:[{groups:['blocks']},{properties:{x:1}}]}}),false);
+ assert.equal(needs({not:{tags:['proof']}}),true);
+ assert.equal(needs({paths:['elsewhere'],properties:{x:1}}),false);
+ assert.equal(needs({groups:['vocab']}),false);
+ assert.equal(needs({tags:[],properties:{}}),false);
+});
+
+test('catalog cache survives reopening, invalidates changed files, and tolerates unavailable storage',async()=>{
+ const name=`catalog-${crypto.randomUUID()}`;
+ let reads=0;const load=async()=>{reads++;return [{id:String(reads)}];};
+ let cache=await SRS.CatalogCache.open(name,indexedDB);
+ assert.equal((await cache.read('cards','mtime-1',load))[0].id,'1');cache.close();
+ cache=await SRS.CatalogCache.open(name,indexedDB);
+ assert.equal((await cache.read('cards','mtime-1',load))[0].id,'1');assert.equal(reads,1);
+ assert.equal((await cache.read('cards','mtime-2',load))[0].id,'2');
+ await assert.rejects(cache.read('cards','mtime-3',async()=>{throw Error('missing partition');}),/missing partition/);
+ assert.equal((await cache.read('cards','mtime-2',load))[0].id,'2');
+ await cache.clear();await cache.read('cards','mtime-2',load);assert.equal(reads,3);cache.close();
+ const unavailable=await SRS.CatalogCache.open(name,{open(){throw Error('denied');}});
+ await unavailable.read('cards','same',load);await unavailable.read('cards','same',load);assert.equal(reads,5);
+ const noStats=await SRS.CatalogCache.open(name,indexedDB);
+ await noStats.read('cards',null,load);await noStats.read('cards',null,load);assert.equal(reads,7);noStats.close();
+});
+
+test('session cache transfers ownership and invalidates on every vault/metadata change',()=>{
+ const events=new Map(),metadataEvents=new Map();
+ const vault={on:(event,fn)=>events.set(event,fn)},metadata={on:(event,fn)=>metadataEvents.set(event,fn)};
+ const cache=SRS.ReviewerSessionCache.forVault(vault,metadata);
+ assert.equal(SRS.ReviewerSessionCache.forVault(vault,metadata),cache);
+ const value={index:'prepared'};cache.save('srs',cache.epoch,value);
+ assert.equal(cache.take('srs'),value);assert.equal(cache.take('srs'),undefined);
+ for(const notify of [...events.values(),...metadataEvents.values()]){
+  const old=cache.epoch;cache.save('srs',old,value);notify({path:'changed'});
+  assert.equal(cache.take('srs'),undefined);cache.save('srs',old,value);assert.equal(cache.take('srs'),undefined);
+ }
+});
+
+test('reused scheduling index advances learning availability and clears session buries',()=>{
+ const m=manifest(),cs=cards([0,0,1]);
+ const states=new Map(cs.map(c=>[c.id,{state:c.baseline}]));
+ const index=new SRS.SchedulingIndex(cs,states,m,[],now);
+ const first=index.queue().cards[0];assert.ok(first);
+ const counts=index.counts();index.bury(first.id);index.clearBuried();
+ assert.equal(index.queue().cards[0].id,first.id);
+ assert.deepEqual(index.counts(),counts);
+ const later=now+60*60*1000;assert.equal(index.advance(later),true);
+ const fresh=new SRS.SchedulingIndex(cs,states,m,[],later);
+ assert.deepEqual(index.counts(),fresh.counts());
+ assert.deepEqual(index.queue().cards.map(c=>c.id),fresh.queue().cards.map(c=>c.id));
+ assert.equal(index.advance(now+86400000),false,'rollover requires a rebuild');
 });
