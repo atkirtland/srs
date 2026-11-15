@@ -184,31 +184,15 @@ def upgrade(root, data=None, configuration=None, templates=None):
     if configuration is None:
         (root / 'study.json').unlink()
         (root / 'config.json').unlink()
+    split_partitions(data, replacement, len(stored))
     return dict(cards=len(stored), notes=len(notes), converted=True, revision=revision)
 
 
 def split_partitions(data, manifest, card_count):
     """Relocate existing normalized partitions; preserve their bytes and revision."""
-    if manifest.get('catalog_layout') == 'split':
+    if manifest.get('catalog_layout') == 'flat':
         return dict(cards=card_count, converted=False, revision=manifest['revision'])
-    import shutil
-    replacement = {**manifest, 'catalog_layout':'split'}
-    replacement.pop('partitions', None)
-    replacement.setdefault('partition_count', len(store.partition_paths(manifest)))
-    pairs = list(zip(store.partition_paths(manifest), store.partition_paths(replacement)))
-    pairs += list(zip(store.note_paths(manifest), store.note_paths(replacement)))
-    for old, new in pairs:
-        source, target = data / old, data / new
-        target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists() and target.read_bytes() != source.read_bytes():
-            raise ValueError(f'Refusing to overwrite different partition: {target}')
-        shutil.copyfile(source, target)
-        if target.read_bytes() != source.read_bytes():
-            raise ValueError(f'Partition copy verification failed: {target}')
-    if read(data / 'manifest.json') != manifest:
-        raise ValueError('Store changed during conversion; retry')
-    write(data / 'manifest.json', replacement)
-    from .study import load_cards
-    load_cards(data)
-    store.clean_partitions(data, manifest['revision'])
+    cards = [c for p in store.partition_paths(manifest) for c in read(data / p)]
+    notes = [n for p in store.note_paths(manifest) for n in read(data / p)]
+    store.publish(data, manifest, manifest, cards, notes)
     return dict(cards=card_count, converted=True, revision=manifest['revision'])

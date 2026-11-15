@@ -6,7 +6,6 @@ import csv
 import math
 import re
 from pathlib import Path
-import shutil
 import uuid
 
 from . import store as catalog
@@ -17,6 +16,7 @@ from .layout import read, write
 
 
 def load_cards(data, configuration=None):
+    catalog.recover(data)
     manifest = read(data / "manifest.json")
     cards = [card for part in catalog.partition_paths(manifest) for card in read(data / part)]
     if 'note_partition_count' in manifest:
@@ -375,29 +375,12 @@ def refresh_cards(vault, data, study_path, config_path):
     # An unavailable source does not delete or retire existing cards. They remain inspectable errors.
     if not added and not updated:
         return {'added':0, 'updated':0, 'cards':len(cards), 'revision':manifest['revision'],'issues':issues}
-    revision = srs.digest({'previous':manifest['revision'], 'cards':cards})
-    target = data / 'imports' / revision
-    target.mkdir(parents=True, exist_ok=True)
+    revision = str(uuid.uuid4())  # Cache invalidation token, not a storage directory.
     normalized = 'note_partition_count' in manifest or Path(study_path).suffix != '.json'
-    notes, stored_cards = layout.separate_cards(cards) if normalized else ([], cards)
-    for number, start in enumerate(range(0, len(cards), 250)):
-        write(data / 'cards' / revision / f'cards-{number:05d}.json', stored_cards[start:start+250])
-    for number, start in enumerate(range(0, len(notes), 250)):
-        write(data / 'notes' / revision / f'notes-{number:05d}.json', notes[start:start+250])
-    report = data / 'imports' / manifest['revision'] / 'report.json'
-    if report.exists():
-        shutil.copyfile(report, target / 'report.json')
-    if read(data / 'manifest.json') != manifest:
-        raise ValueError('Catalog changed during discovery; retry')
-    replacement = {**manifest, 'catalog_layout':'split', 'revision':revision, 'partition_count':(len(cards)+249)//250}
-    if normalized:
-        replacement['note_partition_count'] = (len(notes)+249)//250
-    replacement.pop('partitions', None)
-    write(data / 'manifest.json', replacement)
-    for old in (data / 'imports').iterdir():
-        if old.is_dir() and old != target:
-            shutil.rmtree(old)
-    catalog.clean_partitions(data, revision)
+    notes, stored_cards = layout.separate_cards(cards) if normalized else (None, cards)
+    replacement = {**manifest, 'revision':revision}
+    catalog.publish(data, manifest, replacement, stored_cards, notes,
+                    added_at=datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
     # The imported baseline identity, all logs, and immutable scheduler archives stay intact.
     return {'added':added, 'updated':updated, 'cards':len(cards), 'revision':revision,'issues':issues}
 

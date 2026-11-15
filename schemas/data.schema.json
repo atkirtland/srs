@@ -108,7 +108,7 @@
         "timing": {"$ref": "#/$defs/Timing"},
         "partitions": {"type": "array", "items": {"type": "string"}},
         "partition_count": {"type": "integer", "minimum": 0},
-        "catalog_layout": {"const": "split"},
+        "catalog_layout": {"enum": ["split", "flat"]},
         "note_partition_count": {"type": "integer", "minimum": 0}
       },
       "required": ["format_version", "import_id", "revision", "collection_key", "scheduling", "timing"],
@@ -156,6 +156,7 @@
     "Card": {
       "type": "object",
       "properties": {
+        "added_at": {"type": "string", "format": "date-time"},
         "id": {"type": "string"},
         "anki_card_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         "note_uid": {"type": "string"},
@@ -217,6 +218,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["id", "uid", "rule_id", "locator"],
       "properties": {
+        "added_at": {"type": "string", "format": "date-time"},
         "id": {"type": "string"},
         "uid": {"type": ["string", "null"]},
         "rule_id": {"type": ["string", "null"]},

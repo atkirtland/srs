@@ -36,10 +36,10 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(result['notes'], 1)
         self.assertFalse((self.root / 'study.json').exists())
         self.assertFalse((self.root / 'config.json').exists())
-        raw = study.read(self.data / 'cards' / after['revision'] / 'cards-00000.json')[0]
+        raw = study.read(self.data / 'cards' / 'cards-00000.json')[0]
         self.assertTrue('note_id' in raw)
         self.assertFalse({'source', 'group', 'note_uid', 'fields'} & raw.keys())
-        notes = study.read(self.data / 'notes' / after['revision'] / 'notes-00000.json')
+        notes = study.read(self.data / 'notes' / 'notes-00000.json')
         self.assertEqual(notes[0]['locator'], {'path':'words.csv', 'kind':'csv'})
         self.assertEqual(notes[0]['uid'], 'anki:12')
         self.assertFalse(layout.upgrade(self.root)['converted'])
@@ -70,7 +70,7 @@ class LayoutTests(unittest.TestCase):
         manifest, cards = study.load_cards(self.data)
         self.assertEqual(len({c['note_id'] for c in cards}), 1)
         self.assertEqual(len({c['id'] for c in cards}), 2)
-        raw = study.read(self.data / 'cards' / manifest['revision'] / 'cards-00000.json')
+        raw = study.read(self.data / 'cards' / 'cards-00000.json')
         self.assertTrue(all('source' not in c for c in raw))
 
     def test_profile_save_changes_only_profiles_and_checks_concurrent_edits(self):
@@ -128,18 +128,66 @@ class LayoutTests(unittest.TestCase):
         original = {}
         (self.data / 'imports' / revision).mkdir(parents=True, exist_ok=True)
         for kind in ('notes', 'cards'):
-            for path in (self.data / kind / revision).glob('*.json'):
+            for path in (self.data / kind).glob('*.json'):
                 original[path.relative_to(self.data)] = path.read_bytes()
                 path.rename(self.data / 'imports' / revision / path.name)
-            (self.data / kind / revision).rmdir()
         manifest.pop('catalog_layout')
         study.write(self.data / 'manifest.json', manifest)
         self.assertTrue(layout.upgrade(self.root)['converted'])
         after, hydrated = study.load_cards(self.data)
         self.assertEqual(hydrated, cards)
-        self.assertEqual(after, {**manifest, 'catalog_layout':'split'})
+        self.assertEqual(after, {**manifest, 'catalog_layout':'flat'})
         for path, contents in original.items():
             self.assertEqual((self.data / path).read_bytes(), contents)
         self.assertFalse(list((self.data / 'imports').glob('*/cards-*.json')))
         self.assertFalse(list((self.data / 'imports').glob('*/notes-*.json')))
         self.assertFalse(layout.upgrade(self.root)['converted'])
+
+    def test_incremental_append_preserves_untouched_partitions_and_added_times(self):
+        self.upgrade()
+        source = self.root / 'words.csv'
+        source.write_text('anki_note_id,word,definition\n' + ''.join(f'{i},word{i},def{i}\n' for i in range(12, 263)))
+        config = self.root / 'config'
+        study.refresh_cards(self.root, self.data, config, config)
+        first = self.data / 'cards/cards-00000.json'
+        first_notes = self.data / 'notes/notes-00000.json'
+        saved = {p:(p.read_bytes(),p.stat().st_mtime_ns) for p in (first, first_notes)}
+        records = study.read(self.data / 'cards/cards-00001.json')
+        self.assertTrue(records[0]['added_at'].endswith('Z'))
+        original_time = records[0]['added_at']
+        with source.open('a') as stream:
+            stream.write('263,new,new definition\n')
+        result = study.refresh_cards(self.root, self.data, config, config)
+        self.assertEqual(result['added'], 1)
+        for p, previous in saved.items():
+            self.assertEqual((p.read_bytes(),p.stat().st_mtime_ns), previous)
+        after = study.read(self.data / 'cards/cards-00001.json')
+        self.assertEqual(after[0]['added_at'], original_time)
+        self.assertTrue(after[-1]['added_at'].endswith('Z'))
+        notes = study.read(self.data / 'notes/notes-00001.json')
+        self.assertEqual(notes[-1]['added_at'], after[-1]['added_at'])
+        snapshot = {p:(p.read_bytes(),p.stat().st_mtime_ns) for kind in ('notes','cards') for p in (self.data/kind).glob('*.json')}
+        self.assertEqual(study.refresh_cards(self.root,self.data,config,config)['added'],0)
+        self.assertTrue(all((p.read_bytes(),p.stat().st_mtime_ns)==v for p,v in snapshot.items()))
+
+    def test_interrupted_partition_update_rolls_forward_without_touching_logs(self):
+        from unittest.mock import patch
+        from srs_tools import store
+        self.upgrade()
+        manifest, _ = study.load_cards(self.data)
+        cards = study.read(self.data / 'cards/cards-00000.json')
+        notes = study.read(self.data / 'notes/notes-00000.json')
+        cards[0]['active'] = False
+        original_write = layout.write
+        def interrupted(path, value):
+            if Path(path) == self.data / 'manifest.json':
+                raise OSError('interrupted')
+            original_write(path,value)
+        with patch.object(layout,'write',side_effect=interrupted):
+            with self.assertRaisesRegex(OSError,'interrupted'):
+                store.publish(self.data,manifest,{**manifest,'revision':'changed'},cards,notes)
+        self.assertTrue((self.data/'catalog.pending.json').exists())
+        after, recovered = study.load_cards(self.data)
+        self.assertEqual(after['revision'],'changed')
+        self.assertFalse(recovered[0]['active'])
+        self.assertFalse((self.data/'catalog.pending.json').exists())

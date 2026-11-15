@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import scheduling
 import _shared
-from srs_tools.store import partition_paths, clean_partitions
+from srs_tools.store import partition_paths, publish as publish_partitions, recover
 
 LOG_LIMIT = 32 * 1024 * 1024
 
@@ -226,6 +226,7 @@ def build_export(raw, vault, exports, config, day_zero, timezone_name, rollover=
 def publish(data, destination):
     from srs import canonical, digest, write_immutable, SRSError
     destination.mkdir(parents=True, exist_ok=True)
+    recover(destination)
     pointer = destination / "manifest.json"
     previous = json.loads(pointer.read_text()) if pointer.exists() else None
     old_roots = []
@@ -275,22 +276,13 @@ def publish(data, destination):
     config_directory = destination.parent / 'config'
     normalized = (config_directory / 'sources.json').exists()
     notes, stored_cards = layout.separate_cards(data['cards']) if normalized else ([], data['cards'])
-    if normalized:
-        for start in range(0, len(notes), 250):
-            write_immutable(destination / 'notes' / revision / f'notes-{start//250:05d}.json', notes[start:start+250])
-    partitions = []
-    events = list(data["observations"])
-    for index in range(0, len(data["cards"]), 250):
-        selected = data["cards"][index:index + 250]
-        name = f"cards-{index // 250:05d}.json"
-        runtime = [{k: v for k, v in c.items() if k != "history"} for c in stored_cards[index:index+250]]
-        write_immutable(destination / 'cards' / revision / name, runtime)
-        partitions.append(f"cards/{revision}/{name}")
-        for card in selected:
-            events.append({"format_version": 2, "kind": "scheduling_baseline",
-                           "id": f"baseline:{import_id}:{card['id']}", "card_id": card["id"],
-                           "review_time_ms": data["snapshot_ms"], "import_id": import_id,
-                           "state": card["baseline"], "scheduling": card["scheduling"]})
+    events = list(data['observations'])
+    runtime = [{k:v for k,v in c.items() if k != 'history'} for c in stored_cards]
+    for card in data['cards']:
+        events.append({"format_version": 2, "kind": "scheduling_baseline",
+                       "id": f"baseline:{import_id}:{card['id']}", "card_id": card["id"],
+                       "review_time_ms": data["snapshot_ms"], "import_id": import_id,
+                       "state": card["baseline"], "scheduling": card["scheduling"]})
     # Reimports compare immutable records, including duplicates in conflict copies.
     seen = {}
     reviews = destination / "reviews"
@@ -335,21 +327,16 @@ def publish(data, destination):
             import os
             os.fsync(stream.fileno())
     manifest = {"format_version": 2, "import_id": import_id,
-                "revision": revision, "catalog_layout": "split", "collection_key": data["collection_key"], "scheduling": data["scheduling"],
-                "timing": data["timing"], "partition_count": len(partitions)}
+                "revision": revision, "catalog_layout": "flat", "collection_key": data["collection_key"], "scheduling": data["scheduling"],
+                "timing": data["timing"], "partition_count": (len(runtime)+249)//250}
     if normalized:
         manifest['note_partition_count'] = (len(notes)+249)//250
     write_immutable(root / "report.json", data["report"])
-    # Validate all metadata and logs before the atomic pointer switch and cleanup.
-    for partition in partitions:
-        parsed = json.loads((destination / partition).read_text())
-        if len(parsed) > 250 or any("fields" in c or "raw" in c or "history" in c for c in parsed):
-            raise SRSError("invalid runtime metadata partition")
-    temporary = destination / "manifest.pending"
-    temporary.write_text(canonical(manifest) + "\n")
-    temporary.replace(pointer)
+    if any('fields' in c or 'raw' in c or 'history' in c for c in runtime):
+        raise SRSError('invalid runtime metadata partition')
+    publish_partitions(destination, previous, manifest, runtime, notes if normalized else None,
+                       added_at=datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
     for old in old_roots:
         if old != root and old.is_dir():
             shutil.rmtree(old)
-    clean_partitions(destination, revision)
     return root

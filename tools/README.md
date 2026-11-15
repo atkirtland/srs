@@ -12,8 +12,8 @@ Defaults point to `../config/`, `../data/`, and the containing vault.
 Profiles live in `../data/profiles.json`. `--config` selects another configuration
 directory; `--data` selects its store. Legacy `--study <study.json>` remains
 available for compatibility. For an old combined layout, run
-`uv run python srs.py upgrade-layout` once. It also moves existing partitions into `data/notes/<revision>/` and
-`data/cards/<revision>/`. It preserves card IDs and reviews.
+`uv run python srs.py upgrade-layout` once. It also moves existing partitions into `data/notes/` and
+`data/cards/`. It preserves card IDs and reviews.
 Omit `--apply` to train and evaluate without updating a profile.
 
 | Command | Purpose |

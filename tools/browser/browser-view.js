@@ -44,6 +44,7 @@
     };
     async function json(path) {const text=await store.read(path);if(text===null)throw Error(`Missing SRS file: ${path}`);return JSON.parse(text);}
     async function runtimeConfiguration(){
+      if(await store.read(`${dataRoot}/catalog.pending.json`)!==null)throw Error("Catalog update in progress; rerun discovery if it was interrupted.");
       if(await store.read(`${root}/config/sources.json`)!==null){
         const parts={};
         for(const [key,path] of Object.entries({sources:"config/sources.json",cards:"config/cards.json",decks:"config/decks.json",assignments:"config/profile-rules.json",profiles:"data/profiles.json"}))parts[key]=await json(`${root}/${path}`);
@@ -557,7 +558,8 @@
     profilesButton.onclick=()=>{if(!leaveEditor())return;managing=false;panel="profiles";guardedDraw();};
     sourcesButton.onclick=()=>{if(!leaveEditor())return;managing=false;panel="sources";guardedDraw();};
     function catalogDirectory(value,kind){
-      if(value.catalog_layout!==undefined && value.catalog_layout!=="split")throw Error("Unsupported catalog layout");
+      if(value.catalog_layout!==undefined && value.catalog_layout!=="split" && value.catalog_layout!=="flat")throw Error("Unsupported catalog layout");
+      if(value.catalog_layout==="flat")return kind;
       return `${value.catalog_layout==="split"?kind:"imports"}/${value.revision}`;
     }
     async function loadCatalog(value){

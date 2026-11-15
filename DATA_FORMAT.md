@@ -22,9 +22,9 @@ data/
     <sha256>.json
   imports/<revision>/
     report.json
-  notes/<revision>/
+  notes/
     notes-00000.json
-  cards/<revision>/
+  cards/
     cards-00000.json
     cards-00001.json
     ...
@@ -79,7 +79,7 @@ fields, rather than retaining the full native Anki protobuf objects.
   can have IDs such as `anki:<collection-key>:card:<anki-card-id>`.
 - `note_uid` identifies the vault note or CSV row, usually `anki:<note-id>` or
   `local:<uid>`. Several cards can share it.
-- Card partitions use `data/cards/<revision>/cards-<index>.json` with zero-based,
+- Card partitions use `data/cards/cards-<index>.json` with zero-based,
   five-digit indices. Source paths are relative to the **vault root**, not to `data/`.
 
 Reviews link to cards through `card_id`; cards link to SRS notes through `note_id`.
@@ -90,7 +90,7 @@ partitions, rather than a second mapping file.
 ## Manifests
 
 `data/manifest.json` is the active entry point. The reviewer follows it and reads
-the partitions under its revision in `cards/` and `notes/`; it does not select the latest-looking directory name.
+the numbered partitions directly in `cards/` and `notes/`.
 This file is required: it also supplies the scheduling settings and timing.
 New imports do not write a duplicate manifest under `imports/<revision>/`.
 Older imports may still have an unused copy there.
@@ -115,10 +115,10 @@ A partition count replaces the old repetitive path list.
 | `format_version` | Currently `2`. |
 | `collection_key` | String form of the imported collection's creation timestamp; the importer uses this as collection identity. |
 | `import_id` | Scheduling-baseline identity referenced by new answers. |
-| `revision` | SHA-256 digest identifying the generated catalog, including source references and a digest of the scheduling baseline. |
-| `catalog_layout` | `"split"` selects separate `cards/<revision>/` and `notes/<revision>/` directories. Older stores without it read partitions from `imports/<revision>/`. |
+| `revision` | Opaque catalog change token used to invalidate browser caches. Discovery changes this token without creating revision directories; it is not a note/card identity or timestamp. |
+| `catalog_layout` | `"flat"` selects `cards/` and `notes/` directly. Legacy `"split"` stores with revision subdirectories, and older `imports/` stores, remain readable. |
 | `note_partition_count` | Number of note arrays, with at most 250 notes per file. |
-| `partition_count` | Number of card arrays under `cards/<revision>/`, named `cards-00000.json` onwards, with at most 250 cards per file. Older manifests with an explicit `partitions` list remain readable. |
+| `partition_count` | Number of card arrays under `cards/`, named `cards-00000.json` onwards, with at most 250 cards per file. Older manifests with an explicit `partitions` list remain readable. |
 | `timing` | `day_zero` (`YYYY-MM-DD`), IANA `timezone`, and local `rollover_hour` (0–23). Import timing is supplied at runtime; the timezone defaults to the system timezone. |
 | `scheduling` | Native deck hierarchy, presets, selected collection settings, source Anki version, and parameter policy. |
 
@@ -167,7 +167,8 @@ version, and parameter policy; your verified presets use 19 weights.
 ## SRS note bindings and card partitions
 
 Both `notes-*.json` and `cards-*.json` are JSON arrays with at most 250 records
-per file. They belong to the same immutable revision. The manifest's
+per file. Existing records keep their partition position; newly discovered
+records append to the last partition or start a new one. The manifest's
 `partition_count` counts card files; `note_partition_count` counts note files.
 The latter also signals the separated binding layout. Manifest/event format
 version 2 and the existing `import_id` remain unchanged.
@@ -426,12 +427,17 @@ deduplication, current answers, per-field card settings, imported observations, 
 baseline caches. Those are not synced `data/` JSON files. They can be rebuilt
 from the store. Session Bury choices are also not written as review events.
 
-The publisher writes a complete generation, switches the root manifest, and
-removes superseded generated import directories. `manifest.pending` is a
-temporary publication artifact, not a separate document format. Review logs
-remain; there should be no generated `raw.json` or per-card `history-*.json`
-archive. Treat generated metadata and existing log lines as immutable; use
-`config/cards.json` and vault source files for presentation/content edits.
+Discovery writes only changed note/card partitions, with atomic replacement per
+file. `catalog.pending.json` temporarily records the changed partitions and target
+manifest. If interrupted, the next CLI open completes the pending update; the
+reviewer pauses while it is present. Review logs and scheduler archives are not
+rewritten. Generated metadata contains no note content; edit `config/cards.json`
+and vault source files for presentation/content changes.
+
+New notes and cards have an `added_at` UTC ISO 8601 timestamp (for example,
+`2000-01-01T00:00:00.000Z`). It records first addition to this store and remains
+unchanged on rediscovery, source moves, template edits and reimports. Existing
+records with unknown addition times omit it; upgrading does not invent a date.
 
 ## Independent card discovery and profile training
 
