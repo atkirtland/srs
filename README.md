@@ -20,6 +20,8 @@ The homepage has an expandable deck hierarchy with blue new, red learning/
 relearning, and green review counts. Content-error totals are separate. Opening
 a deck includes its children. Missing sources, required fields, disabled templates,
 and unsupported operations stay visible without reducing scheduling counts.
+**Undo review** reverses the last answer made in the current reviewer session, restoring its prior schedule and daily allowance and removing the answer from the log and training history. It is available only while that answer is still the latest state for its card and the final event in its log. Undo rebuilds the local index. It cannot retract copies already synced to another device; let vault synchronization finish before switching devices.
+
 **Bury** hides a card for this session and changes no schedule, history, or daily counter. Refresh
 rereads the vault and configuration; reopening clears the session's skips.
 

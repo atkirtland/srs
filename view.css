@@ -8,6 +8,11 @@
 .ankobs-srs .srs-toolbar button[aria-pressed="true"] { background: var(--interactive-accent); color: var(--text-on-accent); }
 .ankobs-srs .srs-toolbar > select { max-width: 18rem; margin-left: auto; }
 .ankobs-srs .srs-tools { position: relative; }
+.ankobs-srs .srs-card-menu { margin-left: auto; }
+.ankobs-srs .srs-card-menu > div > div { display: grid; gap: .5rem; }
+.ankobs-srs .srs-card-header { display: flex; align-items: center; gap: .5rem; }
+.ankobs-srs .srs-card-header[hidden] { display: none; }
+.ankobs-srs .srs-card-menu[hidden] { display: none; }
 .ankobs-srs summary { cursor: pointer; }
 .ankobs-srs .srs-tools > summary { padding: .7rem; }
 .ankobs-srs .srs-tools > div { position: absolute; right: 0; z-index: 5; display: grid; gap: .5rem; padding: .8rem; min-width: 14rem; border: 1px solid var(--srs-border); border-radius: .5rem; background: var(--background-primary); box-shadow: 0 4px 12px #0002; }

@@ -5,6 +5,7 @@
     const host = dv.container.createDiv({cls:"ankobs-srs"});
     const notice = host.createDiv({cls:"srs-notice",attr:{role:"status","aria-live":"polite"}}), controls = host.createDiv({cls:"srs-toolbar"});
     const home = controls.createEl("button",{text:"Decks"});
+    let undoReview=null;
     const manage = controls.createEl("button",{text:"Cards"});
     const profilesButton=controls.createEl("button",{text:"Profiles"});
     const sourcesButton=controls.createEl("button",{text:"Sources"});
@@ -17,8 +18,19 @@
     const rebuild = toolBody.createEl("button",{text:"Rebuild local index"});
     const content = host.createDiv({cls:"srs-content"});
     const context = content.createDiv({cls:"srs-context"});
-    const counts = content.createDiv({cls:"srs-counts"}), homepage = content.createDiv(), front = content.createDiv({cls:"srs-front"}), back = content.createDiv({cls:"srs-back"});
-    const actions = host.createDiv({cls:"srs-actions"}), source = content.createDiv({cls:"srs-source"});
+    const counts = content.createDiv({cls:"srs-counts"}), homepage = content.createDiv();
+    const cardHeader=content.createDiv({cls:"srs-card-header"});
+    const front=content.createDiv({cls:"srs-front"}), back=content.createDiv({cls:"srs-back"});
+    const actions = host.createDiv({cls:"srs-actions"});
+    const cardName=cardHeader.createEl("h3",{cls:"srs-card-name"});
+    const cardMenu=cardHeader.createEl("details",{cls:"srs-tools srs-card-menu"});
+    cardMenu.createEl("summary",{text:"⋯",attr:{"aria-label":"Card actions"}});
+    const cardMenuBody=cardMenu.createDiv();
+    const source=cardMenuBody.createDiv();
+    const undoButton=cardMenuBody.createEl("button",{text:"Undo review"});
+    undoButton.disabled=true;
+    cardMenu.hidden=true;
+    cardHeader.hidden=true;
     function sizeReviewer(){
       const top=Math.max(0,host.getBoundingClientRect?.().top??0);
       host.style?.setProperty("--srs-top",`${top}px`);
@@ -118,7 +130,7 @@
       return {study:text===null?null:validateStudy(JSON.parse(text)),templates:await json(`${root}/config.json`),parts:null};
     }
     function message(e) {notice.textContent=String(e.message||e);}
-    function clearCard() {context.empty();front.empty();back.empty();actions.empty();source.empty();homepage.empty();shown=null;}
+    function clearCard() {context.empty();front.empty();back.empty();actions.empty();source.empty();cardHeader.hidden=true;cardMenu.hidden=true;cardMenu.open=false;homepage.empty();shown=null;}
     function reviewFileMap(){
       if(!reviewFiles)reviewFiles=new Map(api.vault.getFiles().filter(f=>f.path.startsWith(`${dataRoot}/reviews/`)&&LOG_PATTERN.test(f.path.split("/").at(-1))).map(f=>[f.path,f]));
       return reviewFiles;
@@ -633,13 +645,19 @@
       if(card){card=await measure("Render selected card",()=>rendered(card));const i=runtimePositions.get(card.id);available[i]=card;}
       if(disposed||renderGeneration!==sourceGeneration){pending=true;return;}
       showCounts(counts,{...queue,errors:schedulingIndex?.counts(selectedDeck,select.value).errors??contentProblems(available).length});showErrors(available);
-      if(!card){front.textContent="No cards ready for review in this session.";return;}
+      if(!card){
+        front.textContent="No cards ready for review in this session.";
+        if(undoReview){cardHeader.hidden=false;cardMenu.hidden=false;cardName.textContent="Review complete";}
+        return;
+      }
       shown=card;started=Date.now();
-      context.createEl("h3",{cls:"srs-card-name",text:card.template?.name||`${card.anki_notetype||card.group||"Card"} · Card ${(card.anki_ordinal??0)+1}`});
+      cardHeader.hidden=false;
+      cardName.textContent=card.template?.name||`${card.anki_notetype||card.group||"Card"} · Card ${(card.anki_ordinal??0)+1}`;
       const skip=()=>{skipped.add(card.id);schedulingIndex?.bury(card.id);guardedDraw();};
       actions.createEl("button",{text:"Bury"}).onclick=skip;
-      source.createEl("button",{text:"Card settings"}).onclick=()=>openCardSettings(card);
-      if(card.source?.path)source.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
+      cardMenu.hidden=false;
+      source.createEl("button",{text:"Card settings"}).onclick=()=>{cardMenu.open=false;openCardSettings(card);};
+      if(card.source?.path)source.createEl("button",{text:"Open source"}).onclick=()=>{cardMenu.open=false;api.workspace.openLinkText(card.source.path,"",false);};
       if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       dv.el("div",card.frontText,{container:front});
       let options;
@@ -682,6 +700,7 @@
             was_review:value.state.state===State.Review,scheduler_config_id:schedulerConfigId,state:next};
           validateEvent(event,manifest.import_id);
           const logPath=await appendReview(store,`${dataRoot}/reviews`,event);
+          undoReview={event,path:logPath,deck:selectedDeck,group:activeGroup};undoButton.disabled=false;
           reviewFileMap().set(logPath,api.vault.getAbstractFileByPath(logPath));
           dirty.add(logPath);await syncIndex();return null;
         });
@@ -690,6 +709,32 @@
       finally{busy=false;if(pending){pending=false;scheduleRefresh();}}
     }
     async function guardedDraw(){if(checking){operation++;checking=false;}if(busy || managerDirty){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
+    undoButton.onclick=async()=>{
+      if(busy||!undoReview)return;
+      if(!leaveEditor())return;
+      cardMenu.open=false;
+      busy=true;undoButton.disabled=true;
+      try{
+        const target=undoReview;
+        await withStoreLock(identity,async()=>{
+          await syncIndex();
+          if((await index.get("latest",target.event.card_id))?.id!==target.event.id)throw Error("This card has another review now; undo is unavailable.");
+          const text=await store.read(target.path);
+          if(!text?.endsWith("\n"))throw Error("Review log changed; undo is unavailable.");
+          const end=text.length-1,start=text.lastIndexOf("\n",end-1)+1;
+          if(JSON.parse(text.slice(start,end)).id!==target.event.id)throw Error("Another event was saved after this review; undo is unavailable.");
+          const file=api.vault.getAbstractFileByPath(target.path);
+          await api.vault.modify(file,text.slice(0,start));
+          if(await store.read(target.path)!==text.slice(0,start))throw Error("Could not verify undo; refresh the reviewer.");
+          reviewFileMap().set(target.path,api.vault.getAbstractFileByPath(target.path));
+          dirty.add(target.path);indexDirty=true;await syncIndex();
+        });
+        undoReview=null;selectedDeck=target.deck;activeGroup=target.group;select.value=activeGroup;
+        panel="";managing=false;reviewing=true;skipped.delete(target.event.card_id);
+        await draw();notice.textContent="Last review undone.";
+      }catch(error){message(error);}
+      finally{busy=false;undoButton.disabled=!undoReview;if(pending){pending=false;scheduleRefresh();}}
+    };
     function scheduleRefresh(file,oldPath){
       if(disposed)return;
       if(file){

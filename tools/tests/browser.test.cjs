@@ -380,6 +380,15 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   assert.deepEqual(savedConfig.settings.weights,options.weights);
   assert.equal(savedConfig.scheduler_version,'ts-fsrs@5.2.3/FSRS-6');
   assert.ok(!('preset_id' in savedConfig.settings));assert.ok(!('new_cards_per_day' in savedConfig.settings));
+  assert.equal(button('Undo review').disabled,false);
+  await button('Undo review').onclick();
+  assert.equal(files.get(logs[0].path).text,'','undo removes the answer rather than introducing a training observation');
+  assert.ok(button('Show answer'),'undone card is available again');
+  assert.equal(button('Undo review').disabled,true);
+  assert.deepEqual(JSON.parse(files.get(cardPath).text).map(c=>c.id),priorIds);
+  button('Show answer').onclick();
+  await root.querySelectorAll('button').find(b=>b.textContent.startsWith('Good (')).onclick();
+  logs[0]=files.get(logs[0].path);
   const beforeRemote=performanceCounts();
   const remote={...event,id:'99999999-9999-4999-8999-999999999999',card_id:'card-0',review_time_ms:now+1,state:{...event.state,last_review:now+1},parent:`import:import:card-0`};
   logs[0].text+=JSON.stringify(remote)+'\n';logs[0].stat.mtime++;logs[0].stat.size=logs[0].text.length;
@@ -387,6 +396,9 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   const afterRemote=performanceCounts();
   assert.equal(afterRemote.schedulingBuilds,beforeRemote.schedulingBuilds,'remote answers update the existing scheduling index');
   assert.equal(afterRemote.cardPreparations,beforeRemote.cardPreparations,'remote answers do not prepare catalog metadata');
+  const logBeforeRefusedUndo=logs[0].text;
+  await button('Undo review').onclick();
+  assert.equal(logs[0].text,logBeforeRefusedUndo,'undo preserves a log with a subsequent event');
   button('Cards').onclick();
   for(let i=0;i<100&&!root.querySelectorAll('input').length;i++)await tick();
   const search=root.querySelectorAll('input').find(e=>e.type==='search');
