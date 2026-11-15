@@ -10,7 +10,7 @@ def prune(vault, data, configuration, apply=False):
     config = study.validate(layout.load_study(configuration, data))
     manifest, cards = study.load_cards(data, config)
     if 'note_partition_count' not in manifest:
-        raise ValueError('Run upgrade-layout before pruning')
+        raise ValueError('Pruning requires the current notes/cards storage layout')
     raw_cards = [c for p in store.partition_paths(manifest) for c in layout.read(data/p)]
     notes = [n for p in store.note_paths(manifest) for n in layout.read(data/p)]
     live = set()

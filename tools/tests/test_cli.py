@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 import subprocess
 import sys
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -32,6 +31,8 @@ class CliTests(unittest.TestCase):
         self.assertIn('train',output.getvalue())
         self.assertNotIn('init-study',output.getvalue())
         self.assertNotIn('inspect',output.getvalue())
+        for removed in ('install-view', 'upgrade-layout', 'seed-csv-uids'):
+            self.assertNotIn(removed, output.getvalue())
 
     def test_refresh_works_from_another_directory_without_legacy_imports(self):
         fixture=self.fixture()
@@ -67,19 +68,6 @@ raise SystemExit(main(sys.argv[1:]))
             result=cli.main(['train','--profile','vocab','--epochs','0'])
         self.assertEqual(result,2)
         self.assertIn('must be positive',output.getvalue())
-
-    def test_installer_copies_runtime_only_and_preserves_user_configuration(self):
-        with tempfile.TemporaryDirectory() as directory:
-            vault=Path(directory);target=vault/'ankobs-srs';target.mkdir()
-            (target/'config.json').write_text('user templates')
-            (target/'study.json').write_text('user study rules')
-            installed=cli.install_view(vault)
-            self.assertEqual(installed,target)
-            self.assertTrue((target/'view.js').is_file())
-            self.assertTrue((target/'view.css').is_file())
-            self.assertEqual((target/'config.json').read_text(),'user templates')
-            self.assertEqual((target/'study.json').read_text(),'user study rules')
-            self.assertEqual({p.name for p in target.iterdir()},{'view.js','view.css','config.json','study.json'})
 
     def test_old_migration_commands_forward_to_the_new_project(self):
         script=ROOT/'migration/migrate.py'

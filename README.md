@@ -63,16 +63,6 @@ including original deck IDs; those IDs do not define study deck membership.
 The manifest retains imported scheduling settings and daily counters. The store
 therefore includes scheduling and compatibility metadata alongside identities.
 
-For an existing installation using `study.json` and `config.json`, run once from
-`tools/`:
-
-```sh
-uv run python srs.py upgrade-layout
-```
-
-This converts the configuration and catalog in place, preserves card IDs,
-baselines, profile settings, and review logs, then removes the superseded files.
-It does not require Anki or Node. Reopen the reviewer or click **Refresh**.
 For a fresh Anki import, `migration/migrate.py init-study` creates the same layout
 from the imported metadata and compatibility source registry. It refuses to
 replace existing source rules.
@@ -319,11 +309,8 @@ CSV rows resolve through `anki_note_id`, `srs_note_id`, or legacy `srs_uid`. Mar
 the same identities; ID-linked `[!anki]` callouts are supported too. Mapped text,
 media, vocabulary, taxonomy, and structured source transformations run against
 live vault properties. Note bindings retain source locators; configuration retains transformations.
-Neither stores note field values. New local CSV identities can be assigned from `tools/` with:
-
-```sh
-uv run python srs.py seed-csv-uids /path/to/vault/examples/notes.csv
-```
+Neither stores note field values. `refresh-cards` automatically assigns missing CSV
+identities while preserving existing IDs; no separate seeding command is needed.
 
 Templates support fields, nested conditional/inverted sections, `FrontSide`,
 `cloze:` and `text:` filters, and vault media references. Unknown fields, `type:`
@@ -472,8 +459,7 @@ uv run --extra anki python -m unittest discover -s tests -v
 ```
 
 The previous ongoing commands in `migration/migrate.py` remain compatibility
-aliases that forward to `tools/srs.py` using the `tools/` environment. Use
-`tools/srs.py upgrade-layout` once for the legacy combined configuration layout. See [tools/README.md](tools/README.md) and
+aliases that forward to `tools/srs.py` using the `tools/` environment. See [tools/README.md](tools/README.md) and
 [migration/README.md](migration/README.md) for the ownership of each command.
 
 The Python suite uses native Anki disposable collections with six distinct trained

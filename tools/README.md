@@ -11,20 +11,17 @@ uv run python srs.py train --profile preset-1 --apply
 Defaults point to `../config/`, `../data/`, and the containing vault.
 Profiles live in `../data/profiles.json`. `--config` selects another configuration
 directory; `--data` selects its store. Legacy `--study <study.json>` remains
-available for compatibility. For an old combined layout, run
-`uv run python srs.py upgrade-layout` once. It also moves existing partitions into `data/notes/` and
-`data/cards/`. It preserves card IDs and reviews.
+available for compatibility. `refresh-cards` automatically assigns missing IDs to CSV rows, eligible structural
+notes, and blocks while retaining existing identities. No separate seeding step is needed.
+
 Omit `--apply` to train and evaluate without updating a profile.
 
 | Command | Purpose |
 | --- | --- |
-| `srs.py upgrade-layout` | Separate legacy configuration, scheduling profiles and generated note/card bindings. |
 | `srs.py audit-decks` | Flag cards matching a parent but none of its descendants; report IDs without changing decks. Exit 0: clear; 1: gaps; 2: failure. |
 | `srs.py prune-missing-sources` | Preview removal of unreviewed generated cards with missing sources; `--apply` removes eligible cards. |
 | `srs.py refresh-cards` | Discover source/template card variants while preserving identities, schedules, and logs. |
 | `srs.py train --profile <id>` | Train and evaluate standalone FSRS from unified reviews; `--apply` updates future answers. |
-| `srs.py seed-csv-uids <csv>` | Assign persistent IDs to new CSV rows. |
-| `srs.py install-view --vault <path>` | Install `view.js`, `view.css`, and initial templates; preserve existing configuration. |
 | `build.py` | Rebuild the standalone reviewer from browser sources. |
 
 The `srs_tools/` package contains the ongoing CLI, source discovery, training,

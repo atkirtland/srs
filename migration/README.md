@@ -25,16 +25,15 @@ For one-time setup after importing:
 uv run python migrate.py init-study
 ```
 
-Skip setup if `../config/sources.json` already exists. Existing installations
-with `study.json` should use `../tools/srs.py upgrade-layout` instead.
-Review logs and card IDs are preserved by the layout conversion.
+Skip setup if `../config/sources.json` already exists.
+Review logs and card IDs are preserved by the initial layout conversion.
 Anki-to-vault field mappings remain in `config/exports.json` for the compatibility
 adapter; your external converter owns that conversion. `lib/bootstrap.py`
 converts imported metadata to study configuration. `lib/catalog.py`, `srs.py`,
 `scheduling.py`, and `verification.py` handle native import and verification.
 Shared vault parsers and identity helpers come from `../tools/srs_tools/`.
 
-Old `train`, `refresh-cards`, `seed-csv-uids`, and `install-view` invocations
+Old `train` and `refresh-cards` invocations
 through `migrate.py` forward to `../tools/srs.py` and its uv environment.
 `build.py` and `verify-browser.cjs` are compatibility entry points for their
 implementations under `tools/`. Migration's uv environment contains the legacy
