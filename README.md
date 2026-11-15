@@ -493,3 +493,9 @@ Progress reports parsed/reused/hashed files. Cancellation before publication lea
 the catalog unchanged; source IDs already inserted remain. Once publication starts,
 the recovery journal finishes it on reopening. Run maintenance on one syncing
 device at a time; simultaneous maintenance across devices is unsupported.
+
+For a temporary, one-way import of subsequent Anki reviews without rebuilding the
+catalog, use [`migration/migrate.py import-reviews`](migration/README.md#temporary-anki-review-bridge).
+It previews by default, imports saved Anki scheduling states with `--apply`, and
+reports cards reviewed in both systems as conflicts. Imported reviews do not
+update local daily activity allowances or scheduling profiles.

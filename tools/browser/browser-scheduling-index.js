@@ -61,7 +61,7 @@ class SchedulingIndex {
     if(delta>0)this.kinds.set(card.id,kind);
   }
   addActivity(event){
-    if(event.kind==='historical_review'||event.kind==='scheduling_baseline'||event.kind==='card_settings'||studyDay(event.review_time_ms,this.manifest.timing)!==studyDay(this.now,this.manifest.timing))return;
+    if(event.kind==='anki_state'||event.kind==='historical_review'||event.kind==='scheduling_baseline'||event.kind==='card_settings'||studyDay(event.review_time_ms,this.manifest.timing)!==studyDay(this.now,this.manifest.timing))return;
     const card=this.cards.get(event.card_id);if(!card||event.was_new&&this.introduced.has(card.id))return;
     if(event.was_new)this.introduced.add(card.id);
     let deck=this.manifest.scheduling.decks[card.original_deck_id||card.deck_id];

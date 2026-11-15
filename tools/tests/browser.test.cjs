@@ -1132,3 +1132,22 @@ test('shared maintenance scans survive closing and reopening IndexedDB',async()=
   let e=f.engine();await e.apply(await e.plan());persistent.close();persistent=await SRS.MaintenanceCache.open(identity,indexedDB);
   try{f.reads.length=0;const plan=await f.engine().plan(true);assert.equal(plan.result.scan.parsed_files,0);assert.equal(plan.result.scan.reused_files,1);assert.ok(!f.reads.includes('words.csv'));}finally{persistent.close();}
 });
+
+test('Anki bridge states select current scheduling without inventing review activity',async()=>{
+  const index=await SRS.ReviewIndex.open(`anki-bridge-${crypto.randomUUID()}`,'import',timing,indexedDB);
+  const event={format_version:2,kind:'anki_state',id:crypto.randomUUID(),device_id:'anki',card_id:'card-0',
+    import_id:'import',review_time_ms:now,anki_revlog_id:String(now),state:state(2)};
+  await index.ingest([event],new Set(['card-0']));
+  assert.deepEqual((await index.latest()).get('card-0').state,event.state);
+  assert.equal((await index.activityToday(now)).length,0);
+  assert.equal((await index.historyFor('card-0')).length,0);
+  await index.ingest([event],new Set(['card-0']));
+  assert.equal((await index.latest()).size,1);
+  assert.throws(()=>SRS.validateEvent({...event,import_id:'wrong'},'import'),/Invalid Anki/);
+  const local={...answer(),card_id:'card-0',parent:event.id,review_time_ms:now+1000,state:{...state(2),last_review:now+1000}};
+  await index.ingest([local],new Set(['card-0']));
+  assert.equal((await index.latest()).get('card-0').id,local.id);
+  assert.equal((await index.activityToday(now)).length,1);
+
+  index.close();
+});

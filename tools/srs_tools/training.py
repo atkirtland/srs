@@ -29,7 +29,7 @@ def events_from_logs(data):
                 if not isinstance(key,str) or not key:
                     raise ValueError('Missing event identity')
                 kind=event.get('kind','answer')
-                if kind not in ('answer','historical_review','scheduling_baseline','card_settings'):
+                if kind not in ('answer','historical_review','scheduling_baseline','card_settings','anki_state'):
                     raise ValueError('Unknown event kind')
                 timestamp=event.get('time_ms') if kind=='card_settings' else event.get('review_time_ms')
                 if type(timestamp) is not int or timestamp < 0:
@@ -67,6 +67,7 @@ def study_day(timestamp, timing):
 
 def histories(events, known_cards, import_id):
     imported, answers = defaultdict(list), defaultdict(dict)
+    state_roots = {e['id']: e['card_id'] for e in events if e.get('kind') == 'anki_state'}
     for event in events:
         kind = event.get('kind', 'answer')
         if event.get('card_id') not in known_cards:
@@ -93,7 +94,7 @@ def histories(events, known_cards, import_id):
                     raise ValueError('Cycle in answer history')
                 seen.add(cursor['id']); branch.append(cursor)
                 parent = cursor['parent']
-                if parent == f'import:{import_id}:{cid}':
+                if parent == f'import:{import_id}:{cid}' or state_roots.get(parent) == cid:
                     break
                 if parent not in nodes:
                     raise ValueError(f'Missing parent answer {parent}; finish syncing before training')

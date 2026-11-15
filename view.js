@@ -1966,6 +1966,12 @@
       }
       return event;
     }
+    if(event?.format_version===2 && event.kind==='anki_state') {
+      if(!UUID.test(event.id)||event.device_id!=='anki'||event.import_id!==importId||typeof event.card_id!=='string'||!event.card_id||
+          !Number.isSafeInteger(event.review_time_ms)||event.review_time_ms<0||typeof event.anki_revlog_id!=='string')throw Error('Invalid Anki state import');
+      validateState(event.state);
+      return event;
+    }
     if (event?.format_version === 2 && event.kind !== "answer") throw Error("Unknown event kind");
     if (!event || ![1, 2].includes(event.format_version) || !UUID.test(event.id) || !DEVICE.test(event.device_id) || (typeof event.card_id !== "string" || !event.card_id) || event.import_id !== importId || ![1, 2, 3, 4].includes(event.rating) || !Number.isSafeInteger(event.review_time_ms) || event.review_time_ms < 0 || !Number.isFinite(event.duration_ms) || event.duration_ms < 0 || typeof event.was_new !== "boolean" || typeof event.parent !== "string") throw Error("Invalid or incompatible review event");
     validateState(event.state);
@@ -2381,7 +2387,7 @@
             continue;
           }
           if (record.event.kind === "scheduling_baseline") continue;
-          await request(tx.objectStore("activity").put({...record.event,day:studyDay(record.event.review_time_ms,this.timing)}));
+          if(record.event.kind!=="anki_state")await request(tx.objectStore("activity").put({...record.event,day:studyDay(record.event.review_time_ms,this.timing)}));
           const state = await request(latest.get(record.event.card_id));
           if (!state || compare(record.event, state) > 0) await request(latest.put(record.event, record.event.card_id));
           if (record.day) await request(tx.objectStore("introduced").put({ day: record.day, card_id: record.event.card_id }));
@@ -2707,7 +2713,7 @@ function deckTree(cards, states, manifest, now, activity = [], aggregates = null
   const byCard = new Map(cards.map(c => [c.id, c]));
   const currentDay = studyDay(now, manifest.timing);
   for (const event of activity) {
-    if (event.kind === "historical_review" || event.kind === "scheduling_baseline" || studyDay(event.review_time_ms, manifest.timing) !== currentDay) continue;
+    if (event.kind === "anki_state" || event.kind === "historical_review" || event.kind === "scheduling_baseline" || studyDay(event.review_time_ms, manifest.timing) !== currentDay) continue;
     const card = byCard.get(event.card_id);
     if (!card) continue;
     if (event.was_new && introduced.has(card.id)) continue;
@@ -3217,7 +3223,7 @@ class SchedulingIndex {
     if(delta>0)this.kinds.set(card.id,kind);
   }
   addActivity(event){
-    if(event.kind==='historical_review'||event.kind==='scheduling_baseline'||event.kind==='card_settings'||studyDay(event.review_time_ms,this.manifest.timing)!==studyDay(this.now,this.manifest.timing))return;
+    if(event.kind==='anki_state'||event.kind==='historical_review'||event.kind==='scheduling_baseline'||event.kind==='card_settings'||studyDay(event.review_time_ms,this.manifest.timing)!==studyDay(this.now,this.manifest.timing))return;
     const card=this.cards.get(event.card_id);if(!card||event.was_new&&this.introduced.has(card.id))return;
     if(event.was_new)this.introduced.add(card.id);
     let deck=this.manifest.scheduling.decks[card.original_deck_id||card.deck_id];
@@ -3966,7 +3972,7 @@ class CardMaintenance {
           for(const event of changes){
             if(event.kind==='historical_review'||event.kind==='scheduling_baseline')continue;
             touched.add(event.card_id);
-            if(!snapshotCache.activityIds.has(event.id)&&studyDay(event.review_time_ms,manifest.timing)===studyDay(Date.now(),manifest.timing)){
+            if(event.kind!=='anki_state'&&!snapshotCache.activityIds.has(event.id)&&studyDay(event.review_time_ms,manifest.timing)===studyDay(Date.now(),manifest.timing)){
               snapshotCache.activityIds.add(event.id);snapshotCache.activity.push(event);schedulingIndex?.addActivity(event);
             }
           }

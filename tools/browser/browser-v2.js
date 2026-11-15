@@ -235,7 +235,7 @@ function deckTree(cards, states, manifest, now, activity = [], aggregates = null
   const byCard = new Map(cards.map(c => [c.id, c]));
   const currentDay = studyDay(now, manifest.timing);
   for (const event of activity) {
-    if (event.kind === "historical_review" || event.kind === "scheduling_baseline" || studyDay(event.review_time_ms, manifest.timing) !== currentDay) continue;
+    if (event.kind === "anki_state" || event.kind === "historical_review" || event.kind === "scheduling_baseline" || studyDay(event.review_time_ms, manifest.timing) !== currentDay) continue;
     const card = byCard.get(event.card_id);
     if (!card) continue;
     if (event.was_new && introduced.has(card.id)) continue;

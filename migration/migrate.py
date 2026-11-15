@@ -62,13 +62,41 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--at", help="fixed UTC ISO timestamp; defaults to command start")
     verify.add_argument("--node", default="node", help="desktop JS executable; never needed for reviewing")
     verify.add_argument("--output", type=Path, default=HERE / "verification.json")
+    bridge = commands.add_parser('import-reviews', help='Append Anki reviews and saved states without rebuilding the catalog')
+    bridge.add_argument('--collection', type=Path, required=True)
+    bridge.add_argument('--data', type=Path, default=PORTABLE / 'data' if PORTABLE else None)
+    bridge.add_argument('--anki-version', required=True)
+    bridge.add_argument('--apply', action='store_true')
+    bridge.add_argument('--output', type=Path, help='optional JSON report')
     setup = commands.add_parser('init-study', help='initialize study configuration from the imported catalog')
     setup.add_argument('--data', type=Path, default=PORTABLE / 'data' if PORTABLE else None)
     setup.add_argument('--study', type=Path, help='legacy combined output file (default: config/)')
     setup.add_argument('--config', type=Path, default=PORTABLE / 'config' if PORTABLE else None)
     args = parser.parse_args(argv)
     try:
-        if args.command == 'init-study':
+        if args.command == 'import-reviews':
+            import review_bridge
+            import scheduling
+            import importlib.metadata
+            if args.data is None:
+                raise ValueError('--data is required')
+            installed = importlib.metadata.version('anki')
+            if not scheduling.anki_versions_match(installed, args.anki_version):
+                raise ValueError(f'Installed Anki backend is {installed}; requested {args.anki_version}')
+            if (args.data / 'anki-bridge.pending.json').exists():
+                if not args.apply:
+                    raise ValueError('Pending bridge import: rerun with --apply to finish it before previewing')
+                review_bridge.recover(args.data)
+            manifest, events, report = review_bridge.plan(srs.read_snapshot(args.collection), args.data, installed)
+            if args.apply:
+                review_bridge.apply(args.data, manifest, events)
+            report['applied'] = args.apply
+            report['daily_limits'] = 'Anki reviews update history and state, but not local daily activity counters'
+            if args.output:
+                args.output.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+            print(json.dumps(report, indent=2))
+            return 2 if report['conflicts'] or report['unmapped_anki_cards'] else 0
+        elif args.command == 'init-study':
             import bootstrap
             if args.data is None or args.config is None:
                 raise ValueError('--data, --study and --config are required outside the reviewer directory')

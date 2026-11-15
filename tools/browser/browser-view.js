@@ -253,7 +253,7 @@
           for(const event of changes){
             if(event.kind==='historical_review'||event.kind==='scheduling_baseline')continue;
             touched.add(event.card_id);
-            if(!snapshotCache.activityIds.has(event.id)&&studyDay(event.review_time_ms,manifest.timing)===studyDay(Date.now(),manifest.timing)){
+            if(event.kind!=='anki_state'&&!snapshotCache.activityIds.has(event.id)&&studyDay(event.review_time_ms,manifest.timing)===studyDay(Date.now(),manifest.timing)){
               snapshotCache.activityIds.add(event.id);snapshotCache.activity.push(event);schedulingIndex?.addActivity(event);
             }
           }
