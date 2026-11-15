@@ -1,25 +1,49 @@
-# Desktop SRS tools
+# Anki migration and verification
 
-All Python tooling and dependencies live here. The default `uv sync --locked`
-environment supports card discovery and standalone FSRS training without Anki
-or Node. Import/native verification use the optional `anki` extra:
-`uv run --extra anki python migrate.py ...`.
+This directory owns one-time Anki import, native scheduler verification, and
+initial conversion of imported metadata into editable study configuration.
+Ongoing card discovery and training live in [`../tools/`](../tools/README.md).
 
-From this directory, after restoring `../data/`:
+| Command | Purpose |
+| --- | --- |
+| `migrate.py inspect --collection <snapshot>` | Inspect snapshot metadata and template definitions. |
+| `migrate.py migrate ...` | Import scheduling identities, baselines and review history. |
+| `migrate.py verify ...` | Compare counts and transitions with a disposable Anki collection copy. |
+| `migrate.py init-study` | Create `../study.json` from the imported catalog once, preserving existing files. |
+
+Run native import and verification with their optional backend:
 
 ```sh
-uv sync --locked
-uv run python migrate.py init-study
-uv run python migrate.py refresh-cards
-uv run python migrate.py train --profile preset-1 --apply
+uv sync --locked --extra anki
+uv run --extra anki python migrate.py migrate --help
+uv run --extra anki python migrate.py verify --help
 ```
 
-Initialization runs once and preserves edits. Use actual profile IDs from
-`../study.json`; omit `--apply` to evaluate without updating settings. Source
-discovery assigns persistent IDs to new notes/rows/blocks and preserves existing
-schedules and logs. Training consumes imported and local reviews directly using
-`fsrs-rs-python`; it never opens an Anki collection.
+For one-time setup after importing:
 
-See [the reviewer README](../README.md) for filter syntax, migration, native
-verification, storage formats, and test commands. `.venv` and test-only
-`node_modules` are never required while reviewing on desktop or Android.
+```sh
+uv run python migrate.py init-study
+```
+
+Skip setup if `study.json` already exists. There is no data/schema migration
+required for the CLI split. Configuration and review-log locations are unchanged.
+Anki-to-vault field mappings remain in `config/exports.json` for the compatibility
+adapter; your external converter owns that conversion. `lib/bootstrap.py`
+converts imported metadata to study configuration. `lib/catalog.py`, `srs.py`,
+`scheduling.py`, and `verification.py` handle native import and verification.
+Shared vault parsers and identity helpers come from `../tools/srs_tools/`.
+
+Old `train`, `refresh-cards`, `seed-csv-uids`, and `install-view` invocations
+through `migrate.py` forward to `../tools/srs.py` and its uv environment.
+`build.py` and `verify-browser.cjs` are compatibility entry points for their
+implementations under `tools/`. Migration's uv environment contains the legacy
+conversion dependencies and optional Anki backend, not the standalone optimizer.
+
+Run migration checks with:
+
+```sh
+uv run --extra anki python -m unittest discover -s tests -v
+```
+
+See [the reviewer README](../README.md) for complete migration commands and
+[DATA_FORMAT.md](../DATA_FORMAT.md) for the persistent file formats.

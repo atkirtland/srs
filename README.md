@@ -1,8 +1,9 @@
 # Portable Obsidian SRS
 
 The standalone `view.js` reviewer reads card content exclusively from your vault.
-It needs Obsidian and Dataview on desktop or Android. Python and Node are desktop
-migration/verification tools; they are never used while reviewing.
+It needs Obsidian and Dataview on desktop or Android. Python tooling runs on desktop under `tools/` (ongoing usage) and
+`migration/` (Anki import/verification). Python and Node are never used while
+reviewing.
 
 Open the default deck homepage:
 
@@ -43,7 +44,8 @@ the review logs.
 
 ## Source rules, study decks, and profiles
 
-Run these commands from `migration/` after restoring your `data/` directory:
+For the one-time conversion of imported metadata, run from `migration/`
+after restoring `data/`. Skip this if `study.json` already exists:
 
 ```sh
 uv sync --locked
@@ -67,6 +69,32 @@ The editable configuration separates:
 - **Scheduling profiles:** interval settings and trained FSRS parameters.
   **Profiles** edits retention, steps and daily settings. **Card settings** can
   explicitly assign an individual card to a profile.
+
+### Configuration and storage locations
+
+All paths below are relative to this reviewer directory.
+
+| Layer | Location | What it defines or stores |
+| --- | --- | --- |
+| Anki → vault conversion | Your external converter; current bootstrap mapping: `migration/config/exports.json` | Mapping Anki notes to vault notes, CSV rows, or Markdown blocks. The external codebase owns this conversion. |
+| Source identity | Vault frontmatter / CSV columns: `anki_note_id`, `srs_uid`; block comments: `ID`, `SRS-ID` | Persistent identity of a note, row, or block. There is no second stored copy of its content. |
+| Notes → card variants | `study.json` → `source_rules[rule].templates`; `config.json` → `groups[rule].templates` | Which templates generate cards, their front/back presentation, and optional `when` conditions. |
+| New card ID generation | [tools/srs_tools/core.py](tools/srs_tools/core.py) → `card_uid()` | Deterministic UUIDv5 from the rule/group key, source identity, and template key; cloze variants also distinguish their ordinal. |
+| Persisted ID mappings | `data/imports/<revision>/cards-*.json`; current revision selected by `data/manifest.json` | Card `id` linked to `note_uid`, `anki_card_id`, `group`, `template_key`, `anki_ordinal`, and source reference. Existing imported card IDs are preserved. |
+| Card-specific settings | `data/reviews/<device>-YYYY-MM.jsonl` → `kind: "card_settings"` | Suspension, card tags, and an optional explicit `profile` override. IndexedDB caches the resolved settings. |
+| Card → scheduling profile | `study.json` → `profile_rules`, `default_profile`; card metadata → `profile_id`; settings events → `changes.profile` | Effective assignment: explicit override → first matching rule → initial card profile → default profile. |
+| Current scheduler settings | `study.json` → `profiles[profile-id].settings` | Active FSRS parameters, retention, steps, and interval settings. Training selects cards currently assigned to the profile. |
+| Per-card memory and due date | Card partition → `baseline`; latest answer in monthly review logs → `state` | Each card's current scheduling state, including stability, difficulty, and due date. |
+| Historical scheduler settings | `data/scheduler-configs/<hash>.json`; answer events → `scheduler_config_id` | Immutable configurations used by past answers, retained independently of current profile edits. |
+| Study decks | `study.json` → `decks[deck-id]` | Names, parent relationships, and card filters; editable through **New deck / Edit**. |
+
+There is no separate handwritten ID-map file. New card IDs are UUIDv5 values
+from `(source-rule/group key, persistent source note UID, template key)` in
+`tools/srs_tools/core.py:card_uid`; generated cloze variants additionally distinguish
+their ordinal. Persisted imported card IDs are preserved, including previously
+unmapped cards that later acquire a source/template. File paths and CSV row
+positions do not define identity. Existing legacy `deck_id` fields remain in
+scheduling metadata to preserve imported daily counters and deck/parent limits.
 
 Profile assignment uses a card-specific override, then the first matching
 `profile_rules` entry, then its source-assigned `profile_id`, then
@@ -98,10 +126,11 @@ See [schemas/study.schema.json](schemas/study.schema.json).
 
 ## Add cards without Anki
 
-Keep adding your normal Obsidian notes, CSV rows, or callouts, then run:
+Keep adding your normal Obsidian notes, CSV rows, or callouts. From `tools/`, run:
 
 ```sh
-uv run python migrate.py refresh-cards
+uv sync --locked
+uv run python srs.py refresh-cards
 ```
 
 The desktop command scans the source rules and publishes metadata partitions of
@@ -132,11 +161,11 @@ editing presentation.
 Training uses the standalone
 [fsrs-rs-python bindings](https://github.com/open-spaced-repetition/fsrs-rs-python)
 to the Rust FSRS optimizer. Neither Anki nor PyTorch is a training dependency.
-Select a profile ID from `study.json` or the **Profiles** screen:
+From `tools/`, select a profile ID from `study.json` or the **Profiles** screen:
 
 ```sh
-uv run python migrate.py train --profile preset-1 --output ../training.json
-uv run python migrate.py train --profile preset-1 --apply --output ../training.json
+uv run python srs.py train --profile preset-1 --output ../training.json
+uv run python srs.py train --profile preset-1 --apply --output ../training.json
 ```
 
 Without `--apply`, the command reports trained parameters and evaluation only.
@@ -147,6 +176,8 @@ immutable scheduler configuration. Existing 19-weight presets remain unchanged
 until explicitly trained/applied; this optimizer produces **21 FSRS-6 weights**,
 with explicit standalone optimizer provenance.
 
+Training retains same-day reviews inside histories but uses only positive-gap
+reviews as prediction targets; its report counts omitted same-day targets.
 Training deduplicates imported/local events, excludes rescheduling observations,
 follows each card's winning answer branch, and computes gaps using your saved
 study timezone and rollover. Cards whose history lacks an initial learning/new
@@ -218,10 +249,10 @@ CSV rows resolve through `anki_note_id` or `srs_uid`. Markdown frontmatter uses
 the same identities; ID-linked `[!anki]` callouts are supported too. Mapped text,
 media, vocabulary, taxonomy, and structured source transformations run against
 live vault properties. Card partitions retain source/transformation references,
-never field values. New local CSV identities can be assigned with:
+never field values. New local CSV identities can be assigned from `tools/` with:
 
 ```sh
-uv run python migrate.py seed-csv-uids /path/to/vault/examples/notes.csv
+uv run python srs.py seed-csv-uids /path/to/vault/examples/notes.csv
 ```
 
 Templates support fields, nested conditional/inverted sections, `FrontSide`,
@@ -303,7 +334,13 @@ srs/
       computer-2026-11.jsonl
       android-2026-11.jsonl
       computer-2026-11-002.jsonl
-  migration/                optional on reviewing devices
+  tools/                    ongoing CLI, parsers, training, browser build/tests
+    srs.py, build.py
+    srs_tools/, browser/, tests/
+    pyproject.toml, uv.lock
+  migration/                optional Anki import, verification, initial setup
+    migrate.py, lib/, tests/
+    pyproject.toml, uv.lock
 ```
 
 All version 2 events use device-specific UTC-month JSONL files, rotating at
@@ -337,15 +374,30 @@ Without Web Locks use one active reviewer window per device.
 
 ## Development checks
 
-Browser source fragments and all desktop tooling/dependencies live under
-`migration/`. Rebuild the standalone browser file without Node:
+Ongoing tools, browser source fragments, and their tests live under `tools/`.
+Each tooling directory has its own uv project and `.venv`. Neither is required on
+reviewing devices. From `tools/`:
 
 ```sh
-uv run python build.py
-uv run --extra anki python -m unittest discover -s tests -v
-npm ci
-npm test
+uv sync --locked --extra test
+uv run --extra test python build.py
+uv run --extra test python -m unittest discover -s tests -v
+uv run --extra test npm ci
+uv run --extra test npm test
 ```
+
+The optional `test` extra supplies desktop Node. From `migration/`, run native
+checks separately:
+
+```sh
+uv run --extra anki python -m unittest discover -s tests -v
+```
+
+The previous ongoing commands in `migration/migrate.py` remain compatibility
+aliases that forward to `tools/srs.py` using the `tools/` environment. Existing
+`study.json`, templates, identities, card partitions and review logs need no
+conversion for this code split. See [tools/README.md](tools/README.md) and
+[migration/README.md](migration/README.md) for the ownership of each command.
 
 The Python suite uses native Anki disposable collections with six distinct trained
 19-weight presets and 96 representative answers, exact deck/parent counts,

@@ -1,7 +1,7 @@
 [project]
-name = "anki-markdown-exporter"
+name = "vault-srs-migration"
 version = "0.1.0"
-description = "Export Anki notes to round-trip-friendly Markdown through AnkiConnect"
+description = "Optional Anki import, verification and legacy conversion tools"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -9,7 +9,6 @@ dependencies = [
     "markdownify>=0.13,<2",
     "pyyaml>=6,<7",
     "tzdata>=2025.2",
-    "fsrs-rs-python==0.9.3",
 ]
 
 [project.optional-dependencies]

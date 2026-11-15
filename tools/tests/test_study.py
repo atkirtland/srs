@@ -9,10 +9,8 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'lib'))
-import study
-import training
-import srs
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from srs_tools import study, training, core as srs
 
 WEIGHTS=[0.4, 0.6, 2.4, 5.8, 4.9, 0.9, 0.8, 0.01, 1.5, 0.1, 0.9, 2.0, 0.1, 0.3, 1.6, 0.2, 2.9, 0.5, 0.6]
 
@@ -112,15 +110,6 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(sorted(card['anki_ordinal'] for card in cards if card['source']['path']=='words.csv'),[0,2])
         self.assertEqual(self.refresh()['added'],0)
 
-    def test_initialize_preserves_native_overrides_and_never_overwrites_edits(self):
-        self.study.unlink()
-        with patch.dict(study.sources.EXPORTS, {'words':study.sources.Export('words.csv','Basic',())}):
-            c=study.initialize(self.data,self.config,self.study)
-        self.assertEqual(c['profiles']['preset-1']['settings']['weights'],WEIGHTS)
-        self.assertEqual(c['decks']['a']['filter'],{'deck_ids':['a'],'include_children':True})
-        with self.assertRaisesRegex(ValueError,'Already exists'):study.initialize(self.data,self.config,self.study)
-        self.assertEqual(study.read(self.data/'manifest.json'),manifest())
-
     def test_filters_and_profile_precedence_are_independent_of_identity(self):
         card=dict(id='stable',group='words',template_key='recognition',deck_id='a',source={'path':'wiki/words/a.md'},properties={'production':True},card_settings={'tags':['hard']})
         query={'all':[{'paths':['wiki/words']},{'tags':['hard']},{'properties':{'production':True}}],'not':{'templates':['reverse']}}
@@ -159,6 +148,34 @@ class StudyTests(unittest.TestCase):
         self.write_events([answer('child','missing',first)])
         with self.assertRaisesRegex(ValueError,'Missing parent'):training.prepare(self.data,self.study,'vocab')
 
+    def test_same_day_reviews_are_history_inputs_but_never_prediction_targets(self):
+        from fsrs_rs_python import FSRS, DEFAULT_PARAMETERS, FSRSItem, FSRSReview
+        sequence=[(3,0),(3,2),(1,0),(3,0),(4,7)]
+        raw=FSRSItem([FSRSReview(rating=r,delta_t=d) for r,d in sequence[:-1]])
+        with self.assertRaisesRegex(ValueError,'InvalidInput'):
+            FSRS(parameters=DEFAULT_PARAMETERS).evaluate([raw])
+        items,ids,excluded=training.training_items([sequence])
+        self.assertEqual(ids,[0,0]);self.assertEqual(excluded,2)
+        self.assertEqual([len(item.reviews) for item in items],[2,5])
+        self.assertEqual(items[-1].long_term_review_cnt(),2)
+        metrics=FSRS(parameters=DEFAULT_PARAMETERS).evaluate(items)
+        self.assertTrue(__import__('math').isfinite(metrics.log_loss))
+
+    def test_training_applies_with_same_day_lapses_in_history(self):
+        events=self.training_fixture()
+        extra=[]
+        for event in events:
+            if event['review_type']==1 and int(event['id'].rsplit(':',1)[1])%5==0:
+                extra.append({**event,'id':event['id']+'-same-day',
+                              'review_time_ms':event['review_time_ms']+1000,'rating':1,'review_type':2})
+        self.write_events(extra)
+        before={p:p.read_bytes() for p in self.data.rglob('*') if p.is_file()}
+        report=training.train(self.data,self.study,'vocab',apply=True,epochs=1)
+        self.assertEqual(report['same_day_targets_excluded'],len(extra))
+        self.assertEqual(report['training_examples'],55*21)
+        self.assertTrue(report['applied'])
+        self.assertEqual(before,{p:p.read_bytes() for p in self.data.rglob('*') if p.is_file()})
+
     def test_real_standalone_optimizer_trains_and_applies_without_touching_states(self):
         self.training_fixture()
         before={p:p.read_bytes() for p in self.data.rglob('*') if p.is_file()}
@@ -189,7 +206,7 @@ class StudyTests(unittest.TestCase):
         payload=dict(manifest=manifest(),cards=[],now=now,transitions=transitions)
         node=Path(sys.executable).with_name('node')
         if not node.exists():self.skipTest('desktop verification Node is not installed')
-        result=subprocess.run([str(node),str(Path(__file__).resolve().parents[1]/'verify-browser.cjs')],input=json.dumps(payload),capture_output=True,text=True)
+        result=subprocess.run([str(node),str(Path(__file__).resolve().parents[1]/'browser/verify.cjs')],input=json.dumps(payload),capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)
         for value in json.loads(result.stdout)['transitions']:
             self.assertNotIn('error',value)
@@ -224,10 +241,11 @@ class BlockAnki:
   if fullname == 'anki' or fullname.startswith('anki.'):
    raise AssertionError('Anki must not be imported')
 sys.meta_path.insert(0, BlockAnki())
-import study, training, fsrs_rs_python
+from srs_tools import study, training
+import fsrs_rs_python
 training.train(__import__('pathlib').Path(sys.argv[1]), __import__('pathlib').Path(sys.argv[2]), 'vocab', epochs=1)
 assert not any(name == 'anki' or name.startswith('anki.') for name in sys.modules)
 """
         self.training_fixture()
-        result=subprocess.run([sys.executable,'-c',code,str(self.data),str(self.study)],env={**__import__('os').environ,'PYTHONPATH':str(Path(study.__file__).parent)},capture_output=True,text=True)
+        result=subprocess.run([sys.executable,'-c',code,str(self.data),str(self.study)],env={**__import__('os').environ,'PYTHONPATH':str(Path(study.__file__).parent.parent)},capture_output=True,text=True)
         self.assertEqual(result.returncode,0,result.stderr)

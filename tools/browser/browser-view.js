@@ -324,11 +324,11 @@
     function showConfiguration(section){
       if(section==="deck"){showDeckEditor();return;}
       homepage.createEl("h2",{text:section==="profiles"?"Scheduling profiles":"Sources"});
-      if(!studyConfig){homepage.createEl("p",{text:"Create the study configuration on desktop first: uv run python migrate.py init-study"});return;}
+      if(!studyConfig){homepage.createEl("p",{text:"Create the study configuration once from migration/: uv run python migrate.py init-study"});return;}
       homepage.createEl("button",{text:"Open study configuration"}).onclick=()=>api.workspace.openLinkText(`${root}/study.json`,"",false);
       if(section==="sources"){
         homepage.createEl("p",{text:"Rules create cards from your vault content. Templates define the questions; study decks select which cards to practice."});
-        homepage.createEl("p",{text:"Discover additions on desktop: uv run python migrate.py refresh-cards. Then Refresh here to load them. This preserves existing schedules and review logs."});
+        homepage.createEl("p",{text:"Discover additions on desktop from tools/: uv run python srs.py refresh-cards. Then Refresh here to load them. This preserves existing schedules and review logs."});
         for(const [id,rule] of Object.entries(studyConfig.source_rules)){
           const row=homepage.createDiv({cls:"srs-card-editor"});row.createEl("h3",{text:id});
           row.createEl("p",{text:rule.sources.join(", ")});row.createEl("p",{text:`Templates: ${rule.templates.join(", ")}`});
@@ -339,7 +339,7 @@
       const profileForms=[];
       for(const [id,profile] of Object.entries(studyConfig.profiles)){
         const row=homepage.createEl("details",{cls:"srs-profile"});row.createEl("summary",{text:profile.name||id});
-        row.createEl("p",{text:`Train on desktop: uv run python migrate.py train --profile ${id} --apply`});
+        row.createEl("p",{text:`Train on desktop from tools/: uv run python srs.py train --profile ${id} --apply`});
         const fields={};profileForms.push(row);
         for(const [key,label,value,type] of [["name","Name",profile.name,"text"],["desired_retention","Desired retention (0–1)",profile.settings.desired_retention,"number"],
           ["new_cards_per_day","New cards per day",profile.settings.new_cards_per_day,"number"],["reviews_per_day","Reviews per day",profile.reviews_per_day,"number"],

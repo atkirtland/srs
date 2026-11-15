@@ -411,6 +411,10 @@ archive. Treat generated metadata and existing log lines as immutable; use
 
 ## Independent card discovery and profile training
 
+Ongoing commands are `tools/srs.py refresh-cards` and `tools/srs.py train`.
+The one-time imported-metadata initializer remains `migration/migrate.py init-study`.
+This code separation does not change any persistent data format or identity.
+
 `study.json` is editable configuration outside `data/`, with `format_version: 1`,
 `default_profile`, `profiles`, ordered `profile_rules`, `source_rules`, and
 `decks`. It contains templates/source references and scheduler parameters, not
@@ -439,5 +443,9 @@ monthly logs, deduplicates IDs, selects the winning answer ancestry and excludes
 manual/rescheduling observations. It groups histories by the current profile
 assignment, including card-specific overrides. It can update `study.json` but
 never rewrites answers, card states, imported baselines, or scheduler archives.
+Training keeps same-day reviews as history inputs, but excludes zero-gap
+prediction targets from fitting and evaluation. `same_day_targets_excluded`
+counts formerly eligible zero-gap endpoints after a long-term review; the
+initial learning-only prefixes are not included in this counter.
 Training reports contain weights, sample/exclusion totals and labeled in-sample
 metrics only. They are optional desktop output, not part of the runtime store.

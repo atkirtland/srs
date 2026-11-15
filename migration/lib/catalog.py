@@ -11,6 +11,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import scheduling
+import _shared
+from srs_tools.store import partition_paths
 
 LOG_LIMIT = 32 * 1024 * 1024
 
@@ -28,15 +30,6 @@ def settings_only_log(path):
         return True
     except (ValueError, OSError):
         return False
-
-
-def partition_paths(manifest):
-    if "partition_count" in manifest:
-        count = manifest["partition_count"]
-        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-            raise ValueError("Invalid card partition count")
-        return [f"imports/{manifest['revision']}/cards-{index:05d}.json" for index in range(count)]
-    return manifest["partitions"]
 
 
 def baseline_fingerprint(cards, timing, meta):
