@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from . import study
+from . import layout
 from . import core as srs
 
 
@@ -109,10 +110,10 @@ def histories(events, known_cards, import_id):
 
 
 def prepare(data, study_path, profile, vault=None):
-    config = study.validate(study.read(study_path))
+    config = study.validate(layout.load_study(study_path, data))
     if profile not in config['profiles']:
         raise ValueError(f'Unknown profile: {profile}')
-    manifest, cards = study.load_cards(data)
+    manifest, cards = study.load_cards(data, config)
     events = events_from_logs(data)
     cards = merge_card_settings(cards, events)
     if vault:
@@ -172,7 +173,9 @@ def evaluate_parameters(engine, items, profile, label):
 
 
 def train(data, study_path, profile, *, vault=None, apply=False, output=None, minimum_reviews=1000, epochs=5, progress=None):
-    if output and (output.resolve()==study_path.resolve() or output.resolve().is_relative_to(data.resolve())):
+    if output and (output.resolve()==study_path.resolve() or
+                   study_path.suffix != '.json' and output.resolve().is_relative_to(study_path.resolve()) or
+                   output.resolve().is_relative_to(data.resolve())):
         raise ValueError('Training reports must be outside the runtime data and study configuration')
     from fsrs_rs_python import FSRS, TrainingConfig, check_and_fill_parameters
     if progress:
@@ -208,14 +211,14 @@ def train(data, study_path, profile, *, vault=None, apply=False, output=None, mi
     if any(not math.isfinite(value) for group in ('before','after') for value in report['evaluation'][group].values()):
         raise ValueError('Optimizer evaluation is not finite; no parameters changed')
     if apply:
-        if study.read(study_path) != original or study.read(data / 'manifest.json') != manifest:
+        if layout.load_study(study_path, data) != original or study.read(data / 'manifest.json') != manifest:
             raise ValueError('Configuration/catalog changed during training; retry')
         # New parameters affect future answers only. No card states/logs/baselines are rewritten.
         settings = profile_value['settings']
         settings.update(weights=weights, parameter_policy=report['optimizer'] + '/FSRS-6', parameter_field='weights')
         settings.pop('source_anki_version', None)
         study.validate(config)
-        study.write(study_path, config)
+        layout.save_study(study_path, config, data, expected=original)
         report['applied'] = True
     if output:
         study.write(output, report)

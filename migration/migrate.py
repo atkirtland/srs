@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfoNotFoundError
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE if (HERE / "lib/srs.py").is_file() else HERE.parent
-PORTABLE = ROOT.parent if ROOT.name == "migration" and (ROOT.parent / "config.json").is_file() else None
+PORTABLE = ROOT.parent if ROOT.name == "migration" and (ROOT.parent / "view.js").is_file() else None
 sys.path.insert(0, str(ROOT / "lib"))
 
 import srs
@@ -64,16 +64,17 @@ def main(argv: list[str] | None = None) -> int:
     verify.add_argument("--output", type=Path, default=HERE / "verification.json")
     setup = commands.add_parser('init-study', help='initialize study configuration from the imported catalog')
     setup.add_argument('--data', type=Path, default=PORTABLE / 'data' if PORTABLE else None)
-    setup.add_argument('--study', type=Path, default=PORTABLE / 'study.json' if PORTABLE else None)
-    setup.add_argument('--config', type=Path, default=PORTABLE / 'config.json' if PORTABLE else None)
+    setup.add_argument('--study', type=Path, help='legacy combined output file (default: config/)')
+    setup.add_argument('--config', type=Path, default=PORTABLE / 'config' if PORTABLE else None)
     args = parser.parse_args(argv)
     try:
         if args.command == 'init-study':
             import bootstrap
-            if args.data is None or args.study is None or args.config is None:
+            if args.data is None or args.config is None:
                 raise ValueError('--data, --study and --config are required outside the reviewer directory')
-            result = bootstrap.initialize(args.data, args.config, args.study)
-            print(f"Created {args.study}: {len(result['source_rules'])} source rules, {len(result['decks'])} study decks, {len(result['profiles'])} profiles")
+            output = args.study or args.config
+            result = bootstrap.initialize(args.data, args.config, output)
+            print(f"Created {output}: {len(result['source_rules'])} source rules, {len(result['decks'])} study decks, {len(result['profiles'])} profiles")
             for identity, profile in result['profiles'].items():
                 print(f"  {identity}: {profile['name']}")
         elif args.command == "inspect":
@@ -92,7 +93,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.vault is None:
                 raise srs.SRSError("--vault is required outside the portable vault directory")
             portable = PORTABLE or args.vault / "ankobs-srs"
-            config_path = args.config or (portable / "config.json" if (portable / "config.json").is_file() else ROOT / "config/srs.json")
+            config_path = args.config or (portable / 'config/cards.json' if (portable / 'config/cards.json').is_file() else portable / "config.json" if (portable / "config.json").is_file() else ROOT / "config/srs.json")
+            if config_path.suffix != '.json':
+                config_path = config_path / 'cards.json'
             import sources
             config = srs.load_config(config_path, sources.EXPORTS)
             import importlib.metadata
@@ -106,7 +109,15 @@ def main(argv: list[str] | None = None) -> int:
             scheduling.reconstruct_missing(data, args.collection)
             destination = args.output or portable / "data"
             imported = srs.publish(data, destination)
-            config_path.write_text(json.dumps(data["config"], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            # The first import publishes templates into the uniform config/.
+            if not args.config and config_path == ROOT / 'config/srs.json':
+                config_path = portable / 'config/cards.json'
+            config_path.parent.mkdir(parents=True, exist_ok=True)
+            existing = json.loads(config_path.read_text()) if config_path.exists() else {}
+            document = dict(format_version=1, groups=data['config']['groups'], rules=existing.get('rules', {})) if config_path.name=='cards.json' else data['config']
+            config_path.write_text(json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            import bootstrap
+            bootstrap.ensure_profiles(destination, config_path.parent)
             print(json.dumps({key: value for key, value in data["report"].items() if key != "models"}, indent=2))
             print(f"Archived import and report: {imported}")
             return 2 if data["report"]["issues"] else 0

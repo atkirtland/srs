@@ -3,6 +3,7 @@ from collections import Counter
 import _shared
 import sources
 from srs_tools.study import read, write, load_cards, validate
+from srs_tools import layout
 
 def native_options(manifest, deck):
     meta = manifest['scheduling']
@@ -18,12 +19,7 @@ def native_options(manifest, deck):
                 short_term_with_steps=bool(meta['collection'].get('fsrsShortTermWithStepsEnabled')))
 
 
-def initialize(data, config_path, output):
-    """Create an editable transition configuration; never replace existing edits."""
-    if output.exists():
-        raise ValueError(f"Already exists: {output}; edit it directly")
-    manifest, cards = load_cards(data)
-    config = read(config_path)
+def imported_profiles(manifest):
     meta = manifest['scheduling']
     profiles, assignments = {}, []
     for key, preset in meta['presets'].items():
@@ -39,6 +35,18 @@ def initialize(data, config_path, output):
                               if d['normal'].get('config_id', '1') == key]}})
     if not profiles:
         raise ValueError('No scheduling presets found')
+    return profiles, assignments
+
+
+def initialize(data, config_path, output):
+    """Create an editable transition configuration; never replace existing edits."""
+    normalized = output.suffix != '.json'
+    if (output / 'sources.json' if normalized else output).exists():
+        raise ValueError(f"Already exists: {output}; edit it directly")
+    manifest, cards = load_cards(data)
+    config = layout.load_templates(config_path)
+    meta = manifest['scheduling']
+    profiles, assignments = imported_profiles(manifest)
     default = next(iter(profiles))
     rules = {}
     for group, definition in config['groups'].items():
@@ -74,7 +82,25 @@ def initialize(data, config_path, output):
                       for key, d in meta['decks'].items()})
     result['decks']['all']={'name':'All cards','parent_id':None,'filter':{}}
     validate(result)
-    write(output, result)
+    if normalized:
+        if output.name != 'config':
+            raise ValueError('Configuration directory must be named config')
+        layout.upgrade(output.parent, data, configuration=result, templates=config)
+    else:
+        write(output, result)
     return result
 
 
+
+
+def ensure_profiles(data, configuration):
+    """Initialize missing active profiles for a new store using existing rules."""
+    target=data/'profiles.json'
+    if target.exists() or not (configuration/'sources.json').exists():
+        return
+    profiles,_=imported_profiles(read(data/'manifest.json'))
+    references={r['profile'] for r in layout.load_templates(configuration).get('rules',{}).values()}
+    references.update(r['profile'] for r in read(configuration/'profile-rules.json')['rules'])
+    if references-set(profiles):
+        raise ValueError('Restore data/profiles.json: configuration references custom profiles not present in the imported presets')
+    write(target,dict(format_version=1,profiles=profiles,default_profile=next(iter(profiles))))

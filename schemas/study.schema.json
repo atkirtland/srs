@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "Editable SRS study configuration",
+  "title": "Legacy combined SRS study configuration (runtime composition)",
   "type": "object",
   "additionalProperties": false,
   "required": [

@@ -299,7 +299,7 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   cs.forEach((c,i)=>Object.assign(c,{group:'test',note_uid:`anki:${i+1}`,template_key:'recognition',anki_notetype:'vocab',anki_ordinal:0,
     source:{candidates:['vocab.csv'],kind:'csv',fields:[{anki:'word',source:'word',transform:'text'},{anki:'definition',source:'definition',transform:'text'}]}}));
   const put=(path,text)=>files.set(path,{path,extension:path.split('.').at(-1),text,stat:{mtime:Date.now()+files.size,size:text.length}});
-  const cardPath='srs/data/imports/r/cards-00000.json';
+  let cardPath='srs/data/imports/r/cards-00000.json';
   put('srs/data/manifest.json',JSON.stringify(m));put(cardPath,JSON.stringify(cs));put('srs/config.json',JSON.stringify(config));
   put('vocab.csv','anki_note_id,word,definition\n1,broken,\n2,ready,answer\n');
   let scans=0;
@@ -406,7 +406,18 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   assert.ok(root.querySelectorAll('p').some(e=>e.textContent==='No cards match these filters. Try a different search or deck.'));
   const liveStudy=studyConfiguration(m);
   liveStudy.decks.all={name:'All cards',parent_id:null,filter:{}};
-  put('srs/study.json',JSON.stringify(liveStudy));
+  // Upgrade the open reviewer to separate configuration and note bindings.
+  put('srs/config/sources.json',JSON.stringify({format_version:1,rules:{test:{sources:['vocab.csv'],fields:cs[0].source.fields.map(({anki,...f})=>({...f,name:anki}))}}}));
+  put('srs/config/cards.json',JSON.stringify({format_version:1,groups:config.groups,rules:{test:{templates:['recognition'],profile:'main'}}}));
+  put('srs/config/decks.json',JSON.stringify({format_version:1,decks:liveStudy.decks}));
+  put('srs/config/profile-rules.json',JSON.stringify({format_version:1,rules:liveStudy.profile_rules}));
+  put('srs/data/profiles.json',JSON.stringify({format_version:1,profiles:liveStudy.profiles,default_profile:'main'}));
+  const bindings=cs.map((c,i)=>({id:`note-${i}`,uid:c.note_uid,rule_id:c.group,locator:{kind:'csv',path:'vocab.csv'}}));
+  const separated=cs.map(({source,group,note_uid,...c},i)=>({...c,note_id:`note-${i}`}));
+  cardPath='srs/data/imports/r2/cards-00000.json';
+  put(cardPath,JSON.stringify(separated));put('srs/data/imports/r2/notes-00000.json',JSON.stringify(bindings));
+  put('srs/data/manifest.json',JSON.stringify({...m,revision:'r2',note_partition_count:1}));
+  files.delete('srs/config.json');files.delete('srs/study.json');
   button('Refresh').onclick();
   for(let i=0;i<100&&!button('Profiles');i++)await tick();
   await tick();button('Profiles').onclick();
@@ -414,7 +425,7 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   const retention=root.querySelectorAll('input').find(e=>e.attr['aria-label']==='Main: Desired retention (0–1)');
   assert.ok(retention);retention.value='.91';retention.oninput();
   await button('Save profile').onclick();
-  assert.equal(JSON.parse(files.get('srs/study.json').text).profiles.main.settings.desired_retention,.91);
+  assert.equal(JSON.parse(files.get('srs/data/profiles.json').text).profiles.main.settings.desired_retention,.91);
   assert.deepEqual(JSON.parse(files.get(cardPath).text).map(c=>c.id),priorIds);
   button('Decks').onclick();
   for(let i=0;i<100&&!button('Review');i++)await tick();
@@ -425,7 +436,8 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   const deckPath=root.querySelectorAll('input').find(e=>e.attr['aria-label']==='Deck source paths');
   deckName.value='Vocabulary practice';deckName.oninput();deckPath.value='vocab.csv';deckPath.oninput();
   await button('Save deck').onclick();
-  assert.deepEqual(JSON.parse(files.get('srs/study.json').text).decks['vocabulary-practice'].filter,{paths:['vocab.csv']});
+  assert.deepEqual(JSON.parse(files.get('srs/config/decks.json').text).decks['vocabulary-practice'].filter,{paths:['vocab.csv']});
+  assert.equal(files.has('srs/study.json'),false,'UI saves never recreate the legacy combined configuration');
   assert.ok(root.querySelectorAll('summary').some(e=>e.attr['aria-label']==='Vocabulary practice'));
   cleanups.forEach(f=>f());
 });
@@ -480,4 +492,31 @@ test('local and imported Markdown callouts resolve stable block identities',()=>
   const text=`> [!srs] Local question\n> Local answer\n> #tag\n<!-- SRS-ID: ${uuid} -->\n\n> [!anki] Old question\n> Old answer\n<!-- ID: 123 -->\n`;
   const blocks=SRS.sourceBlocks(text);
   assert.deepEqual(blocks,[{identity:`local:${uuid}`,front:'Local question',back:'Local answer',tags:['tag']},{identity:'anki:123',front:'Old question',back:'Old answer',tags:[]}]);
+});
+
+test('separate configuration and note bindings reproduce scheduling and render multiple cards',()=>{
+  const m=manifest(),combined=studyConfiguration(m);
+  const parts={profiles:{format_version:1,profiles:combined.profiles,default_profile:combined.default_profile},
+    sources:{format_version:1,rules:{words:{sources:['words.csv'],fields:[{name:'Front',source:'word',transform:'text',required:true},{name:'Back',source:'definition',transform:'text',required:true}]}}},
+    cards:{format_version:1,groups:{},rules:{words:{templates:['forward','reverse'],profile:'main'}}},
+    decks:{format_version:1,decks:combined.decks},assignments:{format_version:1,rules:combined.profile_rules}};
+  const config=SRS.composeStudyDocuments(parts);
+  const original=cards([0,1,2]);
+  const raw=original.map((c,i)=>({...c,note_id:'note',template_key:i===0?'forward':'reverse'}));
+  const notes=[{id:'note',uid:'anki:12',rule_id:'words',locator:{path:'words.csv',kind:'csv'}}];
+  const hydrated=SRS.hydrateCatalog(raw,notes,config);
+  assert.deepEqual(hydrated.map(c=>c.id),original.map(c=>c.id));
+  assert.deepEqual(SRS.deckTree(hydrated,states(hydrated),m,now),SRS.deckTree(original,states(original),m,now));
+  assert.equal(hydrated[0].source.fields[0].anki,'Front');
+  const fields=SRS.fieldsFromNote({...hydrated[0],template:{required_fields:['Front','Back']}},{metadata:{word:'spume',definition:'foam'},body:'',filename:'words',lookups:{}});
+  assert.equal(SRS.renderV2('{{Front}}',fields,0,false),'spume');
+  parts.sources.rules.words.fields[0].source='another';
+  const changed=SRS.hydrateCatalog(raw,notes,SRS.composeStudyDocuments(parts));
+  assert.equal(changed[0].source.fields[0].source,'another');
+  assert.equal(changed[0].id,raw[0].id);
+  assert.equal(raw[0].source,undefined);
+  assert.throws(()=>SRS.hydrateCatalog(raw,[],config),/Missing SRS note binding/);
+  const broken=SRS.hydrateCatalog(raw,notes,{source_rules:{}});
+  assert.match(broken[0].source.error,/Missing source rule/);
+  assert.equal(SRS.deckTree(broken,states(broken),m,now)[0].review,1);
 });

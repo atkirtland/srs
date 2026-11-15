@@ -1,4 +1,24 @@
 // Editable study configuration is independent of imported scheduling baselines.
+function composeStudyDocuments(parts) {
+  for(const doc of Object.values(parts))if(doc?.format_version!==1)throw Error("Unsupported configuration layout");
+  const source_rules={};
+  for(const [id,rule] of Object.entries(parts.sources.rules))source_rules[id]={...rule,
+    fields:rule.fields.map(f=>{const {name,...rest}=f;return name===undefined?rest:{...rest,anki:name};}),...parts.cards.rules[id]};
+  return validateStudy({format_version:1,profiles:parts.profiles.profiles,default_profile:parts.profiles.default_profile,
+    source_rules,decks:parts.decks.decks,profile_rules:parts.assignments.rules});
+}
+function hydrateCatalog(cards,notes,study) {
+  const bindings=new Map(notes.map(n=>[n.id,n]));
+  if(bindings.size!==notes.length)throw Error("Duplicate SRS note binding");
+  return cards.map(card=>{
+    const note=bindings.get(card.note_id);if(!note)throw Error(`Missing SRS note binding: ${card.note_id}`);
+    const rule=study?.source_rules[note.rule_id];
+    const source=note.locator?{...note.locator}:null;
+    if(source){if(!rule)source.error=`Missing source rule: ${note.rule_id}`;
+      else {source.fields=rule.fields;if(rule.prepare)source.prepare=rule.prepare;}}
+    return {...card,group:note.rule_id,note_uid:note.uid,source};
+  });
+}
 function validateStudyFilter(query) {
   if(!query || typeof query!=="object" || Array.isArray(query))throw Error("Filter must be an object");
   const allowed=["all","any","not","paths","deck_ids","include_children","groups","templates","tags","properties","card_ids"];

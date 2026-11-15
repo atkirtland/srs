@@ -1,10 +1,11 @@
 # SRS data formats
 
-`data/` stores card identities, vault source references, imported scheduling
-metadata, and review events. Questions and answers are read from the vault at
-review time. Templates live in the editable `config.json` beside `data/`, not in
-the card partitions. Optional `study.json` beside it defines source rules, filter
-decks and scheduling profiles; see [its schema](schemas/study.schema.json).
+`config/` contains editable source rules, card-generation rules/templates,
+study deck filters and profile-assignment filters. `data/` contains active
+scheduling profiles, generated SRS note bindings and cards, frozen imported
+scheduling metadata, scheduler archives, and reviews. Note content is read from
+the vault at review time and is never archived here.
+
 There is no retained Anki note-content archive.
 
 The current store format is **version 2**. Preserved version 1 answer events are
@@ -16,10 +17,12 @@ and `kind` inside each record.
 ```text
 data/
   manifest.json
+  profiles.json
   scheduler-configs/
     <sha256>.json
   imports/<revision>/
     report.json
+    notes-00000.json
     cards-00000.json
     cards-00001.json
     ...
@@ -32,14 +35,16 @@ data/
 ```
 
 [schemas/data.schema.json](schemas/data.schema.json) is a JSON Schema Draft
-2020-12 document describing these files. Its root accepts a manifest, card
-partition, scheduler configuration, import report, or individual event. Validate **each JSONL line
+2020-12 document describing these files. Its root accepts a manifest, card/note
+partition, scheduling profiles, scheduler configuration, import report, or individual event. Validate **each JSONL line
 separately**, not a complete JSONL file as one JSON document. Specific types are
 available through these schema references:
 
 | File or record | Schema reference |
 | --- | --- |
 | `data/manifest.json` | `schemas/data.schema.json#/$defs/Manifest` |
+| `data/profiles.json` | `schemas/data.schema.json#/$defs/Profiles` |
+| `notes-*.json` | `schemas/data.schema.json#/$defs/NotePartition` |
 | `cards-*.json` | `schemas/data.schema.json#/$defs/CardPartition` |
 | `scheduler-configs/<sha256>.json` | `schemas/data.schema.json#/$defs/SchedulerConfig` |
 | Import `report.json` | `schemas/data.schema.json#/$defs/ImportReport` |
@@ -150,42 +155,53 @@ publish the smaller form.
 Anki preset had 21 weights. Preserve the selected parameter field, source backend
 version, and parameter policy; your verified presets use 19 weights.
 
-## Card partitions
+## SRS note bindings and card partitions
 
-Each `cards-00000.json` is a JSON **array**, not an object or JSONL file.
-Individual cards have no `format_version`; their manifest supplies it.
+Both `notes-*.json` and `cards-*.json` are JSON arrays with at most 250 records
+per file. They belong to the same immutable revision. The manifest's
+`partition_count` counts card files; `note_partition_count` counts note files.
+The latter also signals the separated binding layout. Manifest/event format
+version 2 and the existing `import_id` remain unchanged.
 
-| Fields | Meaning |
-| --- | --- |
-| `id`, `anki_card_id`, `note_uid` | Reviewer identity, original Anki card ID (null for local cards), and note/row identity. |
-| `group`, `template_key` | Reference to an editable template in `config.json`; either can be null for unmapped cards. |
-| `anki_notetype`, `anki_ordinal` | Original note type and zero-based card ordinal. |
-| `deck_id`, `original_deck_id` | Current deck and optional original/home deck association. |
-| `source` | Vault source locator and field transformations, or null when unresolved. |
-| `active`, `supported`, optional `retired` | Catalog flags. Retired cards remain addressable for history but do not participate in study counts. `supported` does not guarantee content will render. |
-| `queue`, `card_type`, `anki_due`, `due_ms` | Imported queue/type, native due value, and normalized due timestamp. New cards have no scheduled date, so `due_ms` can be null. |
-| `baseline` | Complete imported reviewer state, or null if memory initialization could not be completed. |
-| `scheduling` | Original numeric Anki fields: `due`, `ivl`, `factor`, `reps`, `lapses`, `left`, `odue`, `odid`, `queue`, `type`. Local cards may have only `queue`. |
-| `memory` | Available native `s` (stability), `d` (difficulty), `dr` (desired retention), `decay`, and `lrt` (last-review Unix **seconds**, an exception to the millisecond convention). |
-| Optional `memory_origin` | `saved`, `missing`, or `native_historical_reconstruction`. |
-
-`source` contains `kind` (`csv`, `markdown`, `block`, or `unresolved`), an
-optional vault-relative `path`, optional `candidates`, optional preparation
-function name, and a `fields` array. A field mapping contains:
+A note binding contains only:
 
 ```json
 {
-  "anki": "Front",
-  "source": "word",
-  "transform": "text",
-  "required": true
+  "id": "<stable hash of source rule and note UID>",
+  "uid": "anki:1005",
+  "rule_id": "example-notes",
+  "locator": {"path": "examples/a.md", "kind": "markdown"}
 }
 ```
 
-`missing_source` can carry the mapping's fallback specification; an optional
-source `error` records an identity-resolution problem. These are field **names
-and instructions**, not retained note values. Cards with missing sources still
-exist and count; rendering exposes the problem and disables rating.
+`uid` identifies the vault note/row/block. `rule_id` selects its source rule in
+`config/sources.json`; the pair defines this SRS note. A locator may include
+`candidates` for unresolved paths and an `error`; it is null if there is no
+binding. It contains no field mappings, preparation functions or note values.
+Multiple cards reference the same note record by `note_id`.
+
+| Card fields | Meaning |
+| --- | --- |
+| `id`, `note_id` | Stable card ID and reference to the SRS note binding. This is the persisted note-to-card mapping. |
+| `template_key`, optional `cloze` | Selected template/variant from `config/cards.json`; null template for unmapped imported cards. |
+| `anki_card_id`, `anki_notetype`, `anki_ordinal` | Original import identity and zero-based variant ordinal. Local cards have null Anki card ID. |
+| `deck_id`, `original_deck_id` | Scheduling ledger/home deck association, retained for imported daily limits and counters. Study decks are separately defined filters. |
+| Optional `profile_id` | Initial profile assignment; explicit settings and assignment rules can override it. |
+| `active`, `supported`, optional `retired` | Catalog flags; missing content does not remove a card from scheduling counts. |
+| `queue`, `card_type`, `anki_due`, `due_ms` | Baseline scheduling queue/type and due values. |
+| `baseline` | Complete initial/imported scheduling state, or null if memory is absent. |
+| `scheduling`, `memory`, optional `memory_origin` | Native scheduling baseline/provenance needed for import verification and compatibility. |
+
+Card records contain **no** `source`, `fields`, `group` or `note_uid` copies.
+The runtime joins note bindings with the central source rules and templates.
+For example, `config/sources.json` contains the field recipe
+`{"name":"Front","source":"character","transform":"text","required":true}`.
+`name` identifies the SRS note field and `source` the vault property. These
+recipes are stored once per rule, regardless of the number of cards it creates.
+
+Cards with missing content still exist and count; rendering exposes the problem
+and disables rating. Legacy partitions with inline source references remain
+readable for conversion, but new separated stores never write those recipes.
 
 ## Scheduler state
 
@@ -345,9 +361,8 @@ Files are immutable and retained across configuration changes and reimports.
 Missing/corrupt files produce a diagnostic; the writer never overwrites them.
 Sync this directory alongside monthly logs. Old configurations support auditing
 past answers; future answers continue to use current settings with the saved
-card state. With `study.json`, its profiles supply current scheduler settings. The manifest
-retains imported timing, hierarchy, baseline counters and deck overrides; without
-`study.json`, it also supplies the active scheduler settings.
+card state. `data/profiles.json` supplies current scheduler settings. The manifest
+retains frozen imported timing, hierarchy, baseline counters and deck overrides.
 
 ### Card settings change: `card_settings`
 
@@ -368,7 +383,7 @@ and imported scheduling baselines:
 ```
 
 Only changed fields are written. Optional `profile` is a scheduling-profile ID
-from `study.json`; null restores automatic profile assignment. `suspended` is a
+from `data/profiles.json`; null restores automatic profile assignment. `suspended` is a
 boolean and `tags` is a list of
 unique, nonempty strings. A null value removes an override; the index retains
 its timestamp so an older edit cannot resurrect it. Omitted fields stay unchanged.
@@ -407,18 +422,33 @@ removes superseded generated import directories. `manifest.pending` is a
 temporary publication artifact, not a separate document format. Review logs
 remain; there should be no generated `raw.json` or per-card `history-*.json`
 archive. Treat generated metadata and existing log lines as immutable; use
-`config.json` and vault source files for presentation/content edits.
+`config/cards.json` and vault source files for presentation/content edits.
 
 ## Independent card discovery and profile training
 
 Ongoing commands are `tools/srs.py refresh-cards` and `tools/srs.py train`.
 The one-time imported-metadata initializer remains `migration/migrate.py init-study`.
-This code separation does not change any persistent data format or identity.
+The editable documents (all `format_version: 1`) are:
 
-`study.json` is editable configuration outside `data/`, with `format_version: 1`,
-`default_profile`, `profiles`, ordered `profile_rules`, `source_rules`, and
-`decks`. It contains templates/source references and scheduler parameters, not
-note field values. Its schema is [schemas/study.schema.json](schemas/study.schema.json).
+| File | Top-level payload | Purpose |
+| --- | --- | --- |
+| `config/sources.json` | `rules` | Obsidian → SRS note paths, selection, fields and transformations. |
+| `config/cards.json` | `groups`, `rules` | Template definitions and per-source-rule selected templates/initial profile. |
+| `config/decks.json` | `decks` | Named study filters and parents. |
+| `config/profile-rules.json` | `rules` | Ordered filter-based profile assignments. |
+| `data/profiles.json` | `profiles`, `default_profile` | Active scheduling settings and default profile ID. |
+
+See [schemas/config.schema.json](schemas/config.schema.json) for the four rule
+files and [schemas/data.schema.json](schemas/data.schema.json) for profiles and
+generated metadata. [schemas/study.schema.json](schemas/study.schema.json)
+describes the old combined/runtime representation, not a required stored file.
+
+`tools/srs.py upgrade-layout` converts existing `study.json`/`config.json` and
+card partitions in place. It checks configuration equivalence, card IDs and
+baselines before switching the manifest, then removes the superseded generated
+imports and legacy configuration. It never writes review logs or scheduler
+archives, changes `import_id`, retrains a profile, or reschedules a card. A
+converted store can keep using its existing incremental review index.
 The [README](README.md#source-rules-study-decks-and-profiles) documents filter
 semantics, precedence, daily budgets and commands.
 
@@ -441,7 +471,7 @@ time. Its immutable `scheduler_config_id` still records the actual interval
 parameters, independent of subsequent profile edits. The trainer reads all
 monthly logs, deduplicates IDs, selects the winning answer ancestry and excludes
 manual/rescheduling observations. It groups histories by the current profile
-assignment, including card-specific overrides. It can update `study.json` but
+assignment, including card-specific overrides. It can update `data/profiles.json` but
 never rewrites answers, card states, imported baselines, or scheduler archives.
 Training keeps same-day reviews as history inputs, but excludes zero-gap
 prediction targets from fitting and evaluation. `same_day_targets_excluded`

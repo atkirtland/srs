@@ -23,6 +23,7 @@
     let resolvedCards, resolvedConfig, sourceGeneration = 0, resolvedGeneration = -1;
     const candidateSources = new Map();
     let manifest, baseManifest, studyConfig, studyKey, panel="", cards = [], config, index, states, shown, configKey, started = 0;
+    let rawCards=[], noteBindings=[], studyParts=null;
     let busy = false, disposed = false, refreshTimer, pending = false, selectedDeck = null;
     let reviewing = Boolean(input?.group), activeGroup=input?.group||"";
     let deckQuery="", expandedDecks=new Set(), editingDeckId=null;
@@ -42,6 +43,15 @@
       async append(path,text) {const f=api.vault.getAbstractFileByPath(path);if(!f)throw Error(`Missing log: ${path}`);await api.vault.append(f,text);}
     };
     async function json(path) {const text=await store.read(path);if(text===null)throw Error(`Missing SRS file: ${path}`);return JSON.parse(text);}
+    async function runtimeConfiguration(){
+      if(await store.read(`${root}/config/sources.json`)!==null){
+        const parts={};
+        for(const [key,path] of Object.entries({sources:"config/sources.json",cards:"config/cards.json",decks:"config/decks.json",assignments:"config/profile-rules.json",profiles:"data/profiles.json"}))parts[key]=await json(`${root}/${path}`);
+        return {study:composeStudyDocuments(parts),templates:parts.cards,parts};
+      }
+      const text=await store.read(`${root}/study.json`);
+      return {study:text===null?null:validateStudy(JSON.parse(text)),templates:await json(`${root}/config.json`),parts:null};
+    }
     function message(e) {notice.textContent=String(e.message||e);}
     function clearCard() {context.empty();front.empty();back.empty();actions.empty();source.empty();homepage.empty();shown=null;}
     function logFiles() {return api.vault.getFiles().filter(f=>
@@ -71,7 +81,7 @@
     }
     async function resolveSource(card) {
       if(!card.template)throw Error("No editable template mapped to this Anki card ordinal");
-      if(!card.template.enabled)throw Error("Template disabled in config.json");
+      if(!card.template.enabled)throw Error("Template disabled in config/cards.json");
       if(!card.source)throw Error("Unresolved vault source");
       if(card.source.error)throw Error(card.source.error);
       let path=card.source.path;
@@ -325,7 +335,7 @@
       if(section==="deck"){showDeckEditor();return;}
       homepage.createEl("h2",{text:section==="profiles"?"Scheduling profiles":"Sources"});
       if(!studyConfig){homepage.createEl("p",{text:"Create the study configuration once from migration/: uv run python migrate.py init-study"});return;}
-      homepage.createEl("button",{text:"Open study configuration"}).onclick=()=>api.workspace.openLinkText(`${root}/study.json`,"",false);
+      homepage.createEl("button",{text:panel==="profiles"?"Open scheduling profiles":"Open source rules"}).onclick=()=>api.workspace.openLinkText(`${root}/${studyParts?(panel==="profiles"?"data/profiles.json":"config/sources.json"):"study.json"}`,"",false);
       if(section==="sources"){
         homepage.createEl("p",{text:"Rules create cards from your vault content. Templates define the questions; study decks select which cards to practice."});
         homepage.createEl("p",{text:"Discover additions on desktop from tools/: uv run python srs.py refresh-cards. Then Refresh here to load them. This preserves existing schedules and review logs."});
@@ -366,8 +376,21 @@
     async function commitStudy(replacement){
       validateStudy(replacement);
       await withStoreLock(identity,async()=>{
-        const file=api.vault.getAbstractFileByPath(`${root}/study.json`);
-        const update=text=>{if(canonical(JSON.parse(text))!==studyKey)throw Error("Study configuration changed; discard changes, Refresh and retry");return JSON.stringify(replacement,null,2)+"\n";};
+        const latest=await runtimeConfiguration();
+        if(canonical(latest.study)!==studyKey)throw Error("Study configuration changed; discard changes, Refresh and retry");
+        let path=`${root}/study.json`,before=studyConfig,after=replacement;
+        if(studyParts){
+          const changed=[];
+          if(canonical(replacement.profiles)!==canonical(studyConfig.profiles)||replacement.default_profile!==studyConfig.default_profile)
+            changed.push({path:`${dataRoot}/profiles.json`,before:studyParts.profiles,after:{format_version:1,profiles:replacement.profiles,default_profile:replacement.default_profile}});
+          if(canonical(replacement.decks)!==canonical(studyConfig.decks))
+            changed.push({path:`${root}/config/decks.json`,before:studyParts.decks,after:{format_version:1,decks:replacement.decks}});
+          if(canonical(replacement.source_rules)!==canonical(studyConfig.source_rules)||canonical(replacement.profile_rules)!==canonical(studyConfig.profile_rules))throw Error("Edit source and assignment rules in config/");
+          if(!changed.length)return;if(changed.length!==1)throw Error("Save one configuration document at a time");
+          ({path,before,after}=changed[0]);
+        }
+        const file=api.vault.getAbstractFileByPath(path);
+        const update=text=>{if(canonical(JSON.parse(text))!==canonical(before))throw Error("Configuration changed; discard changes, Refresh and retry");return JSON.stringify(after,null,2)+"\n";};
         if(api.vault.process)await api.vault.process(file,update);
         else await api.vault.modify(file,update(await api.vault.read(file)));
       });
@@ -432,10 +455,11 @@
       const freshManifest=await json(`${dataRoot}/manifest.json`);
       if(freshManifest.import_id!==baseManifest.import_id)throw Error("Imported baseline changed; reopen this view");
       if(freshManifest.revision!==baseManifest.revision){await loadCatalog(freshManifest);resolvedCards=null;}
-      const studyText=await store.read(`${root}/study.json`);
-      studyConfig=studyText===null?null:validateStudy(JSON.parse(studyText));studyKey=canonical(studyConfig);
+      const loaded=await runtimeConfiguration();
+      studyConfig=loaded.study;studyParts=loaded.parts;studyKey=canonical(studyConfig);
       manifest=studyConfig?studyRuntimeManifest(baseManifest,studyConfig):baseManifest;
-      config=await json(`${root}/config.json`);configKey=canonical({templates:config,study:studyConfig});
+      config=loaded.templates;configKey=canonical({templates:config,study:studyConfig});
+      cards=baseManifest.note_partition_count===undefined?rawCards:hydrateCatalog(rawCards,noteBindings,studyConfig);
       const snapshot=await withStoreLock(identity,async()=>{await syncIndex();return {latest:await index.latest(),activity:await index.activityToday(Date.now()),settings:await index.cardSettings()};});
       const available=(await readSources()).map(card=>{
         const value={...card,card_settings:snapshot.settings.get(card.id)||{}};
@@ -493,7 +517,8 @@
       try {
         const result=await withStoreLock(identity,async()=>{
           if((await json(`${dataRoot}/manifest.json`)).revision!==manifest.revision)throw Error("Catalog changed; reopen the view");
-          if(canonical({templates:await json(`${root}/config.json`),study:await store.read(`${root}/study.json`).then(t=>t===null?null:JSON.parse(t))})!==configKey)return "Configuration changed. Queue refreshed.";
+          const latestConfig=await runtimeConfiguration();
+          if(canonical({templates:latestConfig.templates,study:latestConfig.study})!==configKey)return "Configuration changed. Queue refreshed.";
           await syncIndex();
           if(canonical((await index.cardSettings()).get(card.id)||{})!==canonical(card.card_settings))return "Card settings changed. Queue refreshed.";
           const value=current(card,states.get(card.id).state,await index.get("latest",card.id));
@@ -534,7 +559,13 @@
     async function loadCatalog(value){
       baseManifest=value;
       const paths=value.partition_count===undefined?value.partitions:Array.from({length:value.partition_count},(_,i)=>`imports/${value.revision}/cards-${String(i).padStart(5,"0")}.json`);
-      cards=[];for(const path of paths)cards.push(...await json(`${dataRoot}/${path}`));
+      rawCards=[];for(const path of paths)rawCards.push(...await json(`${dataRoot}/${path}`));
+      noteBindings=[];
+      if(value.note_partition_count!==undefined){
+        if(!Number.isSafeInteger(value.note_partition_count)||value.note_partition_count<0)throw Error("Invalid note partition count");
+        for(let i=0;i<value.note_partition_count;i++)noteBindings.push(...await json(`${dataRoot}/imports/${value.revision}/notes-${String(i).padStart(5,"0")}.json`));
+      }
+      cards=value.note_partition_count===undefined?rawCards:hydrateCatalog(rawCards,noteBindings,(await runtimeConfiguration()).study);
     }
     try {
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");

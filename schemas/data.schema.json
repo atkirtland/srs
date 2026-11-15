@@ -1,8 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "oneOf": [
+  "anyOf": [
     {"$ref": "#/$defs/Manifest"},
     {"$ref": "#/$defs/CardPartition"},
+    {"$ref": "#/$defs/NotePartition"},
+    {"$ref": "#/$defs/Profiles"},
     {"$ref": "#/$defs/ImportReport"},
     {"$ref": "#/$defs/Event"},
     {"$ref": "#/$defs/SchedulerConfig"}
@@ -105,7 +107,8 @@
         "scheduling": {"$ref": "#/$defs/SchedulingMetadata"},
         "timing": {"$ref": "#/$defs/Timing"},
         "partitions": {"type": "array", "items": {"type": "string"}},
-        "partition_count": {"type": "integer", "minimum": 0}
+        "partition_count": {"type": "integer", "minimum": 0},
+        "note_partition_count": {"type": "integer", "minimum": 0}
       },
       "required": ["format_version", "import_id", "revision", "collection_key", "scheduling", "timing"],
       "anyOf": [{"required": ["partition_count"]}, {"required": ["partitions"]}]
@@ -155,6 +158,7 @@
         "id": {"type": "string"},
         "anki_card_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         "note_uid": {"type": "string"},
+        "note_id": {"type": "string"},
         "group": {"anyOf": [{"type": "string"}, {"type": "null"}]},
         "deck_id": {"type": "string"},
         "original_deck_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
@@ -189,14 +193,11 @@
       "required": [
         "id",
         "anki_card_id",
-        "note_uid",
-        "group",
         "deck_id",
         "original_deck_id",
         "anki_notetype",
         "anki_ordinal",
         "template_key",
-        "source",
         "active",
         "supported",
         "queue",
@@ -206,9 +207,36 @@
         "baseline",
         "scheduling",
         "memory"
-      ]
+      ],
+      "anyOf": [{"required": ["note_id"]}, {"required": ["note_uid", "group", "source"]}],
+      "allOf": [{"if": {"required": ["note_id"]}, "then": {"not": {"anyOf": [{"required": ["source"]}, {"required": ["fields"]}, {"required": ["group"]}, {"required": ["note_uid"]}]}}}]
     },
     "CardPartition": {"type": "array", "items": {"$ref": "#/$defs/Card"}, "maxItems": 250},
+    "NoteBinding": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "uid", "rule_id", "locator"],
+      "properties": {
+        "id": {"type": "string"},
+        "uid": {"type": ["string", "null"]},
+        "rule_id": {"type": ["string", "null"]},
+        "locator": {"type": ["object", "null"], "additionalProperties": false, "properties": {
+          "path": {"type": "string"},
+          "kind": {"enum": ["csv", "markdown", "block", "unresolved"]},
+          "candidates": {"type": "array", "items": {"type": "string"}},
+          "error": {"type": "string"}
+        }}
+      }
+    },
+    "NotePartition": {"type": "array", "items": {"$ref": "#/$defs/NoteBinding"}, "maxItems": 250},
+    "Profiles": {
+      "type": "object", "additionalProperties": false,
+      "required": ["format_version", "profiles", "default_profile"],
+      "properties": {
+        "format_version": {"const": 1},
+        "profiles": {"$ref": "study.schema.json#/properties/profiles"},
+        "default_profile": {"type": "string"}
+      }
+    },
     "Interval": {
       "type": "object",
       "properties": {"value": {"type": "integer", "minimum": 0}, "unit": {"enum": ["days", "seconds"]}},

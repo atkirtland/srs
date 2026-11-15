@@ -1,0 +1,253 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SRS configuration documents",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Sources"
+    },
+    {
+      "$ref": "#/$defs/Cards"
+    },
+    {
+      "$ref": "#/$defs/Decks"
+    },
+    {
+      "$ref": "#/$defs/ProfileRules"
+    }
+  ],
+  "$defs": {
+    "Sources": {
+      "type": "object",
+      "required": [
+        "format_version",
+        "rules"
+      ],
+      "properties": {
+        "format_version": {
+          "const": 1
+        },
+        "rules": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "sources",
+              "fields"
+            ],
+            "properties": {
+              "sources": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "recursive": {
+                "type": "boolean"
+              },
+              "kind": {
+                "enum": [
+                  "block"
+                ]
+              },
+              "fields": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "string"
+                    },
+                    "transform": {
+                      "type": "string"
+                    },
+                    "required": {
+                      "type": "boolean"
+                    },
+                    "missing_source": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "source",
+                    "transform"
+                  ]
+                }
+              },
+              "filenames": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "required_property": {
+                "type": "string"
+              },
+              "required_any_property": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "prepare": {
+                "type": "string"
+              },
+              "filter": {
+                "$ref": "study.schema.json#/$defs/Filter"
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Cards": {
+      "type": "object",
+      "required": [
+        "format_version",
+        "groups",
+        "rules"
+      ],
+      "properties": {
+        "format_version": {
+          "const": 1
+        },
+        "groups": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "templates"
+            ],
+            "properties": {
+              "templates": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "key",
+                    "enabled",
+                    "front",
+                    "back",
+                    "required_fields",
+                    "anki_notetype",
+                    "anki_ordinal"
+                  ],
+                  "properties": {
+                    "key": {
+                      "type": "string"
+                    },
+                    "enabled": {
+                      "type": "boolean"
+                    },
+                    "front": {
+                      "type": "string"
+                    },
+                    "back": {
+                      "type": "string"
+                    },
+                    "required_fields": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "anki_notetype": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "anki_ordinal": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "when": {
+                      "$ref": "study.schema.json#/$defs/Filter"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "rules": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": [
+              "templates",
+              "profile"
+            ],
+            "properties": {
+              "templates": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "profile": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "Decks": {
+      "type": "object",
+      "required": [
+        "format_version",
+        "decks"
+      ],
+      "properties": {
+        "format_version": {
+          "const": 1
+        },
+        "decks": {
+          "$ref": "study.schema.json#/properties/decks"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProfileRules": {
+      "type": "object",
+      "required": [
+        "format_version",
+        "rules"
+      ],
+      "properties": {
+        "format_version": {
+          "const": 1
+        },
+        "rules": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "profile",
+              "filter"
+            ],
+            "properties": {
+              "profile": {
+                "type": "string"
+              },
+              "filter": {
+                "$ref": "study.schema.json#/$defs/Filter"
+              }
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

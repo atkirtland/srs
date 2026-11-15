@@ -16,11 +16,22 @@ def install_view(vault):
     if not (REVIEWER / 'view.js').is_file():
         raise ValueError('Build the reviewer first: uv run python build.py (from tools/)')
     destination.mkdir(parents=True, exist_ok=True)
-    for name in ('view.js', 'view.css', 'config.json'):
+    for name in ('view.js', 'view.css'):
         source, target = REVIEWER / name, destination / name
-        if source.resolve() == target.resolve() or name == 'config.json' and target.exists():
+        if source.resolve() == target.resolve():
             continue
         shutil.copyfile(source, target)
+    # Copy editable rule documents only when absent. Scheduling profiles and
+    # generated metadata belong to the store and are synced/copied separately.
+    legacy_destination = (destination / 'study.json').exists() or (destination / 'config.json').exists()
+    for source in ([] if legacy_destination else (REVIEWER / 'config').glob('*.json')):
+        target = destination / 'config' / source.name
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+    # Compatibility for installations still using the legacy layout.
+    if not (REVIEWER / 'config/cards.json').exists() and (REVIEWER / 'config.json').exists() and not (destination / 'config.json').exists():
+        shutil.copyfile(REVIEWER / 'config.json', destination / 'config.json')
     return destination
 
 
@@ -31,9 +42,12 @@ def main(argv=None):
     train = commands.add_parser('train', help='train standalone FSRS using the unified review logs')
     for command in (refresh, train):
         command.add_argument('--data', type=Path, default=REVIEWER / 'data')
-        command.add_argument('--study', type=Path, default=REVIEWER / 'study.json')
+        command.add_argument('--study', type=Path, help='legacy study.json or configuration directory (default: --config)')
+        command.add_argument('--config', type=Path, default=REVIEWER / 'config', help='configuration directory')
         command.add_argument('--vault', type=Path, default=REVIEWER.parent)
-    refresh.add_argument('--config', type=Path, default=REVIEWER / 'config.json')
+    upgrade = commands.add_parser('upgrade-layout', help='separate legacy rules, profiles, and note/card bindings in place')
+    upgrade.add_argument('--root', type=Path, default=REVIEWER)
+    upgrade.add_argument('--data', type=Path)
     train.add_argument('--profile', required=True)
     train.add_argument('--apply', action='store_true', help='apply fitted parameters to future answers')
     train.add_argument('--output', type=Path)
@@ -47,13 +61,13 @@ def main(argv=None):
     try:
         if args.command == 'refresh-cards':
             from .study import refresh_cards
-            result = refresh_cards(args.vault.resolve(), args.data, args.study, args.config)
+            result = refresh_cards(args.vault.resolve(), args.data, args.study or args.config, args.config)
             print(json.dumps(result, indent=2))
         elif args.command == 'train':
             from .training import train as train_profile
             if args.minimum_reviews < 1 or args.epochs < 1:
                 raise ValueError('minimum-reviews and epochs must be positive')
-            result = train_profile(args.data, args.study, args.profile, vault=args.vault,
+            result = train_profile(args.data, args.study or args.config, args.profile, vault=args.vault,
                                    apply=args.apply, output=args.output, minimum_reviews=args.minimum_reviews,
                                    epochs=args.epochs, progress=lambda text:print(text, file=sys.stderr, flush=True))
             print(json.dumps(result, indent=2))
@@ -62,6 +76,9 @@ def main(argv=None):
             print(f'Assigned {seed_csv_uids(args.csv)} local note identities')
         elif args.command == 'install-view':
             print(f'Installed standalone reviewer: {install_view(args.vault)}')
+        elif args.command == 'upgrade-layout':
+            from .layout import upgrade as upgrade_store
+            print(json.dumps(upgrade_store(args.root, args.data), indent=2))
         return 0
     except (ValueError, OSError, ImportError, ExportError) as error:
         print(f'SRS: {error}', file=sys.stderr)

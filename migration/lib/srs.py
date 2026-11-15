@@ -49,20 +49,23 @@ def load_config(path: Path, exports: dict[str, Any]) -> dict[str, Any]:
     config = parse_json(path.read_text(encoding="utf-8"), str(path))
     if not isinstance(config, dict) or config.get("format_version") != VERSION or not isinstance(config.get("groups"), dict):
         raise SRSError("unsupported SRS configuration")
-    scheduler = config.get("scheduler", {})
-    if not isinstance(scheduler, dict):
-        raise SRSError("scheduler must be an object")
-    if scheduler.get("algorithm") != "FSRS-6" or scheduler.get("enable_fuzz") is not False:
-        raise SRSError("pilot requires FSRS-6 with fuzz disabled")
-    retention = scheduler.get("desired_retention")
-    maximum = scheduler.get("maximum_interval")
-    limit = scheduler.get("new_cards_per_day")
-    if isinstance(retention, bool) or not isinstance(retention, (int, float)) or not 0 < retention < 1:
-        raise SRSError("desired_retention must be between zero and one")
-    if type(maximum) is not int or not 1 <= maximum <= 36500:
-        raise SRSError("maximum_interval must be an integer from 1 to 36500")
-    if type(limit) is not int or limit < 0:
-        raise SRSError("new_cards_per_day must be a nonnegative integer")
+    # Legacy global defaults are validated only when supplied. Active scheduling
+    # now comes from data/profiles.json and the frozen imported deck settings.
+    if "scheduler" in config:
+        scheduler = config["scheduler"]
+        if not isinstance(scheduler, dict):
+            raise SRSError("scheduler must be an object")
+        if scheduler.get("algorithm") != "FSRS-6" or scheduler.get("enable_fuzz") is not False:
+            raise SRSError("pilot requires FSRS-6 with fuzz disabled")
+        retention = scheduler.get("desired_retention")
+        maximum = scheduler.get("maximum_interval")
+        limit = scheduler.get("new_cards_per_day")
+        if isinstance(retention, bool) or not isinstance(retention, (int, float)) or not 0 < retention < 1:
+            raise SRSError("desired_retention must be between zero and one")
+        if type(maximum) is not int or not 1 <= maximum <= 36500:
+            raise SRSError("maximum_interval must be an integer from 1 to 36500")
+        if type(limit) is not int or limit < 0:
+            raise SRSError("new_cards_per_day must be a nonnegative integer")
     for name, group in config["groups"].items():
         if (name not in exports and name != "markdown-blocks") or not isinstance(group, dict) or not isinstance(group.get("templates"), list):
             raise SRSError(f"invalid source group: {name}")

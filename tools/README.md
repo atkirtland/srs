@@ -8,13 +8,16 @@ uv run python srs.py refresh-cards
 uv run python srs.py train --profile preset-1 --apply
 ```
 
-Defaults point to the reviewer's existing `../data/`, `../study.json`,
-`../config.json`, and the containing vault. No files need moving or rebuilding
-when switching from the old CLI. Use the actual profile IDs in `study.json`;
-omit `--apply` to train and evaluate without updating a profile.
+Defaults point to `../config/`, `../data/`, and the containing vault.
+Profiles live in `../data/profiles.json`. `--config` selects another configuration
+directory; `--data` selects its store. Legacy `--study <study.json>` remains
+available for compatibility. For an old combined layout, run
+`uv run python srs.py upgrade-layout` once. It preserves card IDs and reviews.
+Omit `--apply` to train and evaluate without updating a profile.
 
 | Command | Purpose |
 | --- | --- |
+| `srs.py upgrade-layout` | Separate legacy configuration, scheduling profiles and generated note/card bindings. |
 | `srs.py refresh-cards` | Discover source/template card variants while preserving identities, schedules, and logs. |
 | `srs.py train --profile <id>` | Train and evaluate standalone FSRS from unified reviews; `--apply` updates future answers. |
 | `srs.py seed-csv-uids <csv>` | Assign persistent IDs to new CSV rows. |

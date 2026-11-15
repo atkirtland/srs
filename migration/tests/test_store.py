@@ -78,7 +78,7 @@ class StoreTests(unittest.TestCase):
         self.day_zero = datetime.fromtimestamp(col.sched.day_cutoff, timezone.utc).date() - timedelta(days=col.sched.today + 1)
         col.close()
         self.raw = srs.read_snapshot(self.collection)
-        self.config = json.loads((Path(__file__).resolve().parents[2] / "config.json").read_text())
+        self.config = json.loads((Path(__file__).resolve().parents[1] / "config/srs.json").read_text())
         self.config["groups"] = {}
         self.exports = {"test": sources.Export("data/test.csv", "Basic", (
             sources.Field("Front", "front", sources.text), sources.Field("Back", "back", sources.text)))}
@@ -90,6 +90,32 @@ class StoreTests(unittest.TestCase):
     def build(self):
         return srs.build_export(self.raw, self.root, self.exports, copy.deepcopy(self.config),
                                 self.day_zero, "UTC", 4, importlib.metadata.version("anki"))
+
+    def test_normalized_reimport_preserves_note_card_mapping_and_review_bytes(self):
+        from srs_tools import layout, study
+        destination=self.root/'store'
+        fields=[{'name':f.anki,'source':f.source,'transform':f.transform.__name__} for f in self.exports['test'].fields]
+        layout.write(self.root/'config/sources.json',{'format_version':1,'rules':{'test':{'fields':fields}}})
+        srs.publish(self.build(),destination)
+        first,cards=study.load_cards(destination)
+        logs={p.name:p.read_bytes() for p in (destination/'reviews').glob('*.jsonl')}
+        srs.publish(self.build(),destination)
+        second,after=study.load_cards(destination)
+        self.assertEqual(first,second)
+        self.assertEqual([c['id'] for c in cards],[c['id'] for c in after])
+        self.assertEqual(logs,{p.name:p.read_bytes() for p in (destination/'reviews').glob('*.jsonl')})
+        for part in catalog.partition_paths(second):
+            self.assertTrue(all('note_id' in c and 'source' not in c for c in study.read(destination/part)))
+
+    def test_native_import_accepts_templates_without_obsolete_global_scheduler(self):
+        path=self.root/'cards.json'
+        layout={k:v for k,v in self.config.items() if k!='scheduler'}
+        layout['rules']={}
+        path.write_text(json.dumps(layout))
+        loaded=srs.load_config(path,self.exports)
+        self.assertNotIn('scheduler',loaded)
+        data=srs.build_export(self.raw,self.root,self.exports,loaded,self.day_zero,'UTC',4,importlib.metadata.version('anki'))
+        self.assertEqual(len(data['cards']),24)
 
     def test_all_cards_and_saved_states_survive_missing_sources(self):
         data = self.build()

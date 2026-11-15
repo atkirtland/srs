@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 import csv
-import json
 import math
 import re
 from pathlib import Path
@@ -13,23 +12,22 @@ import uuid
 from . import store as catalog
 from . import vault as sources
 from . import core as srs
+from . import layout
+from .layout import read, write
 
 
-def read(path):
-    return srs.parse_json(Path(path).read_text(encoding="utf-8"), str(path))
-
-
-def write(path, value):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
-    temporary.replace(path)
-
-
-def load_cards(data):
+def load_cards(data, configuration=None):
     manifest = read(data / "manifest.json")
     cards = [card for part in catalog.partition_paths(manifest) for card in read(data / part)]
+    if 'note_partition_count' in manifest:
+        count = manifest['note_partition_count']
+        if type(count) is not int or count < 0:
+            raise ValueError('Invalid note partition count')
+        notes = [note for i in range(count)
+                 for note in read(data / 'imports' / manifest['revision'] / f'notes-{i:05d}.json')]
+        source_path = data.parent / 'config' / 'sources.json'
+        rules = read(source_path)['rules'] if source_path.exists() else {}
+        cards = layout.hydrate_cards(cards, notes, configuration or {'source_rules':rules})
     if len({card['id'] for card in cards}) != len(cards):
         raise ValueError("Duplicate catalog card identity")
     return manifest, cards
@@ -315,14 +313,14 @@ def discover(vault, config, templates, manifest, issues=None):
 
 
 def refresh_cards(vault, data, study_path, config_path):
-    config = validate(read(study_path)); templates = read(config_path)
+    config = validate(layout.load_study(study_path, data)); templates = layout.load_templates(config_path)
     for group,rule in config['source_rules'].items():
         if group not in templates.get('groups', {}):
             raise ValueError(f'Unknown template group: {group}')
         keys={t['key'] for t in templates['groups'][group]['templates']}
         if set(rule['templates']) - keys:
             raise ValueError(f'Unknown templates in source rule {group}: {set(rule["templates"])-keys}')
-    manifest, cards = load_cards(data)
+    manifest, cards = load_cards(data, config)
     issues=[]
     found = discover(vault, config, templates, manifest, issues)
     # Match imported cloze ordinals separately, retaining their existing template keys/UIDs.
@@ -384,14 +382,20 @@ def refresh_cards(vault, data, study_path, config_path):
     revision = srs.digest({'previous':manifest['revision'], 'cards':cards})
     target = data / 'imports' / revision
     target.mkdir(parents=True, exist_ok=True)
+    normalized = 'note_partition_count' in manifest or Path(study_path).suffix != '.json'
+    notes, stored_cards = layout.separate_cards(cards) if normalized else ([], cards)
     for number, start in enumerate(range(0, len(cards), 250)):
-        write(target / f'cards-{number:05d}.json', cards[start:start+250])
+        write(target / f'cards-{number:05d}.json', stored_cards[start:start+250])
+    for number, start in enumerate(range(0, len(notes), 250)):
+        write(target / f'notes-{number:05d}.json', notes[start:start+250])
     report = data / 'imports' / manifest['revision'] / 'report.json'
     if report.exists():
         shutil.copyfile(report, target / 'report.json')
     if read(data / 'manifest.json') != manifest:
         raise ValueError('Catalog changed during discovery; retry')
     replacement = {**manifest, 'revision':revision, 'partition_count':(len(cards)+249)//250}
+    if normalized:
+        replacement['note_partition_count'] = (len(notes)+249)//250
     replacement.pop('partitions', None)
     write(data / 'manifest.json', replacement)
     for old in (data / 'imports').iterdir():

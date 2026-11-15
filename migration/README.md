@@ -9,7 +9,7 @@ Ongoing card discovery and training live in [`../tools/`](../tools/README.md).
 | `migrate.py inspect --collection <snapshot>` | Inspect snapshot metadata and template definitions. |
 | `migrate.py migrate ...` | Import scheduling identities, baselines and review history. |
 | `migrate.py verify ...` | Compare counts and transitions with a disposable Anki collection copy. |
-| `migrate.py init-study` | Create `../study.json` from the imported catalog once, preserving existing files. |
+| `migrate.py init-study` | Create `../config/`, `../data/profiles.json` and separate note/card bindings once. |
 
 Run native import and verification with their optional backend:
 
@@ -25,8 +25,9 @@ For one-time setup after importing:
 uv run python migrate.py init-study
 ```
 
-Skip setup if `study.json` already exists. There is no data/schema migration
-required for the CLI split. Configuration and review-log locations are unchanged.
+Skip setup if `../config/sources.json` already exists. Existing installations
+with `study.json` should use `../tools/srs.py upgrade-layout` instead.
+Review logs and card IDs are preserved by the layout conversion.
 Anki-to-vault field mappings remain in `config/exports.json` for the compatibility
 adapter; your external converter owns that conversion. `lib/bootstrap.py`
 converts imported metadata to study configuration. `lib/catalog.py`, `srs.py`,

@@ -216,7 +216,7 @@ def build_export(raw, vault, exports, config, day_zero, timezone_name, rollover=
                           "supported": True, "due_ms": None, "anki_due": 0, "scheduling": {"queue": 0}, "memory": {}, "history": []})
     return {"format_version": 2, "collection_key": collection, "snapshot_ms": snapshot_ms,
             "timing": {"day_zero": day_zero.isoformat(), "timezone": timezone_name, "rollover_hour": rollover},
-            "scheduler": config["scheduler"], "scheduling": meta, "cards": cards, "observations": observations,
+            "scheduling": meta, "cards": cards, "observations": observations,
             "lookups": {"us_states": sources.US_STATES_BY_SLUG},
             "config": config, "report": {"notes": len(notes), "cards": len(cards), "review_events": len(observations),
                                           "issues": [], "content_problems": problems,
@@ -232,7 +232,8 @@ def publish(data, destination):
     if previous:
         if previous["collection_key"] != data["collection_key"]:
             raise SRSError("cannot mix collections")
-        old_cards = [c for p in partition_paths(previous) for c in json.loads((destination / p).read_text())]
+        from srs_tools.study import load_cards
+        _, old_cards = load_cards(destination)
         by_anki = {c.get("anki_card_id"): c for c in old_cards if c.get("anki_card_id")}
         remap = {}
         for card in data["cards"]:
@@ -270,12 +271,19 @@ def publish(data, destination):
     revision = digest({"baseline": baseline_digest, "cards": [
         {k: v for k, v in c.items() if k != "history"} for c in data["cards"]]})
     root = destination / "imports" / revision
+    from srs_tools import layout
+    config_directory = destination.parent / 'config'
+    normalized = (config_directory / 'sources.json').exists()
+    notes, stored_cards = layout.separate_cards(data['cards']) if normalized else ([], data['cards'])
+    if normalized:
+        for start in range(0, len(notes), 250):
+            write_immutable(root / f'notes-{start//250:05d}.json', notes[start:start+250])
     partitions = []
     events = list(data["observations"])
     for index in range(0, len(data["cards"]), 250):
         selected = data["cards"][index:index + 250]
         name = f"cards-{index // 250:05d}.json"
-        runtime = [{k: v for k, v in c.items() if k != "history"} for c in selected]
+        runtime = [{k: v for k, v in c.items() if k != "history"} for c in stored_cards[index:index+250]]
         write_immutable(root / name, runtime)
         partitions.append(f"imports/{revision}/{name}")
         for card in selected:
@@ -329,6 +337,8 @@ def publish(data, destination):
     manifest = {"format_version": 2, "import_id": import_id,
                 "revision": revision, "collection_key": data["collection_key"], "scheduling": data["scheduling"],
                 "timing": data["timing"], "partition_count": len(partitions)}
+    if normalized:
+        manifest['note_partition_count'] = (len(notes)+249)//250
     write_immutable(root / "report.json", data["report"])
     # Validate all metadata and logs before the atomic pointer switch and cleanup.
     for partition in partitions:

@@ -44,31 +44,23 @@ the review logs.
 
 ## Source rules, study decks, and profiles
 
-For the one-time conversion of imported metadata, run from `migration/`
-after restoring `data/`. Skip this if `study.json` already exists:
+Editable configuration lives in `config/`. Scheduling profiles and generated
+bindings live in `data/`. Vault note content is read on demand; an SRS note is a
+stable identity plus a runtime set of fields, without a second content archive.
+
+For an existing installation using `study.json` and `config.json`, run once from
+`tools/`:
 
 ```sh
-uv sync --locked
-uv run python migrate.py init-study
+uv run python srs.py upgrade-layout
 ```
 
-`init-study` writes `../study.json` once; it refuses to overwrite an existing
-file. It uses your imported hierarchy, template mappings and trained parameters,
-without modifying card UIDs, baselines, review logs or the manifest. Reopen the
-reviewer or click **Refresh** to enable it. An **All cards** study deck also
-includes future additions. Without `study.json`, the previous reviewer behavior
-remains available.
-
-The editable configuration separates:
-
-- **Source rules:** vault paths, field transformations and template keys that
-  generate cards. Their keys correspond to template groups in `config.json`.
-- **Study decks:** named filters over cards, with optional parent decks. A card
-  may appear in several decks and still has one schedule and history. Opening
-  a parent selects the union of its own filter and its descendants.
-- **Scheduling profiles:** interval settings and trained FSRS parameters.
-  **Profiles** edits retention, steps and daily settings. **Card settings** can
-  explicitly assign an individual card to a profile.
+This converts the configuration and catalog in place, preserves card IDs,
+baselines, profile settings, and review logs, then removes the superseded files.
+It does not require Anki or Node. Reopen the reviewer or click **Refresh**.
+For a fresh Anki import, `migration/migrate.py init-study` creates the same layout
+from the imported metadata and compatibility source registry. It refuses to
+replace existing source rules.
 
 ### Configuration and storage locations
 
@@ -76,17 +68,31 @@ All paths below are relative to this reviewer directory.
 
 | Layer | Location | What it defines or stores |
 | --- | --- | --- |
-| Anki → vault conversion | Your external converter; current bootstrap mapping: `migration/config/exports.json` | Mapping Anki notes to vault notes, CSV rows, or Markdown blocks. The external codebase owns this conversion. |
-| Source identity | Vault frontmatter / CSV columns: `anki_note_id`, `srs_uid`; block comments: `ID`, `SRS-ID` | Persistent identity of a note, row, or block. There is no second stored copy of its content. |
-| Notes → card variants | `study.json` → `source_rules[rule].templates`; `config.json` → `groups[rule].templates` | Which templates generate cards, their front/back presentation, and optional `when` conditions. |
-| New card ID generation | [tools/srs_tools/core.py](tools/srs_tools/core.py) → `card_uid()` | Deterministic UUIDv5 from the rule/group key, source identity, and template key; cloze variants also distinguish their ordinal. |
-| Persisted ID mappings | `data/imports/<revision>/cards-*.json`; current revision selected by `data/manifest.json` | Card `id` linked to `note_uid`, `anki_card_id`, `group`, `template_key`, `anki_ordinal`, and source reference. Existing imported card IDs are preserved. |
-| Card-specific settings | `data/reviews/<device>-YYYY-MM.jsonl` → `kind: "card_settings"` | Suspension, card tags, and an optional explicit `profile` override. IndexedDB caches the resolved settings. |
-| Card → scheduling profile | `study.json` → `profile_rules`, `default_profile`; card metadata → `profile_id`; settings events → `changes.profile` | Effective assignment: explicit override → first matching rule → initial card profile → default profile. |
-| Current scheduler settings | `study.json` → `profiles[profile-id].settings` | Active FSRS parameters, retention, steps, and interval settings. Training selects cards currently assigned to the profile. |
-| Per-card memory and due date | Card partition → `baseline`; latest answer in monthly review logs → `state` | Each card's current scheduling state, including stability, difficulty, and due date. |
-| Historical scheduler settings | `data/scheduler-configs/<hash>.json`; answer events → `scheduler_config_id` | Immutable configurations used by past answers, retained independently of current profile edits. |
-| Study decks | `study.json` → `decks[deck-id]` | Names, parent relationships, and card filters; editable through **New deck / Edit**. |
+| Anki → vault conversion | Your external converter; compatibility adapter: `migration/config/exports.json` | Legacy import only. Ongoing tools and reviewer do not load this registry. |
+| Vault source identity | Frontmatter / CSV: `anki_note_id`, `srs_uid`; block comments: `ID`, `SRS-ID` | Persistent identity independent of the source file's position. |
+| Obsidian → SRS note | `config/sources.json` → `rules[rule-id]` | Source paths, field names, property mappings, transformations and selection filters. Field `name` names the SRS note field; `source` names the vault property. |
+| SRS note → cards | `config/cards.json` → `rules[rule-id]`, `groups[rule-id].templates` | Selected templates, initial scheduling profile, front/back presentation and optional `when` filters. |
+| SRS note bindings | `data/imports/<revision>/notes-*.json` | `id`, source `uid`, `rule_id`, and a vault `locator`. One binding per source-rule/note-UID pair, shared by its cards. No export definitions or field recipes. |
+| Note → card ID mapping | `data/imports/<revision>/cards-*.json` → `note_id`, `id`, `template_key`, ordinal | Each card points to its SRS note binding. Several card IDs may share one `note_id`. Existing imported IDs are preserved. |
+| New card ID generation | [tools/srs_tools/core.py](tools/srs_tools/core.py) → `card_uid()` | UUIDv5 from rule/group, persistent source UID and template key; cloze variants also distinguish ordinal. |
+| Card-specific settings | `data/reviews/<device>-YYYY-MM.jsonl` → `kind: "card_settings"` | Suspension, tags and optional profile override. |
+| Profile assignment rules | `config/profile-rules.json` → `rules` | First matching filter assigns a profile. Precedence: explicit card override → matching rule → initial card profile → default profile. |
+| Current scheduling profiles | `data/profiles.json` → `profiles`, `default_profile` | Active weights, retention, steps, interval/daily limits. Training updates this file only. |
+| Card scheduling state | Card partition → `baseline`; latest answer event → `state` | Due date, stability, difficulty and other scheduling state. |
+| Historical scheduler settings | `data/scheduler-configs/<hash>.json` | Immutable settings referenced by answers through `scheduler_config_id`. |
+| Study decks | `config/decks.json` → `decks` | Named card filters and parents. UI deck edits save here. |
+| Catalog pointer and imported scheduling baseline | `data/manifest.json` | Current revision, partition counts, study-day timing and frozen imported limits/counters required for Anki parity. |
+
+The pipeline is **Obsidian source → SRS note fields → template/card variants →
+card scheduling and reviews**. Notes hold source bindings, templates hold
+presentation, decks select cards, and profiles schedule them. Generated card
+records contain no source paths, field mappings, preparation functions or
+export definitions. Runtime objects join these layers only in memory.
+
+Schemas: [configuration](schemas/config.schema.json),
+[data](schemas/data.schema.json). The old combined
+[study schema](schemas/study.schema.json) documents the compatibility/runtime
+composition; it is no longer the persistent configuration format.
 
 There is no separate handwritten ID-map file. New card IDs are UUIDv5 values
 from `(source-rule/group key, persistent source note UID, template key)` in
@@ -111,7 +117,7 @@ Filters support `paths` (exact paths or directory prefixes), `groups`,
 Values in a list are alternatives, except `tags`, which requires all listed tags.
 Different fields are combined with AND. Compose filters with `all`, `any`, and
 `not`. Properties use exact values or `{"exists": true}` / `{"exists": false}`.
-For example, replace an imported deck filter in `study.json` with:
+For example, replace an imported deck filter in `config/decks.json` with:
 
 ```json
 {"paths": ["examples/notes.csv"], "templates": ["recognition"]}
@@ -121,8 +127,8 @@ This includes existing and future recognition cards from that CSV. The initial
 imported filters use legacy deck IDs; new cards are always available in **All
 cards**, and appear in those decks after you replace their filters with source
 rules such as the example above. Use **New deck** or a deck’s **Edit** button for path/template/tag filters;
-advanced compositions and source rules are editable in `study.json`. **Sources** summarizes the configured paths, templates and initial profiles.
-See [schemas/study.schema.json](schemas/study.schema.json).
+advanced compositions are editable in `config/decks.json`; source rules in `config/sources.json`. **Sources** summarizes the configured paths, templates and initial profiles.
+See [schemas/config.schema.json](schemas/config.schema.json).
 
 ## Add cards without Anki
 
@@ -161,7 +167,7 @@ editing presentation.
 Training uses the standalone
 [fsrs-rs-python bindings](https://github.com/open-spaced-repetition/fsrs-rs-python)
 to the Rust FSRS optimizer. Neither Anki nor PyTorch is a training dependency.
-From `tools/`, select a profile ID from `study.json` or the **Profiles** screen:
+From `tools/`, select a profile ID from `data/profiles.json` or the **Profiles** screen:
 
 ```sh
 uv run python srs.py train --profile preset-1 --output ../training.json
@@ -187,8 +193,8 @@ and after fitting; these are not held-out accuracy estimates. Missing parents,
 conflicting event IDs, malformed/incomplete logs and insufficient data produce
 diagnostics rather than silently applying parameters.
 
-Sync `study.json` and `data/scheduler-configs/` alongside the card metadata and
-monthly review logs. The legacy `config.json` scheduler does not override these
+Sync `config/`, `data/profiles.json` and `data/scheduler-configs/` alongside the card metadata and
+monthly review logs. The legacy global scheduler does not override these
 profiles. Historical archive files are immutable records, not settings editors.
 
 ## Take a desktop snapshot
@@ -241,15 +247,15 @@ checks that the installed backend version matches `--anki-version`.
 
 This imports every card and deck, including unresolved sources, suspended cards,
 and cards without saved memory. It generates editable templates for all mapped
-source/notetype/card-ordinal combinations in `config.json` in one pass. Existing
+source/notetype/card-ordinal combinations in `config/cards.json` in one pass. Existing
 template keys, edits, card UIDs, and answer logs are preserved. Source mappings
 remain in `migration/config/exports.json`.
 
 CSV rows resolve through `anki_note_id` or `srs_uid`. Markdown frontmatter uses
 the same identities; ID-linked `[!anki]` callouts are supported too. Mapped text,
 media, vocabulary, taxonomy, and structured source transformations run against
-live vault properties. Card partitions retain source/transformation references,
-never field values. New local CSV identities can be assigned from `tools/` with:
+live vault properties. Note bindings retain source locators; configuration retains transformations.
+Neither stores note field values. New local CSV identities can be assigned from `tools/` with:
 
 ```sh
 uv run python srs.py seed-csv-uids /path/to/vault/examples/notes.csv
@@ -322,13 +328,18 @@ and the [JSON Schema](schemas/data.schema.json) for files in `data/`.
 ```text
 srs/
   view.js, view.css          standalone browser reviewer
-  config.json               editable templates
-  study.json                source rules, filter decks, scheduling profiles
+  config/
+    sources.json            vault → SRS note rules
+    cards.json              SRS note → card rules and templates
+    decks.json              study deck filters
+    profile-rules.json      scheduling profile assignment filters
   data/
+    profiles.json           active scheduling profiles
     manifest.json
     imports/<revision>/
       report.json
-      cards-00000.json       at most 250 cards per file
+      notes-00000.json       source bindings shared by cards
+      cards-00000.json       note/card ID mapping and metadata; at most 250 cards
     reviews/
       anki-2026-11.jsonl
       computer-2026-11.jsonl
@@ -394,9 +405,8 @@ uv run --extra anki python -m unittest discover -s tests -v
 ```
 
 The previous ongoing commands in `migration/migrate.py` remain compatibility
-aliases that forward to `tools/srs.py` using the `tools/` environment. Existing
-`study.json`, templates, identities, card partitions and review logs need no
-conversion for this code split. See [tools/README.md](tools/README.md) and
+aliases that forward to `tools/srs.py` using the `tools/` environment. Use
+`tools/srs.py upgrade-layout` once for the legacy combined configuration layout. See [tools/README.md](tools/README.md) and
 [migration/README.md](migration/README.md) for the ownership of each command.
 
 The Python suite uses native Anki disposable collections with six distinct trained
