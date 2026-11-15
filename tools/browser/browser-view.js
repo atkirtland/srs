@@ -302,7 +302,7 @@
         if(more)more.disabled=true;
         for(const card of problems.slice(offset,offset+50)) {
           const row=details.createDiv();row.createEl("p",{text:`${card.anki_notetype||"Card"} · ${card.note_uid||card.id}: ${card.content_error}`});
-          if(card.source?.path)row.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
+          if(card.source?.path)row.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"","tab");
         }
         offset+=50;if(offset<problems.length){more=details.createEl("button",{text:"Show more errors"});more.onclick=page;}
       };
@@ -391,7 +391,7 @@
         metadata.createEl("summary",{text:"Card details"});
         metadata.createEl("p",{text:`${card.anki_notetype||"Card"} · ${card.template_key||`ordinal ${card.anki_ordinal}`}`});
         metadata.createEl("p",{text:`Card ID: ${card.id}`});
-        if(card.source?.path)editor.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
+        if(card.source?.path)editor.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"","tab");
         if(card.content_error)editor.createEl("p",{text:card.content_error,cls:"srs-errors"});
         const suspension=editor.createEl("label",{text:"Suspended "});
         const suspended=suspension.createEl("input",{type:"checkbox"});
@@ -453,7 +453,7 @@
       if(section==="deck"){showDeckEditor();return;}
       homepage.createEl("h2",{text:section==="profiles"?"Scheduling profiles":"Sources"});
       if(!studyConfig){homepage.createEl("p",{text:"Create the study configuration once from migration/: uv run python migrate.py init-study"});return;}
-      homepage.createEl("button",{text:panel==="profiles"?"Open scheduling profiles":"Open source rules"}).onclick=()=>api.workspace.openLinkText(`${root}/${studyParts?(panel==="profiles"?"data/profiles.json":"config/sources.json"):"study.json"}`,"",false);
+      homepage.createEl("button",{text:panel==="profiles"?"Open scheduling profiles":"Open source rules"}).onclick=()=>api.workspace.openLinkText(`${root}/${studyParts?(panel==="profiles"?"data/profiles.json":"config/sources.json"):"study.json"}`,"","tab");
       if(section==="sources"){
         homepage.createEl("p",{text:"Rules create cards from your vault content. Templates define the questions; study decks select which cards to practice."});
         homepage.createEl("p",{text:"Discover additions on desktop from tools/: uv run python srs.py refresh-cards. Then Refresh here to load them. This preserves existing schedules and review logs."});
@@ -657,7 +657,7 @@
       actions.createEl("button",{text:"Bury"}).onclick=skip;
       cardMenu.hidden=false;
       source.createEl("button",{text:"Card settings"}).onclick=()=>{cardMenu.open=false;openCardSettings(card);};
-      if(card.source?.path)source.createEl("button",{text:"Open source"}).onclick=()=>{cardMenu.open=false;api.workspace.openLinkText(card.source.path,"",false);};
+      if(card.source?.path)source.createEl("button",{text:"Open source"}).onclick=()=>{cardMenu.open=false;api.workspace.openLinkText(card.source.path,"","tab");};
       if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       dv.el("div",card.frontText,{container:front});
       let options;
@@ -668,6 +668,9 @@
         if(busy||shown!==card)return;
         try {
           dv.el("div",card.backText,{container:back});actions.empty();
+          if(card.source?.kind==="block" && !String(card.fields?.Back||"").trim()) {
+            back.createEl("button",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"","tab");
+          }
           actions.createEl("button",{text:"Bury"}).onclick=skip;
           for(const [i,label]of["Again","Hard","Good","Easy"].entries()) {
             const preview=nextStateV2(card,states.get(card.id).state,options,manifest,Date.now(),i+1);
