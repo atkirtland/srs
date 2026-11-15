@@ -35,6 +35,14 @@ def main(argv: list[str] | None = None) -> int:
     migrate.add_argument("--day-zero", type=date.fromisoformat, required=True,
                          help="local calendar date corresponding to Anki scheduler day zero (YYYY-MM-DD)")
     migrate.add_argument("--rollover-hour", type=int, choices=range(24), default=4)
+    migrate.add_argument("--anki-version", required=True, help="exact source desktop Anki version (install the same anki package)")
+    verify = commands.add_parser("verify", help="compare every deck and representative transitions with a disposable Anki copy")
+    verify.add_argument("--collection", type=Path, required=True)
+    verify.add_argument("--data", type=Path, default=PORTABLE / "data" if PORTABLE else None)
+    verify.add_argument("--anki-version", required=True)
+    verify.add_argument("--at", help="fixed UTC ISO timestamp; defaults to command start")
+    verify.add_argument("--node", default="node", help="desktop JS executable; never needed for reviewing")
+    verify.add_argument("--output", type=Path, default=HERE / "verification.json")
     install = commands.add_parser("install-view", help="copy the prebuilt portable view into the vault")
     install.add_argument("--vault", type=Path, required=True)
     seed = commands.add_parser("seed-csv-uids", help="assign UUIDs to Obsidian-only CSV notes")
@@ -68,16 +76,27 @@ def main(argv: list[str] | None = None) -> int:
                 args.output.write_text(content, encoding="utf-8")
             else:
                 print(content, end="")
+        elif args.command == "verify":
+            import verification
+            return verification.run(args)
         else:
             if args.vault is None:
                 raise srs.SRSError("--vault is required outside the portable vault directory")
             portable = PORTABLE or args.vault / "ankobs-srs"
             config_path = args.config or (portable / "config.json" if (portable / "config.json").is_file() else ROOT / "config/srs.json")
             config = srs.load_config(config_path, sources.EXPORTS)
+            import importlib.metadata
+            import scheduling
+            installed_version = importlib.metadata.version("anki")
+            if not scheduling.anki_versions_match(installed_version, args.anki_version):
+                raise srs.SRSError(f"Installed Anki backend is {installed_version}; requested {args.anki_version}. "
+                                   "Update the managed backend from migration/: uv add 'anki==" + args.anki_version + "'")
             data = srs.build_export(srs.read_snapshot(args.collection), args.vault, sources.EXPORTS,
-                                    config, args.day_zero, args.timezone, args.rollover_hour)
+                                    config, args.day_zero, args.timezone, args.rollover_hour, installed_version)
+            scheduling.reconstruct_missing(data, args.collection)
             destination = args.output or portable / "data"
             imported = srs.publish(data, destination)
+            config_path.write_text(json.dumps(data["config"], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             print(json.dumps({key: value for key, value in data["report"].items() if key != "models"}, indent=2))
             print(f"Archived import and report: {imported}")
             return 2 if data["report"]["issues"] else 0

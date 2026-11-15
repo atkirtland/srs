@@ -2,3 +2,6 @@ data/
 anki-inventory.json
 config/
 __pycache__/
+.venv/
+node_modules/
+verification.json

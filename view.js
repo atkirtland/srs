@@ -1901,6 +1901,7 @@
   // obsidian/srs/core.js
   var SCHEDULER_VERSION = "ts-fsrs@5.2.3/FSRS-6";
   var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  var DEVICE = /^(?:anki|computer|android|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
   function validateOptions(options) {
     if (!options || options.algorithm !== "FSRS-6" || options.enable_fuzz !== false || !Number.isFinite(options.desired_retention) || options.desired_retention <= 0 || options.desired_retention >= 1 || !Number.isInteger(options.maximum_interval) || options.maximum_interval < 1 || options.maximum_interval > 36500 || !Number.isInteger(options.new_cards_per_day) || options.new_cards_per_day < 0) throw Error("Unsupported scheduler configuration");
   }
@@ -1940,7 +1941,18 @@
     if (state.last_review !== void 0 && !Number.isFinite(state.last_review)) throw Error("Invalid last_review");
   }
   function validateEvent(event, importId) {
-    if (!event || event.format_version !== 1 || !UUID.test(event.id) || !UUID.test(event.device_id) || !UUID.test(event.card_id) || event.import_id !== importId || event.scheduler_version !== SCHEDULER_VERSION || ![1, 2, 3, 4].includes(event.rating) || !Number.isSafeInteger(event.review_time_ms) || event.review_time_ms < 0 || !Number.isFinite(event.duration_ms) || event.duration_ms < 0 || typeof event.was_new !== "boolean" || typeof event.parent !== "string" || !event.scheduler_config || event.scheduler_config.algorithm !== "FSRS-6") throw Error("Invalid or incompatible review event");
+    if (event?.format_version === 2 && ["historical_review", "scheduling_baseline"].includes(event.kind)) {
+      if (typeof event.id !== "string" || !Number.isSafeInteger(event.review_time_ms) || !DEVICE.test(event.device_id)) throw Error("Invalid imported event");
+      if (event.kind === "historical_review") {
+        if (event.id !== `anki:${event.collection_key}:${event.anki_revlog_id}` || event.state !== undefined || !event.original_review) throw Error("Invalid historical observation");
+      } else {
+        if (typeof event.import_id !== "string" || event.id !== `baseline:${event.import_id}:${event.card_id}`) throw Error("Invalid scheduling baseline");
+        if (event.state !== null) validateState(event.state);
+      }
+      return event;
+    }
+    if (event?.format_version === 2 && event.kind !== "answer") throw Error("Unknown event kind");
+    if (!event || ![1, 2].includes(event.format_version) || !UUID.test(event.id) || !DEVICE.test(event.device_id) || (typeof event.card_id !== "string" || !event.card_id) || event.import_id !== importId || ![SCHEDULER_VERSION, "ts-fsrs@5.2.3/FSRS-6"].includes(event.scheduler_version) || ![1, 2, 3, 4].includes(event.rating) || !Number.isSafeInteger(event.review_time_ms) || event.review_time_ms < 0 || !Number.isFinite(event.duration_ms) || event.duration_ms < 0 || typeof event.was_new !== "boolean" || typeof event.parent !== "string" || !event.scheduler_config || event.scheduler_config.algorithm !== "FSRS-6") throw Error("Invalid or incompatible review event");
     validateState(event.state);
     if (!UUID.test(event.parent) && event.parent !== `import:${importId}:${event.card_id}`) throw Error("Invalid parent state reference");
     validateOptions(event.scheduler_config);
@@ -2065,7 +2077,7 @@
     return cards.map((card) => {
       const template = templates.get(`${card.group}/${card.template_key}`);
       if (template && (template.anki_notetype !== card.anki_notetype || template.anki_ordinal !== card.anki_ordinal)) throw Error(`Card binding changed for ${card.group}/${card.template_key}; re-run migration`);
-      return { ...card, template, active: Boolean(card.supported && template?.enabled) };
+      return { ...card, template, active: true };
     });
   }
   function studyDay(timestamp, timing) {
@@ -2092,7 +2104,7 @@
 
   // obsidian/srs/logs.js
   var LOG_LIMIT = 32 * 1024 * 1024;
-  var LOG_PATTERN = /^[0-9a-f-]{36}-\d{4}-\d{2}(?:-\d{3,})?(?:\.sync-conflict-[^.]+)?\.jsonl$/;
+  var LOG_PATTERN = /^(?:anki|computer|android|[0-9a-f-]{36})-\d{4}-\d{2}(?:-\d{3,})?(?:\.sync-conflict-[^.]+)?\.jsonl$/;
   var encoder = new TextEncoder();
   var bytes = (text) => encoder.encode(text).byteLength;
   function canonical(value) {
@@ -2195,20 +2207,30 @@
     }
     static async open(name, importId, timing, factory = globalThis.indexedDB) {
       if (!factory) throw Error("IndexedDB is unavailable; a persistent local review index is required");
-      const opening = factory.open(name, 1);
+      const opening = factory.open(name, 2);
       opening.onupgradeneeded = () => {
         const db = opening.result;
-        for (const name2 of ["meta", "files", "seen", "latest", "baselines"]) db.createObjectStore(name2);
+        for (const name2 of ["meta", "files", "seen", "latest", "baselines"]) if (!db.objectStoreNames.contains(name2)) db.createObjectStore(name2);
+        if (!db.objectStoreNames.contains("observations")) {
+          const observations = db.createObjectStore("observations", {keyPath: "id"});
+          observations.createIndex("card_id", "card_id");
+        }
+        if (!db.objectStoreNames.contains("activity")) {
+          const activity = db.createObjectStore("activity", {keyPath: "id"}); activity.createIndex("day", "day");
+        }
+        if (!db.objectStoreNames.contains("introduced")) {
         const introduced = db.createObjectStore("introduced", { keyPath: ["day", "card_id"] });
         introduced.createIndex("day", "day");
+        }
       };
       const database = await request(opening);
       database.onversionchange = () => database.close();
       const result = new _ReviewIndex(database, importId, timing);
       const stored = await result.get("meta", "import");
-      if (stored !== importId) {
+      if (stored !== importId || await result.get("meta", "schema") !== 2) {
         await result.clear();
         await result.put("meta", "import", importId);
+        await result.put("meta", "schema", 2);
       }
       return result;
     }
@@ -2222,8 +2244,8 @@
       return transaction(this.database, [store], "readwrite", (tx) => request(tx.objectStore(store).put(value, key)));
     }
     async clear() {
-      await transaction(this.database, ["files", "seen", "latest", "introduced", "baselines"], "readwrite", async (tx) => {
-        await Promise.all(["files", "seen", "latest", "introduced", "baselines"].map((name) => request(tx.objectStore(name).clear())));
+      await transaction(this.database, ["files", "seen", "latest", "introduced", "baselines", "observations", "activity"], "readwrite", async (tx) => {
+        await Promise.all(["files", "seen", "latest", "introduced", "baselines", "observations", "activity"].map((name) => request(tx.objectStore(name).clear())));
       });
     }
     async latest() {
@@ -2234,19 +2256,32 @@
       const day = studyDay(now, this.timing);
       return transaction(this.database, ["introduced"], "readonly", (tx) => request(tx.objectStore("introduced").index("day").count(day)));
     }
+    async historyFor(cardId) {
+      return transaction(this.database,["observations"],"readonly",tx=>request(tx.objectStore("observations").index("card_id").getAll(cardId)));
+    }
+    async activityToday(now) {
+      const day=studyDay(now,this.timing);
+      return transaction(this.database,["activity"],"readonly",tx=>request(tx.objectStore("activity").index("day").getAll(day)));
+    }
     async ingest(events, knownCards) {
       const records = await Promise.all(events.map(async (event) => {
         validateEvent(event, this.importId);
-        if (!knownCards.has(event.card_id)) throw Error(`Unknown review card: ${event.card_id}`);
+        if (event.kind !== "historical_review" && !knownCards.has(event.card_id)) throw Error(`Unknown review card: ${event.card_id}`);
         return { event, hash: await hash(canonical(event)), day: event.was_new ? studyDay(event.review_time_ms, this.timing) : null };
       }));
-      await transaction(this.database, ["seen", "latest", "introduced"], "readwrite", async (tx) => {
+      await transaction(this.database, ["seen", "latest", "introduced", "observations", "activity"], "readwrite", async (tx) => {
         const seen = tx.objectStore("seen"), latest = tx.objectStore("latest");
         for (const record of records) {
           const previous = await request(seen.get(record.event.id));
           if (previous && previous !== record.hash) throw Error(`Conflicting contents for event ${record.event.id}`);
           if (previous) continue;
           await request(seen.put(record.hash, record.event.id));
+          if (record.event.kind === "historical_review") {
+            if (record.event.card_id) await request(tx.objectStore("observations").put(record.event));
+            continue;
+          }
+          if (record.event.kind === "scheduling_baseline") continue;
+          await request(tx.objectStore("activity").put({...record.event,day:studyDay(record.event.review_time_ms,this.timing)}));
           const state = await request(latest.get(record.event.card_id));
           if (!state || compare(record.event, state) > 0) await request(latest.put(record.event, record.event.card_id));
           if (record.day) await request(tx.objectStore("introduced").put({ day: record.day, card_id: record.event.card_id }));
@@ -2313,281 +2348,621 @@
     }
   };
 
-  // obsidian/srs/view.js
+
+const US_STATES = {"alabama": "Alabama", "alaska": "Alaska", "arizona": "Arizona", "arkansas": "Arkansas", "california": "California", "colorado": "Colorado", "connecticut": "Connecticut", "delaware": "Delaware", "florida": "Florida", "georgia": "Georgia", "hawaii": "Hawaii", "idaho": "Idaho", "illinois": "Illinois", "indiana": "Indiana", "iowa": "Iowa", "kansas": "Kansas", "kentucky": "Kentucky", "louisiana": "Louisiana", "maine": "Maine", "maryland": "Maryland", "massachusetts": "Massachusetts", "michigan": "Michigan", "minnesota": "Minnesota", "mississippi": "Mississippi", "missouri": "Missouri", "montana": "Montana", "nebraska": "Nebraska", "nevada": "Nevada", "new-hampshire": "New Hampshire", "new-jersey": "New Jersey", "new-mexico": "New Mexico", "new-york": "New York", "north-carolina": "North Carolina", "north-dakota": "North Dakota", "ohio": "Ohio", "oklahoma": "Oklahoma", "oregon": "Oregon", "pennsylvania": "Pennsylvania", "rhode-island": "Rhode Island", "south-carolina": "South Carolina", "south-dakota": "South Dakota", "tennessee": "Tennessee", "texas": "Texas", "utah": "Utah", "vermont": "Vermont", "virginia": "Virginia", "washington": "Washington", "west-virginia": "West Virginia", "wisconsin": "Wisconsin", "wyoming": "Wyoming"};
+// Browser implementation bundled into ../view.js by build.py. No runtime tooling.
+function effectiveSettings(card, manifest) {
+  if (!manifest.scheduling) return manifest.scheduler;
+  const meta = manifest.scheduling;
+  const deck = meta.decks[card.original_deck_id || card.deck_id];
+  const preset = meta.presets[deck.normal.config_id || "1"];
+  const s = preset.settings;
+  const field = ["fsrs_params_6", "fsrs_params_5", "fsrs_params_4"].find(k => s[k]?.length);
+  return {
+    algorithm: "FSRS-6", weights: s[field] || [], parameter_field: field,
+    parameter_policy: meta.parameter_policy, source_anki_version: meta.source_anki_version,
+    preset_id: preset.id, desired_retention: deck.normal.desired_retention ?? s.desired_retention,
+    maximum_interval: s.maximum_review_interval, minimum_interval: s.minimum_lapse_interval,
+    learning_steps: s.learn_steps, relearning_steps: s.relearn_steps,
+    new_cards_per_day: s.new_per_day, enable_fuzz: false,
+    short_term_with_steps: Boolean(meta.collection.fsrsShortTermWithStepsEnabled)
+  };
+}
+function schedulerV2(options) {
+  validateOptions(options);
+  if (options.weights) {
+    if (!options.parameter_policy) throw Error("Source Anki version is unconfirmed. Run desktop verification before rating.");
+    if (![17, 19, 21].includes(options.weights.length) || options.weights.some(x => !Number.isFinite(x)))
+      throw Error("Unsupported trained scheduler parameters");
+  }
+  const engine = fsrs({request_retention: options.desired_retention, maximum_interval: options.maximum_interval,
+    enable_fuzz: false, w: options.weights,
+    ...(options.learning_steps ? {learning_steps: options.learning_steps.map(x => `${x}m`)} : {}),
+    ...(options.relearning_steps ? {relearning_steps: options.relearning_steps.map(x => `${x}m`)} : {})});
+  // Anki permits initial stability below the bundled library's 0.1 floor.
+  engine.init_stability = rating => engine.param.w[rating - 1];
+  // The native short-term model prevents Hard from reducing stability too.
+  engine.next_short_term_stability = (s, rating) => {
+    const w = engine.param.w;
+    const growth = Math.pow(s, -w[19]) * Math.exp(w[17] * (rating - 3 + w[18]));
+    return Math.min(36500, Math.max(.001, s * (rating >= 2 ? Math.max(1, growth) : growth)));
+  };
+  return engine;
+}
+function renderV2(template, fields, ordinal = 0, answer = false) {
+  if (/<script\b|\bon\w+\s*=|javascript:/i.test(template)) throw Error("Unsupported template operation: JavaScript");
+  const token = /{{([#/^]?)([^{}]+)}}/g;
+  const stack = [{visible: true, name: null}];
+  let output = "", offset = 0;
+  const value = expression => {
+    const parts = expression.split(":"), key = parts.pop();
+    if (!Object.hasOwn(fields, key)) throw Error(`Missing template field: ${key}`);
+    let v = String(fields[key] ?? "");
+    for (const filter of parts.reverse()) {
+      if (filter === "cloze") v = v.replace(/{{c(\d+)::([\s\S]*?)(?:::([\s\S]*?))?}}/g,
+        (_, n, body, hint) => +n === ordinal + 1 ? answer ? body : `[${hint || "…"}]` : body);
+      else if (filter === "text") v = v.replace(/<[^>]*>/g, "");
+      else if (filter === "type") throw Error("Unsupported template operation: type-answer input");
+      else throw Error(`Unsupported template filter: ${filter}`);
+    }
+    return v;
+  };
+  for (const match of template.matchAll(token)) {
+    if (stack.at(-1).visible) output += template.slice(offset, match.index);
+    const [, marker, key] = match;
+    if (marker === "#" || marker === "^") {
+      const present = value(key).trim() !== "";
+      stack.push({name: key, visible: stack.at(-1).visible && (marker === "#" ? present : !present)});
+    } else if (marker === "/") {
+      if (stack.length === 1 || stack.pop().name !== key) throw Error(`Unbalanced template section: ${key}`);
+    } else if (stack.at(-1).visible) output += value(key);
+    offset = match.index + match[0].length;
+  }
+  if (stack.length !== 1 || /{{|}}/.test(template.replace(token, ""))) throw Error("Unsupported template syntax");
+  return output + template.slice(offset);
+}
+function transformField(name, value, note) {
+  const text = v => v == null ? "" : String(v).trim();
+  const list = v => Array.isArray(v) ? v : [v];
+  const label = v => text(v).replace(/^!?\[\[([^\]|#]+)(?:[|#]([^\]]*))?\]\]$/, (_, p, l) => l || p.split("/").at(-1).replace(/\.md$/, ""));
+  const media = v => list(v).filter(x => text(x)).map(x => {
+    const m = text(x).match(/^!?\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]$/);
+    if (!m) throw Error(`Expected vault media reference: ${text(x)}`);
+    return `![[${m[1]}]]`;
+  }).join("\n");
+  switch (name) {
+    case "text": case "markdown_body": return text(value);
+    case "capitalize": return text(value).replace(/^./, x => x.toUpperCase());
+    case "functional_group_name": return text(value).replace(/-group$/i, "").replace(/^./, x => x.toUpperCase());
+    case "ph_front": return text(note.metadata.name_zh) || text(note.metadata.name_en) || note.filename;
+    case "ph_units": return "pH";
+    case "first_alias": if (!Array.isArray(value) || !text(value[0])) throw Error("Missing first alias"); return text(value[0]);
+    case "chinese_alias": {const v = list(value).find(x => /\p{Script=Han}/u.test(text(x))); if (!v) throw Error("Missing Chinese alias"); return text(v);}
+    case "wikilink_label": return label(value);
+    case "comma_separated_labels": return list(value).map(label).filter(Boolean).join(", ");
+    case "image": case "image_list": case "optional_image": case "sound": return media(value);
+    case "country_flags": return [note.metadata.flag_blur, value].filter(x => text(x)).map(media).join("\n");
+    case "image_or_text": return Array.isArray(value) || /^!?\[\[/.test(text(value)) ? media(value) : text(value);
+    case "chemical_structure": {const v = note.metadata.structure_image || note.metadata.structure_latex || note.metadata.structure; return v ? transformField("image_or_text", v, note) : "";}
+    case "markdown_link_list": return list(value).map(text).filter(Boolean).join("\n\n");
+    case "indian_union_territory": return note.path.split("/").at(-2) === "union-territories" ? "Yes" : "No";
+    case "us_state_name": {const v = note.lookups?.us_states?.[note.filename.toLowerCase()]; if (!v) throw Error("Unknown US state filename"); return v;}
+    case "classical_back": {const composer = label(note.metadata.composer); if (!composer) throw Error("Missing composer"); return `${composer} - ${text(value)}${note.metadata.info ? "\n\n" + text(note.metadata.info) : ""}`;}
+    default: throw Error(`Unsupported source transformation: ${name}`);
+  }
+}
+function fieldsFromNote(card, note) {
+  const specs = card.source.fields || Object.entries(card.source.field_map || {}).map(([anki, source]) => ({anki, source, transform: "text", required: false}));
+  const fields = {};
+  for (const spec of specs) {
+    let value = spec.source === "$filename" ? note.filename : spec.source === "$body" ? note.body : note.metadata[spec.source];
+    if (value === undefined && spec.required && !["blank", "omit"].includes(spec.missing_source) && spec.transform !== "optional_image")
+      throw Error(`Missing source field: ${spec.source}`);
+    fields[spec.anki] = transformField(spec.transform, value, note);
+  }
+  for (const key of card.template.required_fields) if (!String(fields[key] ?? "").trim()) throw Error(`Missing required field: ${key}`);
+  return fields;
+}
+function prepareTaxonomy(notes) {
+  const normalized = s => s.normalize("NFC").toLowerCase().replace(/\.md$/i, "");
+  const exact = new Map(), stems = new Map(), parents = new Map();
+  for (const note of notes) {
+    const key = normalized(note.path.replace(/^.*?wiki\/life\//, ""));
+    exact.set(key,note);const stem=normalized(note.filename);
+    stems.set(stem,[...(stems.get(stem)||[]),note]);parents.set(note.path,[]);
+  }
+  for(const parent of notes) for(const item of [parent.metadata.child,parent.metadata.children].flat().filter(Boolean)) {
+    const m=String(item).match(/^!?\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]$/);
+    if(!m)throw Error(`Invalid taxonomy child: ${item}`);
+    const target=normalized(m[1].replace(/^wiki\/life\//,""));
+    let child=exact.get(target);
+    if(!child){const matches=stems.get(target.split("/").at(-1))||[];if(matches.length>1)throw Error(`Ambiguous taxonomy child: ${item}`);child=matches[0];}
+    if(child)parents.get(child.path).push(parent);
+  }
+  const output=new Map();
+  for(const note of notes) {
+    const byRank=new Map(),seen=new Set();
+    const visit=(n,visiting)=>{
+      if(visiting.has(n.path))throw Error("Cycle in taxonomy ancestry");
+      if(seen.has(n.path))return;seen.add(n.path);
+      const m=n.filename.match(/^(\S+)\s+(.+)$/);if(!m)throw Error("Taxonomy filename must be '<rank> <scientific name>'");
+      const key=m[1].toLowerCase();byRank.set(key,[...new Set([...(byRank.get(key)||[]),m[2]])]);
+      for(const p of parents.get(n.path))visit(p,new Set([...visiting,n.path]));
+    };visit(note,new Set());
+    const [rank,...scientific]=note.filename.split(" ");
+    const get=r=>(byRank.get(r)||[]).join("; ");
+    const kingdom=get("kingdom");let family=get("family");
+    if(kingdom.toLowerCase()==="plantae")family=[family,get("subfamily"),get("tribe")].filter(Boolean).join(" - ");
+    const familyDisplay=family&&kingdom?`${family} (${kingdom})`:family||(kingdom?`(${kingdom})`:"");
+    output.set(note.path,{...note.metadata,$taxonomy_rank:rank,$taxonomy_scientific_name:scientific.join(" "),$taxonomy_genus:get("genus"),$taxonomy_family:familyDisplay});
+  }
+  return output;
+}
+function dayNumber(now, timing) {
+  return Math.round((Date.parse(studyDay(now, timing)) - Date.parse(timing.day_zero)) / 86400000);
+}
+function queueKind(card, value, manifest, now) {
+  if (card.retired) return null;
+  const state = value?.state;
+  let q = state?.queue ?? card.queue;
+  const today = dayNumber(now, manifest.timing);
+  const lastUnburied = manifest.scheduling?.collection.lastUnburied ?? 0;
+  if ((q === -2 || q === -3) && (today > lastUnburied || today + 7 < lastUnburied))
+    q = card.card_type === 0 ? 0 : card.card_type === 2 ? 2 : card.scheduling?.due > 1e9 ? 1 : 3;
+  if (q < 0) return null;
+  if (q === 0) return "new";
+  if (q === 1) return (state?.due ?? card.due_ms) < now + (manifest.scheduling?.collection.collapseTime ?? 1200) * 1000 ? "intraday" : null;
+  if (q === 4) return (state?.due ?? card.due_ms) <= now + (manifest.scheduling?.collection.collapseTime ?? 1200) * 1000 ? "intraday" : null;
+  if (q === 2 || q === 3) {
+    const dueDay = state?.anki_due ?? card.anki_due;
+    const due = dueDay !== undefined ? dueDay <= today : state?.due <= now;
+    return due ? q === 3 ? "interday" : "review" : null;
+  }
+  return null;
+}
+function deckTree(cards, states, manifest, now, activity = []) {
+  const meta = manifest.scheduling;
+  if (!meta) return [];
+  const today = dayNumber(now, manifest.timing);
+  const nodes = new Map(Object.values(meta.decks).map(deck => [deck.id, {...deck, children: [],
+    new: 0, review: 0, intraday: 0, interday: 0, errors: 0, total: 0}]));
+  for (const c of cards) {
+    const node = nodes.get(c.deck_id);
+    if (!node) continue;
+    node.total++;
+    if (c.content_error) node.errors++;
+    const kind = queueKind(c, states.get(c.id), manifest, now);
+    if (kind) node[kind]++;
+  }
+  const roots = [];
+  for (const n of nodes.values()) (nodes.get(n.parent_id)?.children || roots).push(n);
+  const added = new Map(), introduced = new Set();
+  const byCard = new Map(cards.map(c => [c.id, c]));
+  for (const event of activity) {
+    if (event.kind === "historical_review" || event.kind === "scheduling_baseline" || studyDay(event.review_time_ms, manifest.timing) !== studyDay(now, manifest.timing)) continue;
+    const card = byCard.get(event.card_id);
+    if (!card) continue;
+    if (event.was_new && introduced.has(card.id)) continue;
+    if (event.was_new) introduced.add(card.id);
+    let node = nodes.get(card.original_deck_id || card.deck_id);
+    while (node) {
+      const value = added.get(node.id) || {new: 0, review: 0};
+      if (event.was_new) value.new++;
+      else if (event.was_review ?? event.state.state === State.Review) value.review++;
+      added.set(node.id, value);
+      node = nodes.get(node.parent_id);
+    }
+  }
+  const visit = (n, parent) => {
+    const preset = meta.presets[n.normal.config_id || "1"]?.settings;
+    let limits = {new: 9999, review: 9999};
+    if (!n.filtered && preset) {
+      const limit = (kind, fallback) => {
+        const override = n.normal[`${kind}_limit_today`];
+        return override && (override.today ?? 0) === today ? override.limit ?? 0 : n.normal[`${kind}_limit`] ?? fallback;
+      };
+      const counts = n.common.last_day_studied === today ? n.common : {};
+      const extra = added.get(n.id) || {};
+      const studiedNew = (counts.new_studied || 0) + (extra.new || 0);
+      const studiedReview = (counts.review_studied || 0) + (extra.review || 0);
+      limits.review = Math.max(0, limit("review", preset.reviews_per_day) - studiedReview - (meta.collection.newCardsIgnoreReviewLimit ? 0 : studiedNew));
+      limits.new = Math.max(0, limit("new", preset.new_per_day) - studiedNew);
+      if (!meta.collection.newCardsIgnoreReviewLimit) limits.new = Math.min(limits.new, limits.review);
+    }
+    if (parent && meta.collection.applyAllParentLimits) {
+      limits.new = Math.min(limits.new, parent.new); limits.review = Math.min(limits.review, parent.review);
+    }
+    n.children.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+    for (const child of n.children) {
+      visit(child, limits);
+      for (const kind of ["new", "review", "intraday", "interday", "errors", "total"]) n[kind] += child[kind];
+    }
+    n.interday = Math.min(n.interday, limits.review);
+    n.review = Math.min(n.review, limits.review - n.interday);
+    n.new = Math.min(n.new, limits.new);
+    if (!n.filtered && !meta.collection.newCardsIgnoreReviewLimit) n.new = Math.min(n.new, limits.review - n.interday - n.review);
+    n.learning = n.intraday + n.interday;
+  };
+  roots.sort((a,b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  roots.forEach(n => visit(n, null));
+  return roots.filter(n => !(n.id === "1" && n.total === 0 && !n.children.length && roots.length > 1));
+}
+function reviewQueueV2(cards, states, events, manifest, now, group, introducedCount, deckId = null, skipped = new Set()) {
+  if (!manifest.scheduling) return reviewQueue(cards, states, events, manifest, now, group, introducedCount);
+  const tree = deckTree(cards, states, manifest, now, events);
+  let node;
+  const find = nodes => {for (const n of nodes) {if (n.id === deckId) node = n; find(n.children);}};
+  find(tree);
+  const selected = node ? [node] : tree;
+  const allowed = new Map();
+  const allocate = n => {
+    const ids = new Set();
+    const gather = p => {ids.add(p.id); p.children.forEach(gather);}; gather(n);
+    const eligible = cards.filter(c => ids.has(c.deck_id) && (!group || c.group === group) && states.has(c.id));
+    const budget = {new:n.new,review:n.review,interday:n.interday,intraday:n.intraday};
+    eligible.sort((a,b) => Number(skipped.has(a.id))-Number(skipped.has(b.id)) || (a.anki_due ?? 0) - (b.anki_due ?? 0) || a.id.localeCompare(b.id));
+    const used = new Map();
+    for (const kind of ["intraday", "interday", "review", "new"]) for (const c of eligible) {
+      if (queueKind(c, states.get(c.id), manifest, now) !== kind || budget[kind] <= 0) continue;
+      let path = manifest.scheduling.decks[c.deck_id], ok = true;
+      const ancestors = [];
+      while (path) {
+        ancestors.push(path.id);
+        const entry = used.get(path.id) || {new:0,review:0,interday:0,intraday:0};
+        let target; const locate = ns => {for (const v of ns) {if (v.id === path.id) target = v; locate(v.children);}}; locate(tree);
+        if (target && entry[kind] >= target[kind]) ok = false;
+        if (path.id === n.id) break;
+        path = manifest.scheduling.decks[path.parent_id];
+      }
+      if (!ok) continue;
+      for (const id of ancestors) {const entry = used.get(id) || {new:0,review:0,interday:0,intraday:0};entry[kind]++;used.set(id,entry);}
+      budget[kind]--; allowed.set(c.id,c);
+    }
+  };
+  selected.forEach(allocate);
+  const chosen = [...allowed.values()];
+  const priority = c => {
+    const kind=queueKind(c,states.get(c.id),manifest,now);
+    return kind==="intraday" ? (states.get(c.id).state.due>now?4:0) : kind==="interday"?1:kind==="review"?2:3;
+  };
+  chosen.sort((a,b)=>priority(a)-priority(b) || (states.get(a.id).state.due||0)-(states.get(b.id).state.due||0) || a.id.localeCompare(b.id));
+  return {cards: chosen, fresh: chosen.filter(c => queueKind(c,states.get(c.id),manifest,now) === "new").length,
+    learning:chosen.filter(c => ["intraday","interday"].includes(queueKind(c,states.get(c.id),manifest,now))).length,
+    review:chosen.filter(c => queueKind(c,states.get(c.id),manifest,now) === "review").length, tree};
+}
+function nextStateV2(card, current, options, manifest, now, rating) {
+  if (![1,2,3,4].includes(rating)) throw Error("Invalid rating");
+  if (current.last_review !== undefined && now < current.last_review) throw Error("Device clock precedes last review");
+  if (manifest.scheduling?.decks[card.deck_id]?.filtered) throw Error("Filtered-deck answering requires returning cards to their original deck in Anki before migration");
+  const engine = schedulerV2(options);
+  // Anki measures whole 24-hour periods back from the next cutoff, using
+  // today's UTC offset. Counting historical local dates differs across DST.
+  const clock = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {timeZone:manifest.timing.timezone,
+    hour:"numeric", minute:"numeric", second:"numeric", hourCycle:"h23"})
+    .formatToParts(new Date(now)).map(p => [p.type,p.value]));
+  const sinceMidnight = +clock.hour * 3600 + +clock.minute * 60 + +clock.second;
+  const untilRollover = (manifest.timing.rollover_hour * 3600 - sinceMidnight + 86400) % 86400 || 86400;
+  const nextCutoff = Math.floor(now / 1000) + untilRollover;
+  const elapsed = current.last_review === undefined ? 0 :
+    Math.max(0, Math.floor((nextCutoff - Math.floor(current.last_review / 1000)) / 86400));
+  const memories = [1,2,3,4].map(r => engine.next_state(current.state===State.New ? null : {stability:current.stability,difficulty:current.difficulty},elapsed,r));
+  const interval = m => m.stability * engine.intervalModifier;
+  const capped = (value,min=1) => Math.min(options.maximum_interval,Math.max(min,Math.round(value)));
+  const memory = memories[rating-1];
+  const state = {...current,stability:memory.stability,difficulty:memory.difficulty,elapsed_days:elapsed,
+    last_review:now,reps:current.reps+1,lapses:current.lapses,queue:2,state:State.Review,
+    learning_steps:0,remaining_steps:0};
+  let seconds, remaining = 0;
+  let days = capped(interval(memory));
+  const relearning = current.state===State.Relearning || current.state===State.Review && rating===1;
+  const steps = relearning ? options.relearning_steps || [10] : options.learning_steps || [1,10];
+  if (current.state!==State.Review || rating===1) {
+    const total=steps.length;
+    const originalRemaining = current.state===State.New || current.state===State.Review ? total :
+      current.remaining_steps ?? Math.max(0,total-current.learning_steps);
+    const position=Math.max(0,Math.min(total-1,total-originalRemaining));
+    if(rating===1 && total) {seconds=Math.trunc(steps[0]*60);remaining=total;}
+    else if(rating===2 && total) {
+      const delay=Math.trunc(steps[position]*60);
+      seconds=position===0 ? total>1 ? Math.trunc((delay+Math.trunc(steps[1]*60))/2) : Math.min(Math.trunc(delay*1.5),delay+86400) : delay;
+      if(seconds>86400)seconds=Math.round(seconds/86400)*86400;
+      remaining=originalRemaining;
+    } else if(rating===3 && position+1<total) {seconds=Math.trunc(steps[position+1]*60);remaining=total-position-1;}
+    if(rating===4)days=capped(interval(memory),capped(interval(memories[2]))+1);
+    if(seconds===undefined && rating!==4 && (total===0 || options.short_term_with_steps) && interval(memory)<.5) {
+      seconds=Math.max(1,Math.trunc(interval(memory)*86400));remaining=originalRemaining;
+    }
+    if(current.state===State.Review && rating===1)state.lapses++;
+  } else {
+    const hard=capped(interval(memories[1]));
+    const good=capped(interval(memories[2]),hard+1);
+    const easy=capped(interval(memories[3]),good+1);
+    days=[days,hard,good,easy][rating-1];
+  }
+  if(seconds!==undefined) {
+    state.scheduled_secs=seconds;
+    state.state=relearning?State.Relearning:State.Learning;
+    state.scheduled_days=relearning ? rating===1?days:current.scheduled_days : 0;
+    state.remaining_steps=remaining;state.learning_steps=Math.max(0,steps.length-remaining);
+    state.due=now+seconds*1000;
+    state.queue=state.due>=studyDayStart(dayNumber(now,manifest.timing)+1,manifest.timing)?3:1;
+    if(state.queue===3) {
+      state.anki_due=dayNumber(now,manifest.timing)+Math.max(1,Math.round(seconds/86400));
+      state.due=studyDayStart(state.anki_due,manifest.timing);
+    } else delete state.anki_due;
+  } else {
+    delete state.scheduled_secs;
+    state.scheduled_days=days;state.anki_due=dayNumber(now,manifest.timing)+days;
+    state.due=studyDayStart(state.anki_due,manifest.timing);
+  }
+  return state;
+}
+function studyDayStart(day, timing) {
+  const target = Date.parse(timing.day_zero) + day * 86400000 + timing.rollover_hour * 3600000;
+  let guess = target;
+  for (let i = 0; i < 3; i++) {
+    const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {timeZone:timing.timezone,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit",hourCycle:"h23"}).formatToParts(new Date(guess)).map(x=>[x.type,x.value]));
+    guess += target - Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute,+p.second);
+  }
+  return guess;
+}
+
+  if (globalThis.__SRS_TEST__) {
+    globalThis.SRS = {schedulerV2, effectiveSettings, renderV2, transformField, fieldsFromNote,
+      deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber,
+      ReviewIndex, appendReview, validateEvent, parseCSV, indexRows, configuredCards, initialState};
+    return;
+  }
   (async () => {
     const api = dv.app, component = dv.component;
     const root = input?.root || "ankobs-srs", dataRoot = `${root}/data`;
     const identity = `ankobs-srs:${api.vault.getName()}:${root}`;
-    const host = dv.container.createDiv({ cls: "ankobs-srs" });
+    const host = dv.container.createDiv({cls:"ankobs-srs"});
     const notice = host.createDiv(), controls = host.createDiv();
+    const home = controls.createEl("button",{text:"Decks"});
     const select = controls.createEl("select");
-    const refresh = controls.createEl("button", { text: "Refresh" });
-    const rebuild = controls.createEl("button", { text: "Rebuild local index" });
-    const counts = host.createEl("p"), front = host.createDiv(), back = host.createDiv();
+    const deviceSelect = controls.createEl("select",{attr:{"aria-label":"This device"}});
+    const refresh = controls.createEl("button",{text:"Refresh"});
+    const rebuild = controls.createEl("button",{text:"Rebuild local index"});
+    const counts = host.createDiv(), homepage = host.createDiv(), front = host.createDiv(), back = host.createDiv();
     const actions = host.createDiv(), source = host.createDiv();
-    const sourceCache = /* @__PURE__ */ new Map(), dirty = /* @__PURE__ */ new Set();
-    let manifest, cards = [], config, engine, index, states, shown, configKey, started = 0;
-    let busy = false, disposed = false, refreshTimer, pending = false;
-    let deviceId = localStorage.getItem(`${identity}:device`);
-    if (!deviceId) {
-      deviceId = crypto.randomUUID();
-      localStorage.setItem(`${identity}:device`, deviceId);
-    }
-    component.register(() => {
-      disposed = true;
-      clearTimeout(refreshTimer);
-      index?.close();
-    });
+    const dirty = new Set(), cache = new Map(), skipped = new Set();
+    let taxonomy;
+    let manifest, cards = [], config, index, states, shown, configKey, started = 0;
+    let busy = false, disposed = false, refreshTimer, pending = false, selectedDeck = null;
+    let reviewing = Boolean(input?.group);
+    let deviceId = input?.device || localStorage.getItem(`${identity}:device-name`);
+    if (!["computer","android"].includes(deviceId))deviceId=/Android/i.test(globalThis.navigator?.userAgent||"")?"android":"computer";
+    for(const name of ["computer","android"])deviceSelect.createEl("option",{value:name,text:`Device: ${name}`});
+    deviceSelect.value=deviceId;
+    localStorage.setItem(`${identity}:device-name`,deviceId);
+    deviceSelect.onchange=()=>{deviceId=deviceSelect.value;localStorage.setItem(`${identity}:device-name`,deviceId);};
+    component.register(() => {disposed=true;clearTimeout(refreshTimer);index?.close();});
     const store = {
-      async list(directory) {
-        return api.vault.getFiles().filter((file) => file.path.startsWith(directory + "/"));
-      },
-      async read(path) {
-        const file = api.vault.getAbstractFileByPath(path);
-        return file ? api.vault.read(file) : null;
-      },
-      async create(path, text) {
-        await api.vault.create(path, text);
-      },
-      async append(path, text) {
-        const file = api.vault.getAbstractFileByPath(path);
-        if (!file) throw Error(`Missing review log: ${path}`);
-        await api.vault.append(file, text);
-      }
+      async list(directory) {return api.vault.getFiles().filter(f=>f.path.startsWith(directory+"/"));},
+      async read(path) {const f=api.vault.getAbstractFileByPath(path);return f ? api.vault.read(f) : null;},
+      async create(path,text) {await api.vault.create(path,text);},
+      async append(path,text) {const f=api.vault.getAbstractFileByPath(path);if(!f)throw Error(`Missing log: ${path}`);await api.vault.append(f,text);}
     };
-    async function json(path) {
-      const text = await store.read(path);
-      if (text === null) throw Error(`Missing SRS file: ${path}`);
-      return JSON.parse(text);
-    }
-    function message(error) {
-      notice.textContent = String(error.message || error);
-    }
-    function clearCard() {
-      front.empty();
-      back.empty();
-      actions.empty();
-      source.empty();
-      shown = null;
-    }
-    function logFiles() {
-      return api.vault.getFiles().filter((file) => file.path.startsWith(`${dataRoot}/reviews/`) && LOG_PATTERN.test(file.path.split("/").at(-1)) || file.path.startsWith(`${dataRoot}/events/`) && file.extension === "json").map((file) => ({ path: file.path, stat: file.stat ? { ...file.stat } : void 0 }));
-    }
+    async function json(path) {const text=await store.read(path);if(text===null)throw Error(`Missing SRS file: ${path}`);return JSON.parse(text);}
+    function message(e) {notice.textContent=String(e.message||e);}
+    function clearCard() {front.empty();back.empty();actions.empty();source.empty();homepage.empty();shown=null;}
+    function logFiles() {return api.vault.getFiles().filter(f=>
+      f.path.startsWith(`${dataRoot}/reviews/`) && LOG_PATTERN.test(f.path.split("/").at(-1)))
+      .map(f=>({path:f.path,stat:f.stat?{...f.stat}:undefined}));}
     async function syncIndex() {
-      const files = logFiles(), force = new Set([...dirty].filter((path) => path.startsWith(`${dataRoot}/reviews/`) || path.startsWith(`${dataRoot}/events/`)));
-      await index.sync(files, async (descriptor) => {
-        const text = await store.read(descriptor.path);
-        if (text === null) throw Error(`Review log disappeared: ${descriptor.path}`);
-        return descriptor.path.endsWith(".json") ? text.trim() + "\n" : text;
-      }, new Set(cards.map((card) => card.id)), {
-        force,
-        progress: (count) => {
-          if (!disposed && count >= 500) notice.textContent = `Indexing reviews: ${count.toLocaleString()}\u2026`;
-        }
+      const force=new Set([...dirty].filter(p=>p.startsWith(`${dataRoot}/reviews/`)));
+      await index.sync(logFiles(),async f=>{const t=await store.read(f.path);if(t===null)throw Error(`Log disappeared: ${f.path}`);return t;},new Set(cards.map(c=>c.id)),{
+        force, progress:n=>{if(!disposed && n>=500)notice.textContent=`Indexing reviews: ${n.toLocaleString()}…`;}
       });
-      for (const path of force) dirty.delete(path);
+      for(const path of force)dirty.delete(path);
     }
-    function current(card, baseline2, latest) {
-      return latest ? { state: latest.state, parent: latest.id } : { state: baseline2, parent: `import:${manifest.import_id}:${card.id}` };
+    async function noteAt(file) {
+      let stored=cache.get(file.path);
+      if(!stored || !file.stat || stored.mtime!==file.stat.mtime || stored.size!==file.stat.size || dirty.has(file.path)) {
+        const text=await api.vault.read(file);
+        if(file.path.endsWith(".csv")) stored={rows:indexRows(parseCSV(text))};
+        else {
+          // Obsidian owns YAML parsing on both supported platforms.
+          const metadata=api.metadataCache.getFileCache(file)?.frontmatter || {};
+          stored={metadata,body:text.replace(/^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/,""),text};
+        }
+        Object.assign(stored,{mtime:file.stat?.mtime,size:file.stat?.size});cache.set(file.path,stored);dirty.delete(file.path);
+      }
+      return stored;
+    }
+    async function resolveSource(card) {
+      if(!card.template)throw Error("No editable template mapped to this Anki card ordinal");
+      if(!card.template.enabled)throw Error("Template disabled in config.json");
+      if(!card.source)throw Error("Unresolved vault source");
+      if(card.source.error)throw Error(card.source.error);
+      let path=card.source.path;
+      if(!path && card.source.candidates) {
+        const matches=[];
+        for(const file of api.vault.getFiles().filter(f=>card.source.candidates.some(p=>f.path===p||f.path.startsWith(p+"/")))) {
+          const note=await noteAt(file);
+          if(note.rows?.has(card.note_uid) || `anki:${note.metadata?.anki_note_id}`===card.note_uid || `local:${note.metadata?.srs_uid}`===card.note_uid)matches.push(file.path);
+        }
+        if(matches.length!==1)throw Error(matches.length?"Duplicate vault source identity":"Unresolved vault source");
+        path=matches[0];
+      }
+      const file=api.vault.getAbstractFileByPath(path);
+      if(!file)throw Error(`Missing vault source: ${path}`);
+      const data=await noteAt(file);
+      let metadata=data.rows?data.rows.get(card.note_uid):data.metadata;
+      if(card.source.prepare==="prepare_taxonomy_notes") {
+        if(!taxonomy) {
+          const notes=[];
+          for(const f of api.vault.getFiles().filter(f=>f.path.startsWith("wiki/life/")&&f.path.endsWith(".md"))) {
+            const parsed=await noteAt(f);
+            if(Object.keys(parsed.metadata).length)notes.push({path:f.path,filename:f.basename||f.path.split("/").at(-1).replace(/\.md$/,""),metadata:parsed.metadata});
+          }
+          taxonomy=prepareTaxonomy(notes);
+        }
+        metadata=taxonomy.get(path)||metadata;
+      }
+      if(card.source.kind==="block") {
+        const matches=[...data.text.matchAll(/^>[ \t]*\[!anki\](?:-[ \t]*|[ \t]+)([^\r\n]*)\r?\n((?:^>[ \t]?(?!\[!anki\](?:-|[ \t]))[^\r\n]*(?:\r?\n|$))+?)^[ \t]*<!--[ \t]*ID[ \t]*:[ \t]*(\d+)[ \t]*-->[ \t]*$/gmi)].filter(m=>`anki:${m[3]}`===card.note_uid);
+        if(matches.length!==1)throw Error(matches.length?"Duplicate block identity":"Missing Markdown block identity");
+        metadata={$front:matches[0][1].trim(),$back:matches[0][2].split(/\r?\n/).map(l=>l.replace(/^>[ \t]?/,"")).filter(l=>!/^\s*(?:#[^\s#]+\s*)+$/.test(l)).join("\n").trim()};
+      }
+      if(!metadata)throw Error(`Missing source identity: ${card.note_uid}`);
+      if(!data.rows && (metadata.anki_note_id || metadata.srs_uid)) {
+        const uid=metadata.anki_note_id?`anki:${metadata.anki_note_id}`:`local:${metadata.srs_uid}`;
+        if(uid!==card.note_uid)throw Error("Source identity changed");
+      }
+      const note={metadata,body:data.body,filename:file.basename||file.path.split("/").at(-1).replace(/\.md$/,""),path,lookups:{us_states:US_STATES}};
+      const fields=fieldsFromNote(card,note);
+      const special={...fields,Deck:manifest.scheduling?.decks[card.deck_id]?.name||"",Subdeck:manifest.scheduling?.decks[card.deck_id]?.name.split("::").at(-1)||"",Card:card.template.key,Type:card.anki_notetype,Tags:Array.isArray(metadata.tags)?metadata.tags.join(" "):String(metadata.tags||"")};
+      const frontText=renderV2(card.template.front,special,card.anki_ordinal,false);
+      const backText=renderV2(card.template.back,{...special,FrontSide:frontText},card.anki_ordinal,true);
+      if(!frontText.trim() || !backText.trim())throw Error("Template produced an empty question or answer");
+      return {...card,source:{...card.source,path},fields,frontText,backText};
     }
     async function readSources() {
-      const result = [];
-      for (const card of configuredCards(cards, config).filter((card2) => card2.active)) {
-        const file = api.vault.getAbstractFileByPath(card.source.path);
-        if (!file) continue;
-        let cache = sourceCache.get(file.path);
-        if (!cache || !file.stat || cache.mtime !== file.stat.mtime || cache.size !== file.stat.size || dirty.has(file.path)) {
-          const rows = indexRows(parseCSV(await api.vault.read(file)));
-          cache = { rows, mtime: file.stat?.mtime, size: file.stat?.size };
-          sourceCache.set(file.path, cache);
-          dirty.delete(file.path);
-        }
-        const fields = sourceFields(card, cache.rows);
-        if (!fields || card.template.required_fields.some((key) => !String(fields[key] ?? "").trim())) continue;
-        result.push({ ...card, fields });
+      taxonomy=null;
+      const result=[];
+      for(const card of configuredCards(cards,config)) {
+        try {result.push(await resolveSource(card));}
+        catch(e) {result.push({...card,content_error:e.message});}
       }
       return result;
     }
+    function current(card,baseline,latest) {return latest?{state:latest.state,parent:latest.id}:{state:baseline,parent:`import:${manifest.import_id}:${card.id}`};}
     async function baseline(card) {
-      const key = `${card.id}:${await hash(canonical(config.scheduler))}`;
-      let state = await index.get("baselines", key);
-      if (!state) {
-        const history = card.history || (await json(`${dataRoot}/${card.history_path}`))[card.id] || [];
-        state = initialState({ ...card, history }, engine);
-        await index.put("baselines", key, state);
+      if(card.baseline)return card.baseline;
+      const options=effectiveSettings(card,manifest);
+      const key=`${card.id}:${await hash(canonical(options))}`;
+      let state=await index.get("baselines",key);
+      if(!state) {
+        const history=card.history || (card.history_path ? (await json(`${dataRoot}/${card.history_path}`))[card.id] : await index.historyFor(card.id));
+        state=initialState({...card,history},schedulerV2(options));
+        if(card.scheduling)Object.assign(state,{reps:card.scheduling.reps,lapses:card.scheduling.lapses,
+          scheduled_days:card.scheduling.ivl,queue:card.queue,anki_due:card.anki_due,
+          learning_steps:Math.max(0,(card.card_type===3?options.relearning_steps:options.learning_steps).length-card.scheduling.left%1000)});
+        await index.put("baselines",key,state);
       }
       return state;
     }
-    async function draw() {
-      if (disposed) return;
-      clearCard();
-      notice.textContent = "";
-      const published = await json(`${dataRoot}/manifest.json`);
-      if (published.revision !== manifest.revision) throw Error("Card catalog changed; close and reopen this view");
-      config = await json(`${root}/config.json`);
-      configKey = canonical(config);
-      engine = scheduler(config.scheduler);
-      const snapshot = await withStoreLock(identity, async () => {
-        await syncIndex();
-        return { latest: await index.latest(), introduced: await index.introducedToday(Date.now()) };
-      });
-      notice.textContent = "";
-      const available = await readSources();
-      states = /* @__PURE__ */ new Map();
-      for (const card2 of available) {
-        const projection = { state: card2.queue === 0 ? State.New : card2.card_type === 3 ? State.Relearning : card2.queue === 2 ? State.Review : State.Learning, due: card2.due_ms };
-        states.set(card2.id, current(card2, projection, snapshot.latest.get(card2.id)));
-      }
-      const problems = [];
-      let queue, card;
-      while (true) {
-        queue = reviewQueue(available, states, [], { ...manifest, scheduler: config.scheduler }, Date.now(), select.value, snapshot.introduced);
-        card = queue.cards[0];
-        if (!card) break;
-        try {
-          if (!snapshot.latest.has(card.id)) states.set(card.id, current(card, await baseline(card)));
-          break;
-        } catch (error) {
-          problems.push(error.message);
-          states.delete(card.id);
+    function showCounts(el,n) {
+      el.createEl("span",{text:`${n.new ?? n.fresh ?? 0} new`,cls:"srs-new"});
+      el.createEl("span",{text:` · ${n.learning||0} learning`,cls:"srs-learning"});
+      el.createEl("span",{text:` · ${n.review||0} review`,cls:"srs-review"});
+      if(n.errors)el.createEl("span",{text:` · ${n.errors} content errors`,cls:"srs-errors"});
+    }
+    function showErrors(available) {
+      const problems=available.filter(c=>c.content_error && (!select.value || c.group===select.value) &&
+        (!selectedDeck || manifest.scheduling.decks[c.deck_id]?.name===manifest.scheduling.decks[selectedDeck]?.name ||
+          manifest.scheduling.decks[c.deck_id]?.name.startsWith(manifest.scheduling.decks[selectedDeck]?.name+"::")));
+      if(!problems.length)return;
+      const details=homepage.createEl("details");details.createEl("summary",{text:`Inspect ${problems.length} content errors`});
+      let offset=0,more;
+      const page=()=>{
+        if(more)more.disabled=true;
+        for(const card of problems.slice(offset,offset+50)) {
+          const row=details.createDiv();row.createEl("p",{text:`${card.anki_notetype||"Card"} · ${card.note_uid||card.id}: ${card.content_error}`});
+          if(card.source?.path)row.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
         }
+        offset+=50;if(offset<problems.length){more=details.createEl("button",{text:"Show more errors"});more.onclick=page;}
+      };
+      details.ontoggle=()=>{if(details.open && offset===0)page();};
+    }
+    async function draw() {
+      if(disposed)return;
+      clearCard();counts.empty();notice.textContent="";
+      if((await json(`${dataRoot}/manifest.json`)).revision!==manifest.revision)throw Error("Card catalog changed; reopen this view");
+      config=await json(`${root}/config.json`);configKey=canonical(config);
+      const snapshot=await withStoreLock(identity,async()=>{await syncIndex();return {latest:await index.latest(),activity:await index.activityToday(Date.now())};});
+      const available=await readSources();states=new Map();
+      for(const card of available) {
+        const projection=card.baseline || {state:card.queue===0?State.New:card.card_type===3?State.Relearning:card.queue===2?State.Review:State.Learning,due:card.due_ms,queue:card.queue,anki_due:card.anki_due};
+        states.set(card.id,current(card,projection,snapshot.latest.get(card.id)));
       }
-      if (problems.length) notice.textContent = `${problems.length} inactive card(s): ${problems.join("; ")}`;
-      counts.textContent = `${queue.due} due \xB7 ${queue.fresh} new`;
-      if (!card) {
-        front.textContent = "No cards ready for review.";
+      const queue=reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value,undefined,selectedDeck,skipped);
+      const errors=available.filter(c=>c.content_error).length;
+      if(!reviewing && manifest.scheduling) {
+        const build=(nodes,container)=>{for(const n of nodes) {
+          const details=container.createEl("details"),summary=details.createEl("summary");
+          summary.createEl("span",{text:n.name.split("::").at(-1)+" · "});showCounts(summary,n);
+          const open=summary.createEl("button",{text:"Review"});
+          open.onclick=e=>{e.preventDefault();selectedDeck=n.id;reviewing=true;guardedDraw();};
+          build(n.children,details);
+        }};build(queue.tree,homepage);showErrors(available);notice.textContent=`${cards.length.toLocaleString()} cards · ${errors.toLocaleString()} content errors`;
         return;
       }
-      shown = card;
-      started = Date.now();
-      dv.el("div", renderTemplate(card.template.front, card.fields), { container: front });
-      source.createEl("a", { text: "Open source" }).onclick = () => api.workspace.openLinkText(card.source.path, "", false);
-      const reveal = actions.createEl("button", { text: "Show answer" });
-      reveal.onclick = () => {
-        if (busy || shown !== card) return;
+      showCounts(counts,{...queue,errors});
+      showErrors(available);
+      // Session skips do not change states, event logs, or the displayed counts.
+      const card=queue.cards.find(c=>!skipped.has(c.id));
+      if(!card){front.textContent="No cards ready for review in this session.";return;}
+      shown=card;started=Date.now();
+      const skip=()=>{skipped.add(card.id);guardedDraw();};
+      actions.createEl("button",{text:"Skip for this session"}).onclick=skip;
+      if(card.source?.path)source.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
+      if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
+      dv.el("div",card.frontText,{container:front});
+      let options;
+      try {options=effectiveSettings(card,manifest);schedulerV2(options);if(!snapshot.latest.has(card.id))states.set(card.id,current(card,await baseline(card)));}
+      catch(e){message(e);actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
+      const reveal=actions.createEl("button",{text:"Show answer"});
+      reveal.onclick=()=>{
+        if(busy||shown!==card)return;
         try {
-          reveal.disabled = true;
-          dv.el("div", renderTemplate(card.template.back, card.fields), { container: back });
-          actions.empty();
-          for (const [offset, label] of ["Again", "Hard", "Good", "Easy"].entries()) {
-            const rating = offset + 1;
-            const preview = engine.next(hydrate(states.get(card.id).state), /* @__PURE__ */ new Date(), rating).card;
-            const delay = Math.max(0, Math.round((preview.due.getTime() - Date.now()) / 6e4));
-            actions.createEl("button", { text: `${label} (${delay < 1440 ? delay + "m" : Math.round(delay / 1440) + "d"})` }).onclick = () => answer(card, rating);
+          dv.el("div",card.backText,{container:back});actions.empty();
+          actions.createEl("button",{text:"Skip for this session"}).onclick=skip;
+          for(const [i,label]of["Again","Hard","Good","Easy"].entries()) {
+            const preview=nextStateV2(card,states.get(card.id).state,options,manifest,Date.now(),i+1);
+            const minutes=Math.max(0,Math.round((preview.due-Date.now())/60000));
+            actions.createEl("button",{text:`${label} (${minutes<1440?minutes+"m":Math.round(minutes/1440)+"d"})`}).onclick=()=>answer(card,i+1);
           }
-        } catch (error) {
-          message(error);
-        }
+        }catch(e){message(e);actions.empty();actions.createEl("button",{text:"Skip for this session"}).onclick=skip;}
       };
     }
-    async function answer(card, rating) {
-      if (busy || shown !== card) return;
-      busy = true;
-      actions.querySelectorAll("button").forEach((button) => button.disabled = true);
+    async function answer(card,rating) {
+      if(busy||shown!==card||card.content_error)return;
+      busy=true;actions.querySelectorAll("button").forEach(b=>b.disabled=true);
       try {
-        const result = await withStoreLock(identity, async () => {
-          if ((await json(`${dataRoot}/manifest.json`)).revision !== manifest.revision) throw Error("Card catalog changed; reopen the view");
-          if (canonical(await json(`${root}/config.json`)) !== configKey) return "Configuration changed. Queue refreshed.";
+        const result=await withStoreLock(identity,async()=>{
+          if((await json(`${dataRoot}/manifest.json`)).revision!==manifest.revision)throw Error("Catalog changed; reopen the view");
+          if(canonical(await json(`${root}/config.json`))!==configKey)return "Configuration changed. Queue refreshed.";
           await syncIndex();
-          const latest = await index.get("latest", card.id);
-          const value = current(card, states.get(card.id).state, latest);
-          if (value.parent !== states.get(card.id).parent) return "This card was reviewed on another device. Queue refreshed.";
-          const live = (await readSources()).find((item) => item.id === card.id);
-          if (!live || canonical(live.fields) !== canonical(card.fields)) return "Source changed. Queue refreshed.";
-          const now = Date.now();
-          const event = makeEvent({
-            card,
-            current: value,
-            rating,
-            now,
-            duration: now - started,
-            deviceId,
-            eventId: crypto.randomUUID(),
-            manifest: { ...manifest, scheduler: config.scheduler },
-            engine
-          });
-          const path = await appendReview(store, `${dataRoot}/reviews`, event);
-          dirty.add(path);
-          await syncIndex();
-          return null;
+          const value=current(card,states.get(card.id).state,await index.get("latest",card.id));
+          if(value.parent!==states.get(card.id).parent)return "Card reviewed on another device. Queue refreshed.";
+          const live=await resolveSource(card);
+          if(canonical(live.fields)!==canonical(card.fields))return "Source changed. Queue refreshed.";
+          const now=Date.now(),options=effectiveSettings(card,manifest);
+          const event={format_version:2,kind:"answer",id:crypto.randomUUID(),device_id:deviceId,card_id:card.id,
+            deck_id:card.original_deck_id||card.deck_id,import_id:manifest.import_id,parent:value.parent,
+            review_time_ms:now,duration_ms:Math.max(0,now-started),rating,was_new:value.state.state===State.New,
+            was_review:value.state.state===State.Review,scheduler_version:SCHEDULER_VERSION,
+            scheduler_config:options,state:nextStateV2(card,value.state,options,manifest,now,rating)};
+          validateEvent(event,manifest.import_id);
+          dirty.add(await appendReview(store,`${dataRoot}/reviews`,event));await syncIndex();return null;
         });
-        await draw();
-        if (result) notice.textContent = result;
-      } catch (error) {
-        clearCard();
-        message(error);
-        notice.textContent += " \u2014 review queue paused. Refresh to retry.";
-      } finally {
-        busy = false;
-        if (pending) {
-          pending = false;
-          scheduleRefresh();
-        }
-      }
+        await draw();if(result)notice.textContent=result;
+      }catch(e){clearCard();message(e);notice.textContent+=" — review paused. Refresh to retry.";}
+      finally{busy=false;if(pending){pending=false;scheduleRefresh();}}
     }
-    async function guardedDraw() {
-      if (busy) {
-        pending = true;
-        return;
-      }
-      busy = true;
-      try {
-        await draw();
-      } catch (error) {
-        clearCard();
-        message(error);
-      } finally {
-        busy = false;
-        if (pending) {
-          pending = false;
-          scheduleRefresh();
-        }
-      }
-    }
-    function scheduleRefresh(file, oldPath) {
-      if (disposed) return;
-      if (file) {
-        const relevant = (path) => path?.startsWith(`${dataRoot}/reviews/`) || path?.startsWith(`${dataRoot}/events/`) || path === `${dataRoot}/manifest.json` || path === `${root}/config.json` || cards.some((card) => card.source?.path === path);
-        if (!relevant(file.path) && !relevant(oldPath)) return;
-        dirty.add(file.path);
-        if (oldPath) dirty.add(oldPath);
-      }
-      clearTimeout(refreshTimer);
-      refreshTimer = setTimeout(() => guardedDraw(), 400);
-    }
-    select.onchange = guardedDraw;
-    refresh.onclick = guardedDraw;
-    rebuild.onclick = async () => {
-      if (busy) return;
-      busy = true;
-      try {
-        await withStoreLock(identity, () => index.clear());
-      } catch (error) {
-        message(error);
-      } finally {
-        busy = false;
-        await guardedDraw();
-      }
-    };
+    async function guardedDraw(){if(busy){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
+    function scheduleRefresh(file,oldPath){if(disposed)return;if(file){dirty.add(file.path);if(oldPath)dirty.add(oldPath);}clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);}
+    home.onclick=()=>{reviewing=false;selectedDeck=null;guardedDraw();};
+    select.onchange=()=>{reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
+    refresh.onclick=()=>{cache.clear();guardedDraw();};
+    rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     try {
-      manifest = await json(`${dataRoot}/manifest.json`);
-      if (manifest.format_version !== 1) throw Error("Unsupported SRS format");
-      for (const partition of manifest.partitions) cards.push(...await json(`${dataRoot}/${partition}`));
-      index = await ReviewIndex.open(identity, manifest.import_id, manifest.timing);
-      if (disposed) {
-        index.close();
-        return;
-      }
-      select.createEl("option", { text: "All groups", value: "" });
-      for (const group of [...new Set(cards.map((card) => card.group).filter(Boolean))].sort()) select.createEl("option", { text: group, value: group });
-      if (input?.group) select.value = input.group;
-      for (const name of ["create", "modify", "delete", "rename"]) component.registerEvent(api.vault.on(name, scheduleRefresh));
-      component.registerInterval(setInterval(() => {
-        if (!shown) guardedDraw();
-      }, 6e4));
-      await guardedDraw();
-    } catch (error) {
-      message(error);
-    }
+      manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");
+      if(manifest.partition_count!==undefined && (!Number.isSafeInteger(manifest.partition_count)||manifest.partition_count<0))throw Error("Invalid card partition count");
+      const partitions=manifest.partition_count===undefined?manifest.partitions:
+        Array.from({length:manifest.partition_count},(_,i)=>`imports/${manifest.revision}/cards-${String(i).padStart(5,"0")}.json`);
+      for(const partition of partitions)cards.push(...await json(`${dataRoot}/${partition}`));
+      index=await ReviewIndex.open(identity,manifest.import_id,manifest.timing);if(disposed){index.close();return;}
+      select.createEl("option",{text:"All decks",value:""});
+      for(const group of [...new Set(cards.map(c=>c.group).filter(Boolean))].sort())select.createEl("option",{text:group,value:group});
+      if(input?.group)select.value=input.group;
+      for(const name of ["create","modify","delete","rename"])component.registerEvent(api.vault.on(name,scheduleRefresh));
+      component.registerEvent(api.metadataCache.on("changed",scheduleRefresh));
+      component.registerInterval(setInterval(()=>{if(!shown)guardedDraw();},60000));await guardedDraw();
+    }catch(e){message(e);}
   })();
+
 })();

@@ -1,0 +1,424 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {"$ref": "#/$defs/Manifest"},
+    {"$ref": "#/$defs/CardPartition"},
+    {"$ref": "#/$defs/ImportReport"},
+    {"$ref": "#/$defs/Event"}
+  ],
+  "$defs": {
+    "Timing": {
+      "type": "object",
+      "properties": {
+        "day_zero": {"type": "string", "format": "date"},
+        "timezone": {"type": "string"},
+        "rollover_hour": {"type": "integer", "minimum": 0, "maximum": 23}
+      },
+      "required": ["day_zero", "timezone", "rollover_hour"]
+    },
+    "State": {
+      "type": "object",
+      "properties": {
+        "due": {"type": "number"},
+        "last_review": {"type": "number"},
+        "stability": {"type": "number", "minimum": 0},
+        "difficulty": {"type": "number", "minimum": 0},
+        "elapsed_days": {"type": "number", "minimum": 0},
+        "scheduled_days": {"type": "number", "minimum": 0},
+        "reps": {"type": "integer", "minimum": 0},
+        "lapses": {"type": "integer", "minimum": 0},
+        "learning_steps": {"type": "integer", "minimum": 0},
+        "remaining_steps": {"type": "integer", "minimum": 0},
+        "scheduled_secs": {"type": "integer", "minimum": 0},
+        "state": {"enum": [0, 1, 2, 3]},
+        "queue": {"type": "integer"},
+        "anki_due": {"type": "integer"}
+      },
+      "required": ["due", "stability", "difficulty", "elapsed_days", "scheduled_days", "reps", "lapses", "learning_steps", "state"]
+    },
+    "SchedulerOptions": {
+      "type": "object",
+      "properties": {
+        "algorithm": {"const": "FSRS-6"},
+        "desired_retention": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "maximum_interval": {"type": "integer", "minimum": 1},
+        "minimum_interval": {"type": "integer", "minimum": 0},
+        "new_cards_per_day": {"type": "integer", "minimum": 0},
+        "enable_fuzz": {"type": "boolean"},
+        "weights": {"type": "array", "items": {"type": "number"}},
+        "learning_steps": {"type": "array", "items": {"type": "number"}},
+        "relearning_steps": {"type": "array", "items": {"type": "number"}},
+        "short_term_with_steps": {"type": "boolean"},
+        "parameter_field": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "parameter_policy": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "preset_id": {"type": "string"},
+        "source_anki_version": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+      },
+      "required": ["algorithm", "desired_retention", "maximum_interval", "new_cards_per_day", "enable_fuzz"]
+    },
+    "Preset": {
+      "type": "object",
+      "properties": {"id": {"type": "string"}, "settings": {"$ref": "#/$defs/PresetSettings"}},
+      "required": ["id", "settings"]
+    },
+    "Deck": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "name": {"type": "string"},
+        "parent_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "filtered": {"type": "boolean"},
+        "normal": {"$ref": "#/$defs/DeckLimits"},
+        "common": {
+          "type": "object",
+          "properties": {
+            "last_day_studied": {"type": "integer"},
+            "new_studied": {"type": "integer"},
+            "review_studied": {"type": "integer"}
+          },
+          "required": ["last_day_studied", "new_studied", "review_studied"]
+        }
+      },
+      "required": ["id", "name", "parent_id", "filtered", "normal", "common"]
+    },
+    "SchedulingMetadata": {
+      "type": "object",
+      "properties": {
+        "presets": {"type": "object", "additionalProperties": {"$ref": "#/$defs/Preset"}},
+        "decks": {"type": "object", "additionalProperties": {"$ref": "#/$defs/Deck"}},
+        "collection": {"$ref": "#/$defs/CollectionSettings"},
+        "source_anki_version": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "parameter_policy": {"anyOf": [{"type": "string"}, {"type": "null"}]}
+      },
+      "required": ["presets", "decks", "collection", "source_anki_version", "parameter_policy"]
+    },
+    "Manifest": {
+      "type": "object",
+      "properties": {
+        "format_version": {"const": 2},
+        "import_id": {"type": "string"},
+        "revision": {"type": "string"},
+        "collection_key": {"type": "string"},
+        "scheduling": {"$ref": "#/$defs/SchedulingMetadata"},
+        "timing": {"$ref": "#/$defs/Timing"},
+        "partitions": {"type": "array", "items": {"type": "string"}},
+        "partition_count": {"type": "integer", "minimum": 0}
+      },
+      "required": ["format_version", "import_id", "revision", "collection_key", "scheduling", "timing"],
+      "anyOf": [{"required": ["partition_count"]}, {"required": ["partitions"]}]
+    },
+    "FieldMapping": {
+      "type": "object",
+      "properties": {
+        "anki": {"type": "string"},
+        "source": {"type": "string"},
+        "transform": {"type": "string"},
+        "required": {"type": "boolean"},
+        "missing_source": {"type": ["string", "null"]}
+      },
+      "required": ["anki", "source", "transform", "required"]
+    },
+    "Source": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string"},
+        "kind": {"enum": ["csv", "markdown", "block", "unresolved"]},
+        "prepare": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "fields": {"type": "array", "items": {"$ref": "#/$defs/FieldMapping"}},
+        "candidates": {"type": "array", "items": {"type": "string"}},
+        "error": {"type": "string"}
+      },
+      "required": ["kind", "fields"]
+    },
+    "NativeCardScheduling": {
+      "type": "object",
+      "properties": {
+        "due": {"type": "integer"},
+        "ivl": {"type": "integer"},
+        "factor": {"type": "integer"},
+        "reps": {"type": "integer"},
+        "lapses": {"type": "integer"},
+        "left": {"type": "integer"},
+        "odue": {"type": "integer"},
+        "odid": {"type": "integer"},
+        "queue": {"type": "integer"},
+        "type": {"type": "integer"}
+      },
+      "required": ["queue"]
+    },
+    "Card": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "anki_card_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "note_uid": {"type": "string"},
+        "group": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "deck_id": {"type": "string"},
+        "original_deck_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "anki_notetype": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "anki_ordinal": {"type": "integer", "minimum": 0},
+        "template_key": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "source": {"anyOf": [{"$ref": "#/$defs/Source"}, {"type": "null"}]},
+        "active": {"type": "boolean"},
+        "supported": {"type": "boolean"},
+        "retired": {"type": "boolean"},
+        "queue": {"type": "integer"},
+        "card_type": {"type": "integer"},
+        "due_ms": {"anyOf": [{"type": "number"}, {"type": "null"}]},
+        "anki_due": {"type": "integer"},
+        "baseline": {"anyOf": [{"$ref": "#/$defs/State"}, {"type": "null"}]},
+        "memory_origin": {"enum": ["saved", "missing", "native_historical_reconstruction"]},
+        "scheduling": {"$ref": "#/$defs/NativeCardScheduling"},
+        "memory": {
+          "type": "object",
+          "properties": {
+            "s": {"type": "number"},
+            "d": {"type": "number"},
+            "dr": {"type": "number"},
+            "decay": {"type": "number"},
+            "lrt": {"type": "number"}
+          },
+          "required": []
+        }
+      },
+      "required": [
+        "id",
+        "anki_card_id",
+        "note_uid",
+        "group",
+        "deck_id",
+        "original_deck_id",
+        "anki_notetype",
+        "anki_ordinal",
+        "template_key",
+        "source",
+        "active",
+        "supported",
+        "queue",
+        "card_type",
+        "due_ms",
+        "anki_due",
+        "baseline",
+        "scheduling",
+        "memory"
+      ]
+    },
+    "CardPartition": {"type": "array", "items": {"$ref": "#/$defs/Card"}, "maxItems": 250},
+    "Interval": {
+      "type": "object",
+      "properties": {"value": {"type": "integer", "minimum": 0}, "unit": {"enum": ["days", "seconds"]}},
+      "required": ["value", "unit"]
+    },
+    "NativeReview": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "integer"},
+        "cid": {"type": "integer"},
+        "usn": {"type": "integer"},
+        "ease": {"type": "integer"},
+        "ivl": {"type": "integer"},
+        "lastIvl": {"type": "integer"},
+        "factor": {"type": "integer"},
+        "time": {"type": "integer"},
+        "type": {"type": "integer"}
+      },
+      "required": ["id", "cid", "usn", "ease", "ivl", "lastIvl", "factor", "time", "type"]
+    },
+    "HistoricalReview": {
+      "type": "object",
+      "properties": {
+        "format_version": {"const": 2},
+        "id": {"type": "string"},
+        "device_id": {"$ref": "#/$defs/Device"},
+        "review_time_ms": {"type": "integer"},
+        "kind": {"const": "historical_review"},
+        "collection_key": {"type": "string"},
+        "anki_revlog_id": {"type": "string"},
+        "anki_card_id": {"type": "string"},
+        "card_id": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "rating": {"type": "integer"},
+        "duration_ms": {"type": "number"},
+        "review_type": {"type": "integer"},
+        "interval": {"$ref": "#/$defs/Interval"},
+        "previous_interval": {"$ref": "#/$defs/Interval"},
+        "original_review": {"$ref": "#/$defs/NativeReview"}
+      },
+      "required": [
+        "format_version",
+        "id",
+        "device_id",
+        "review_time_ms",
+        "kind",
+        "collection_key",
+        "anki_revlog_id",
+        "anki_card_id",
+        "card_id",
+        "rating",
+        "duration_ms",
+        "review_type",
+        "interval",
+        "previous_interval",
+        "original_review"
+      ],
+      "not": {"required": ["state"]}
+    },
+    "SchedulingBaseline": {
+      "type": "object",
+      "properties": {
+        "format_version": {"const": 2},
+        "id": {"type": "string"},
+        "device_id": {"$ref": "#/$defs/Device"},
+        "review_time_ms": {"type": "integer"},
+        "kind": {"const": "scheduling_baseline"},
+        "card_id": {"type": "string"},
+        "import_id": {"type": "string"},
+        "state": {"anyOf": [{"$ref": "#/$defs/State"}, {"type": "null"}]},
+        "scheduling": {"$ref": "#/$defs/NativeCardScheduling"}
+      },
+      "required": ["format_version", "id", "device_id", "review_time_ms", "kind", "card_id", "import_id", "state", "scheduling"]
+    },
+    "Answer": {
+      "type": "object",
+      "properties": {
+        "format_version": {"const": 2},
+        "id": {"type": "string", "format": "uuid"},
+        "device_id": {"$ref": "#/$defs/Device"},
+        "review_time_ms": {"type": "integer"},
+        "kind": {"const": "answer"},
+        "card_id": {"type": "string"},
+        "deck_id": {"type": "string"},
+        "import_id": {"type": "string"},
+        "parent": {"type": "string"},
+        "duration_ms": {"type": "number", "minimum": 0},
+        "rating": {"enum": [1, 2, 3, 4]},
+        "was_new": {"type": "boolean"},
+        "was_review": {"type": "boolean"},
+        "scheduler_version": {"type": "string"},
+        "scheduler_config": {"$ref": "#/$defs/SchedulerOptions"},
+        "state": {"$ref": "#/$defs/State"}
+      },
+      "required": [
+        "format_version",
+        "id",
+        "device_id",
+        "review_time_ms",
+        "kind",
+        "card_id",
+        "deck_id",
+        "import_id",
+        "parent",
+        "duration_ms",
+        "rating",
+        "was_new",
+        "was_review",
+        "scheduler_version",
+        "scheduler_config",
+        "state"
+      ]
+    },
+    "LegacyAnswer": {
+      "type": "object",
+      "properties": {
+        "format_version": {"const": 1},
+        "id": {"type": "string", "format": "uuid"},
+        "device_id": {"$ref": "#/$defs/Device"},
+        "review_time_ms": {"type": "integer"},
+        "card_id": {"type": "string"},
+        "deck_id": {"type": "string"},
+        "import_id": {"type": "string"},
+        "parent": {"type": "string"},
+        "duration_ms": {"type": "number", "minimum": 0},
+        "rating": {"enum": [1, 2, 3, 4]},
+        "was_new": {"type": "boolean"},
+        "was_review": {"type": "boolean"},
+        "scheduler_version": {"type": "string"},
+        "scheduler_config": {"$ref": "#/$defs/SchedulerOptions"},
+        "state": {"$ref": "#/$defs/State"}
+      },
+      "required": [
+        "format_version",
+        "id",
+        "device_id",
+        "review_time_ms",
+        "card_id",
+        "import_id",
+        "parent",
+        "duration_ms",
+        "rating",
+        "was_new",
+        "scheduler_version",
+        "scheduler_config",
+        "state"
+      ]
+    },
+    "Event": {
+      "oneOf": [
+        {"$ref": "#/$defs/HistoricalReview"},
+        {"$ref": "#/$defs/SchedulingBaseline"},
+        {"$ref": "#/$defs/Answer"},
+        {"$ref": "#/$defs/LegacyAnswer"}
+      ]
+    },
+    "ImportReport": {
+      "type": "object",
+      "properties": {
+        "notes": {"type": "integer", "minimum": 0},
+        "cards": {"type": "integer", "minimum": 0},
+        "review_events": {"type": "integer", "minimum": 0},
+        "issues": {"type": "array", "items": {}},
+        "content_problems": {"type": "array", "items": {"type": "object"}},
+        "verification": {"type": "string"}
+      },
+      "required": ["notes", "cards", "review_events", "issues", "content_problems", "verification"]
+    },
+    "Device": {"type": "string", "pattern": "^(anki|computer|android|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"},
+    "PresetSettings": {
+      "type": "object",
+      "properties": {
+        "desired_retention": {"type": "number"},
+        "maximum_review_interval": {"type": "integer"},
+        "minimum_lapse_interval": {"type": "integer"},
+        "new_per_day": {"type": "integer"},
+        "reviews_per_day": {"type": "integer"},
+        "learn_steps": {"type": "array", "items": {"type": "number"}},
+        "relearn_steps": {"type": "array", "items": {"type": "number"}},
+        "fsrs_params_4": {"type": "array", "items": {"type": "number"}},
+        "fsrs_params_5": {"type": "array", "items": {"type": "number"}},
+        "fsrs_params_6": {"type": "array", "items": {"type": "number"}}
+      },
+      "required": [
+        "desired_retention",
+        "maximum_review_interval",
+        "minimum_lapse_interval",
+        "new_per_day",
+        "reviews_per_day",
+        "learn_steps",
+        "relearn_steps"
+      ]
+    },
+    "DailyOverride": {"type": "object", "properties": {"limit": {"type": "integer"}, "today": {"type": "integer"}}, "required": []},
+    "DeckLimits": {
+      "type": "object",
+      "properties": {
+        "config_id": {"type": ["string", "integer"]},
+        "desired_retention": {"type": "number"},
+        "new_limit": {"type": "integer"},
+        "review_limit": {"type": "integer"},
+        "new_limit_today": {"$ref": "#/$defs/DailyOverride"},
+        "review_limit_today": {"$ref": "#/$defs/DailyOverride"}
+      },
+      "required": []
+    },
+    "CollectionSettings": {
+      "type": "object",
+      "properties": {
+        "collapseTime": {"type": ["integer", "null"]},
+        "lastUnburied": {"type": ["integer", "null"]},
+        "applyAllParentLimits": {"type": ["boolean", "null"]},
+        "newCardsIgnoreReviewLimit": {"type": ["boolean", "null"]},
+        "fsrsShortTermWithStepsEnabled": {"type": ["boolean", "null"]}
+      },
+      "required": []
+    }
+  }
+}

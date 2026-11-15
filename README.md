@@ -1,254 +1,221 @@
 # Portable Obsidian SRS
 
-Copy the repository's **`ankobs-srs/` directory into your Obsidian vault**.
-It includes the bundled reviewer, editable configuration, and desktop migration
-tools isolated under `migration/` with their Python support modules. Reviewing needs Obsidian and Dataview;
-it does not need Node, Python, this repository, or a running server.
+The standalone `view.js` reviewer reads card content exclusively from your vault.
+It needs Obsidian and Dataview on desktop or Android. Python and Node are desktop
+migration/verification tools; they are never used while reviewing.
 
-The example source demonstrates initial enrollment. Other linked Anki cards
-and histories are preserved for later template conversion.
+Open the default deck homepage:
 
-## Install and prepare
-
-Copy `ankobs-srs/` into the vault, then open a desktop terminal in its migration directory:
-
-```sh
-cd /path/to/vault/ankobs-srs/migration
-uv sync --locked
+````markdown
+```dataviewjs
+await dv.view("srs", { root: "srs" });
 ```
+````
 
-`uv` creates the Python environment at `migration/.venv/`; it does not install
-Python dependencies in the reviewer directory. Only desktop migration commands
-need this environment. You can omit the entire `migration/` directory from mobile
-devices or remove it after migration. uv may also use its usual shared download
-cache outside the project.
+Use your actual folder name for both paths. Existing group calls still work:
+`await dv.view("srs", { root: "srs", group: "example-notes" });`.
 
-Alternatively, from the repository use:
+The homepage has an expandable deck hierarchy with blue new, red learning/
+relearning, and green review counts. Content-error totals are separate. Opening
+a deck includes its children. Missing sources, required fields, disabled templates,
+and unsupported operations stay visible without reducing scheduling counts.
+**Skip for this session** changes no schedule, history, or daily counter. Refresh
+rereads the vault and configuration; reopening clears the session's skips.
 
-```sh
-uv run python bin/srs.py install-view --vault /path/to/vault
-```
+## Take a desktop snapshot
 
-That copies the complete directory and preserves existing vault configuration
-and review data. Running the copied `migration/migrate.py` automatically finds the vault
-above `ankobs-srs/`. Keep the directory name `ankobs-srs`; if renamed, supply `root` to the view
-and `--vault`/`--output` to migration explicitly.
-
-Sync Anki on all devices. Before taking the snapshot, obtain its scheduling
-day-zero date in Anki's debug console, using the system study timezone:
+Synchronize and close Anki before copying `collection.anki2`. The importer refuses
+pending WAL data and never writes to the original collection. In Anki's debug
+console, record the day-zero date before closing:
 
 ```python
 from datetime import datetime, timedelta
 print(datetime.fromtimestamp(mw.col.sched.day_cutoff).date() - timedelta(days=mw.col.sched.today + 1))
 ```
 
-Record this date, the study timezone, and the next-day rollover hour. Close
-Anki and copy `collection.anki2` into a separate snapshot. The importer reads
-standalone SQLite snapshots, not open/WAL databases or `.apkg`/`.colpkg` files.
-Retain the snapshot for later configuration updates.
+Also record the **exact desktop Anki version**, study timezone, rollover hour,
+and the UTC timestamp of the reference counts. The six 19-weight presets do not
+identify the source application version. Keep the original snapshot outside the
+reviewer store until verification has passed.
 
-## Inspect, configure, and migrate
+## Migrate all decks in one command
 
-From `ankobs-srs/migration/`:
+Run inside this folder's `migration/` directory. The locked environment includes
+Anki **25.9.2**, the backend exercised by the automated tests:
 
 ```sh
-uv run python migrate.py inspect \
-  --collection /path/to/snapshot.anki2 --output anki-inventory.json
+uv sync --locked
 ```
 
-Inspect the vocabulary model's existing `tmpls` (zero-based `ord`, `qfmt`, and
-`afmt`). The inventory supports legacy JSON and modern protobuf metadata.
-Binary source metadata remains base64 encoded in the lossless archive.
+If your source Anki has a different version, update the managed dependency with
+`uv add` using that exact version (substitute the actual version):
 
-Edit **`../config.json`** (the reviewer configuration at `ankobs-srs/config.json`). Its supplied `recognition`
-template is disabled until you verify that `vocab` ordinal `0` represents
-word → definition. Set `enabled` to `true` after checking the binding and
-presentation. Add explicit templates for other existing card ordinals.
+```sh
+uv add 'anki==25.9.2'
+```
 
-| Template property | Meaning |
-| --- | --- |
-| `key` | Permanent identity within the source group. |
-| `enabled` | Whether matching supported cards can be offered. |
-| `anki_notetype`, `anki_ordinal` | Exact Anki binding during migration. |
-| `required_fields` | Mapped fields that must be nonblank. |
-| `front`, `back` | Markdown with fields such as `{{word}}`. |
+This updates `pyproject.toml`, `uv.lock`, and the environment together. Run all
+desktop Python commands through `uv run` as before.
 
-`{{#field}}...{{/field}}` sections render when present; `{{^field}}...{{/field}}`
-when absent. Sections may nest. Template JavaScript, Anki filters, cloze
-generation, and automatic HTML/CSS emulation are unsupported.
-
-The existing source mappings and transformations live in `migration/config/exports.json`.
-The current reviewer supports CSV sources with `text` transforms. The packaged
-Python modules reuse the project's existing parsing, transforms, configuration
-validation, and ID auditing. They are copied from the same source modules at
-build time.
-
-Migrate using your actual day-zero date (not today's date) and timezone; these
-values are examples:
+For a directory named `srs` directly inside your vault:
 
 ```sh
 uv run python migrate.py migrate \
-  --collection /path/to/snapshot.anki2 \
+  --collection /absolute/path/to/snapshot.anki2 \
+  --anki-version 25.9.2 \
   --day-zero YYYY-MM-DD
 ```
 
-Output goes to `../data/` (`ankobs-srs/data/`), outside the migration directory. The report prints linked-note/card/
-review counts, unmapped data, and problems. Blocking issues return status 2
-and disable activation. Suspended, buried, filtered-deck, and history-less
-learned cards remain archived inactive. Unlinked Anki notes are reported.
+Replace the version, paths and timing with the recorded values. For another
+layout, add `--vault /path/to/vault --output /path/to/srs/data`. The importer
+checks that the installed backend version matches `--anki-version`.
 
-Due dates are preserved. FSRS-6 memory is reconstructed from eligible historical
-answers using bundled default parameters and configured retention. This changes
-future scheduling to FSRS-6; it does not reproduce earlier Anki weights or
-algorithms. Manual scheduling records are archived but not treated as answers.
+This imports every card and deck, including unresolved sources, suspended cards,
+and cards without saved memory. It generates editable templates for all mapped
+source/notetype/card-ordinal combinations in `config.json` in one pass. Existing
+template keys, edits, card UIDs, and answer logs are preserved. Source mappings
+remain in `migration/config/exports.json`.
 
-## Review and edit
-
-Enable Dataview's JavaScript queries on desktop and Android. Add this to a note:
-
-````markdown
-```dataviewjs
-await dv.view("ankobs-srs", { group: "example-notes" });
-```
-````
-
-The view loads `config.json` directly. Changing prompt/answer presentation,
-enabling/disabling existing templates, or changing scheduler settings takes
-effect on Refresh, without reimporting or rebuilding. Changing permanent keys
-or Anki bindings, adding generated cards, or moving source CSVs requires
-migration against the original snapshot. Reopen the view after catalog changes.
-
-CSV content is read live by stable note identity. Row reordering and content
-edits preserve histories; missing sources/required values make cards inactive.
-Obsidian-only CSV rows can receive persistent UUIDs using:
+CSV rows resolve through `anki_note_id` or `srs_uid`. Markdown frontmatter uses
+the same identities; ID-linked `[!anki]` callouts are supported too. Mapped text,
+media, vocabulary, taxonomy, and structured source transformations run against
+live vault properties. Card partitions retain source/transformation references,
+never field values. New local CSV identities can be assigned with:
 
 ```sh
-uv run python migrate.py seed-csv-uids ../../examples/notes.csv
+uv run python migrate.py seed-csv-uids /path/to/vault/examples/notes.csv
 ```
 
-Preserve the resulting `srs_uid` column. Existing linked rows retain their Anki
-IDs. Assigning an Anki ID to an already reviewed local note needs an identity
-migration.
+Templates support fields, nested conditional/inverted sections, `FrontSide`,
+`cloze:` and `text:` filters, and vault media references. Unknown fields, `type:`
+inputs, JavaScript, and unsupported filters produce visible card errors and
+prevent rating. Cloze ordinals remain the existing Anki ordinals. Editing the
+front/back presentation does not create new identities or rewrite history.
 
-Defaults are 90% desired retention, no fuzz, 36,500 maximum interval days, and
-20 new cards per study day. Offline devices can collectively exceed the daily
-limit until synced. Interval previews are recalculated when submitting.
+## Verify against native Anki
 
-## Files and scale
+Verification needs a desktop Node executable as well as the Python environment.
+No JavaScript packages are needed for the verification command. It opens a
+**disposable copy** of the snapshot and deletes that copy afterward. The retained
+report contains counts and scheduling metadata, without note fields or rendered
+Anki questions/answers.
+
+```sh
+uv run python migrate.py verify \
+  --collection /absolute/path/to/snapshot.anki2 \
+  --data ../data --anki-version 25.9.2 \
+  --output verification.json
+```
+
+Replace `--at` with the corresponding Anki reference time; omit it to use command
+start time. `--node /path/to/node` selects an executable outside PATH.
+
+Every deck and parent must agree **exactly** in all three counts. Missing snapshot
+cards, a different count, missing transition coverage, memory/step differences,
+or deterministic interval differences produce status 2 and detailed diagnostics.
+Content
+errors do not affect the comparison. A successful count comparison is reported
+separately from scheduling comparisons.
+
+The harness exercises all four ratings for available new, learning, review, and
+relearning representatives in every preset, submits each answer on the disposable
+copy, and undoes it before the next branch. Missing states receive synthetic
+representatives using that preset on the disposable copy; the report labels
+their origin. They never enter the store or reference counts. Saved stability/difficulty, repetitions, lapses,
+learning position, queue, and due are preserved; only missing saved memory uses
+historical reconstruction. Per-deck trained settings and effective retention
+are recorded with each new answer. Legacy parameter fields remain separate from
+unknown client settings in `other`; the selected native field is recorded.
+
+Anki's answer-state API uses its wall clock. **`--at` fixes count calculations;
+answer transitions use their separately recorded wall-clock timestamp.** The
+harness applies reference-day unburying through Anki's API and suppresses its
+separate wall-clock unbury pass when obtaining historical reference counts.
+Memory comparison uses an explicit float32 tolerance (absolute 0.0001 or relative
+0.000002). Deterministic intervals are checked independently from native memory
+states. Native fuzz/load-balancing interval differences are retained in the
+report; they are not count differences and do not by themselves fail verification.
+The reviewer deliberately uses deterministic intervals. Filtered-deck cards are
+counted, but answering a card still in a filtered deck is currently disabled;
+return those cards to their original decks in Anki before final migration.
+
+The automated fixture suite verifies backend 25.9.2. Another source version must
+pass its own native verification before cutover. The original snapshot and vault
+sources were not available for final acceptance in this workspace, so its exact
+reference counts and real desktop/Android operation remain to be checked on your
+devices. Do not interpret fixture results as verification of your collection.
+
+## Files and migration safety
+
+See [DATA_FORMAT.md](DATA_FORMAT.md) for field descriptions, event semantics,
+and the [JSON Schema](schemas/data.schema.json) for files in `data/`.
 
 ```text
-ankobs-srs/
-  view.js                 Bundled JavaScript, including FSRS
-  view.css
-  config.json             Editable templates/scheduler settings
-  migration/              Desktop-only tools; optional on mobile
-    migrate.py            Migration entry point
-    lib/                  Reused Python modules plus migration logic
-    config/               Source mappings and lookup data
-    pyproject.toml
-    uv.lock
-    .venv/                Local Python environment, created by uv sync
+srs/
+  view.js, view.css          standalone browser reviewer
+  config.json               editable templates
   data/
     manifest.json
     imports/<revision>/
-      manifest.json
-      raw.json            Original linked Anki records and metadata
       report.json
-      cards-00000.json     Small runtime metadata partitions
-      history-00000.json   Separate imported history partitions
+      cards-00000.json       at most 250 cards per file
     reviews/
-      <device-uuid>-2026-11.jsonl
-      <device-uuid>-2026-12.jsonl
-      <device-uuid>-2026-12-002.jsonl
+      anki-2026-11.jsonl
+      computer-2026-11.jsonl
+      android-2026-11.jsonl
+      computer-2026-11-002.jsonl
+  migration/                optional on reviewing devices
 ```
 
-One JSONL line represents one review. Each device appends only to its own UTC
-calendar-month log. Logs roll over at **32 MiB** if necessary. Each write is
-serialized with other views/windows when Web Locks are available and is verified
-before advancing. Without Web Locks the fallback serializes views in the same
-window; use one active reviewer window per device in that environment.
+All version 2 events use device-specific UTC-month JSONL files, rotating at
+**32 MiB**. Writers use the names `anki`, `computer`, and `android`; choose this
+device in the reviewer's Device selector. Existing UUID-named logs remain readable.
+Historical
+observations deduplicate by collection identity and original revlog ID and retain
+the original review information without invented resulting states. Separate
+baseline events describe imported scheduling. Only new answer events select
+current state or contribute new activity; imported observations never double-count
+activity already in the saved deck counters.
 
-At roughly 0.7–0.8 KB per new review, 10,000 monthly reviews occupy about 7–8 MB
-across device logs. A million occupy roughly 0.7–0.8 GB, plus imported archives,
-backups, and the local index. Records are immutable even though the log is
-appendable. Never manually truncate or edit review logs.
+Publishing writes and validates the replacement store, atomically switches the
+manifest, then directly deletes superseded generated import directories. It
+writes no `raw.json`, note-field archive, or `history-*.json`. Existing new-review
+logs and card UIDs survive the version 1 upgrade. Subsequent baseline changes
+are blocked once new answers exist; presentation edits remain dynamic.
 
-The **device-local IndexedDB index** holds current states, seen-event hashes,
-daily new-card identities, lazy imported baselines, and file checkpoints. It
-is not synced or authoritative. Warm startup checks file metadata and reads
-no unchanged review logs. An appended log is read to verify its prefix, but
-only appended records are parsed/indexed. Replaced/deleted files trigger a
-full rebuild. Individual reads remain bounded by the rotated file size.
+The device-local IndexedDB index is disposable and incremental. Unchanged logs
+are not reread; appended logs verify their prefix and index only added records.
+Replaced/deleted logs rebuild the index. Imported history is indexed separately
+and loaded per card only when reconstruction is necessary. Syncthing conflict
+copies remain on disk. Duplicate event IDs with different contents, malformed
+records, and incomplete final lines visibly pause reviewing.
 
-Reviewing does not load the million-record imported archive. Catalog partitions
-exclude historical events; a selected card's imported history is loaded only
-to construct its first baseline, then that baseline is cached locally. Runtime
-memory grows with card count and one log/partition, rather than total reviews.
+Both offline answer branches remain immutable. The latest `(review_time_ms,
+event_id)` wins with its complete resulting state; losing branches are not replayed
+onto it. Rebuild local index regenerates the cache from the synced files. Each
+device appends only to its own log; Web Locks serialize writes when available.
+Without Web Locks use one active reviewer window per device.
 
-Use **Rebuild local index** to reconstruct caches from the on-disk records.
-A cold rebuild over a large history can take time and shows progress. IndexedDB
-must be available; the reviewer visibly pauses if storage is unavailable or a
-write fails. The tested 10,000-record workload uses mocked IndexedDB, not a
-physical-device performance guarantee.
+## Development checks
 
-## Conflict behavior and format
-
-Sync `ankobs-srs/` with Syncthing; exclude `migration/.venv/` and Python caches.
-The entire `migration/` directory can be excluded when syncing to mobile devices;
-the reviewer uses only the files outside it. Device identity lives in local storage.
-Different devices create different log files. Syncthing `sync-conflict` copies
-are automatically read and merged logically; they are retained on disk rather
-than automatically rewritten/deleted, avoiding simultaneous consolidation races.
-
-Event IDs deduplicate records across files. Different contents under the same
-ID, malformed JSONL, incomplete final records, or incompatible events pause the
-queue visibly. Both offline branches remain in history; greatest
-`(review_time_ms, event_id)` selects state. Losing branches are not replayed into
-the winner. Keep device clocks reasonably synchronized. A stale prompt is
-rechecked before submission.
-
-JSON artifacts use format version 1. Canonical card UUIDs derive from group,
-note identity (`anki:<note_id>` or `local:<uuid>`), and permanent template key.
-Original Anki card IDs remain provenance. Imported event IDs use collection
-creation time and revlog ID. One collection is supported per store.
-
-New records contain event/device/card IDs, import identity, parent state
-reference, UTC millisecond answer time, rating 1–4, duration, new-card status,
-scheduler version/configuration, and complete resulting FSRS state. State
-contains UTC millisecond `due`/`last_review`, stability/difficulty, elapsed and
-scheduled days, repetitions, lapses, learning steps, and state enum. Historical
-intervals preserve days versus seconds; original records remain archived.
-
-Publishing is desktop-only. Once reviews exist, replacing the imported baseline
-or changing an existing card's permanent template identity is blocked. Removed
-templates retain inactive card identities for old reviews. Earlier experimental
-per-review JSON files can still be indexed under `data/events/`; new writes
-always use monthly JSONL logs.
-
-## Development and cutover
-
-In the repository, edit `obsidian/srs/*.js`, `lib/srs.py`, `bin/srs.py`, and
-`config/srs.json`. JavaScript sources use ordinary `.js` modules. Build the
-copyable directory with:
+Browser source fragments and all desktop tooling/dependencies live under
+`migration/`. Rebuild the standalone browser file without Node:
 
 ```sh
-npm ci
-npm run build:srs
+uv run python build.py
 uv run python -m unittest discover -s tests -v
+npm ci
 npm test
 ```
 
-The build bundles the browser code and copies the same Python modules/configs
-into `ankobs-srs/migration/`, separate from the reviewer files. Node is needed only to rebuild, not to use the copied folder.
+The Python suite uses native Anki disposable collections with six distinct trained
+19-weight presets and 96 representative answers, exact deck/parent counts,
+overrides and rollover, plus migration identity, monthly boundaries, rollover,
+and idempotency tests. Node tests use mocked Obsidian/IndexedDB for rendering,
+skipping, template edits, events, conflicts, and incremental indexing. They do
+not replace testing on a physical Android device or a large real Syncthing store.
 
-Before cutover, compare report counts/questions/answers/due dates against Anki.
-Use a disposable store to test offline answers on desktop and Android, including
-the same card on both; sync and verify both branches survive and queues converge.
-Reopen offline and check persistence/responsiveness. Real Android/Syncthing and
-million-record physical-device testing remain acceptance steps.
-
-Take a final synchronized snapshot before real reviews, then stop reviewing
-the pilot group in Anki. Later Anki reviews are not imported into an already
-reviewed baseline. Other groups can continue in Anki until their own cutover.
-
-The bundled FSRS library is MIT licensed; see `THIRD_PARTY_LICENSE.txt`.
+Queue behavior follows Anki's published [deck tree](https://github.com/ankitects/anki/blob/25.09.2/rslib/src/decks/tree.rs),
+[limits](https://github.com/ankitects/anki/blob/25.09.2/rslib/src/decks/limits.rs), and
+[parameter precedence](https://github.com/ankitects/anki/blob/25.09.2/rslib/src/deckconfig/mod.rs).
+The bundled ts-fsrs library is MIT licensed; see `THIRD_PARTY_LICENSE.txt`.

@@ -24,7 +24,7 @@ import block_notes
 import list_additions
 import local_tags
 import sources as exporter
-from anki import AnkiConnect, ExportError as AnkiConnectError, chunks
+from ankiconnect import AnkiConnect, ExportError as AnkiConnectError, chunks
 from managed_tags import MANAGED_TAGS
 
 

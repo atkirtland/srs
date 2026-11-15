@@ -1,7 +1,7 @@
-"""Lossless Anki snapshot export and portable SRS card configuration.
+"""Transient Anki snapshot reads and portable SRS card configuration.
 
-This module never opens a live Anki collection for writing. Archives are content
-addressed; only the desktop publishing command updates the manifest pointer.
+This module never opens a live Anki collection for writing. Published partitions
+contain scheduling metadata and source references, without note content.
 """
 from __future__ import annotations
 
@@ -79,9 +79,9 @@ def load_config(path: Path, exports: dict[str, Any]) -> dict[str, Any]:
     if type(limit) is not int or limit < 0:
         raise SRSError("new_cards_per_day must be a nonnegative integer")
     for name, group in config["groups"].items():
-        if name not in exports or not isinstance(group, dict) or not isinstance(group.get("templates"), list):
+        if (name not in exports and name != "markdown-blocks") or not isinstance(group, dict) or not isinstance(group.get("templates"), list):
             raise SRSError(f"invalid source group: {name}")
-        fields = {field.anki for field in exports[name].fields}
+        fields = {field.anki for field in exports[name].fields} if name in exports else {"Front", "Back"}
         keys: set[str] = set()
         mappings: set[tuple[str, int]] = set()
         for template in group["templates"]:
@@ -101,8 +101,9 @@ def load_config(path: Path, exports: dict[str, Any]) -> dict[str, Any]:
             required = template.get("required_fields")
             if not isinstance(required, list) or any(not isinstance(f, str) or f not in fields for f in required):
                 raise SRSError(f"invalid required_fields: {key}")
-            validate_template(template.get("front"), fields)
-            validate_template(template.get("back"), fields)
+            if any(not isinstance(template.get(side), str) for side in ("front", "back")):
+                raise SRSError(f"front/back must be strings: {key}")
+            # Syntax errors are local card errors, so all other decks remain usable.
             keys.add(key)
             mappings.add((model, ordinal))
     return config
@@ -249,11 +250,11 @@ def template_formats(config: Any) -> dict[str, str]:
 def normalize_due(card: dict[str, Any], day_zero: date, zone: ZoneInfo, rollover: int) -> int | None:
     queue = card["queue"]
     due = card["due"]
-    if card.get("odid") or queue not in {0, 1, 2, 3}:
+    if card.get("odid") or queue not in {0, 1, 2, 3, 4}:
         return None
     if queue == 0:
         return None  # New-card order, not a date.
-    if queue == 1:
+    if queue in {1, 4}:
         return due * 1000  # Learning timestamp in seconds.
     local = datetime.combine(day_zero + timedelta(days=due), time(rollover), zone)
     return int(local.timestamp() * 1000)
@@ -261,118 +262,6 @@ def normalize_due(card: dict[str, Any], day_zero: date, zone: ZoneInfo, rollover
 
 def interval(value: int) -> dict[str, Any]:
     return {"value": abs(value), "unit": "seconds" if value < 0 else "days"}
-
-
-def build_export(raw: dict[str, Any], vault: Path, exports: dict[str, Any], config: dict[str, Any],
-                 day_zero: date, timezone_name: str, rollover: int = 4) -> dict[str, Any]:
-    import audit
-    import sources
-
-    zone = ZoneInfo(timezone_name)
-    owners, issues = audit.collect_local(vault)
-    issues = [item for item in issues if item["kind"] != "missing-local-id"]
-    ownership = Counter(owner["note_id"] for owner in owners)
-    for nid, count in ownership.items():
-        if count > 1:
-            issues.append({"kind": "duplicate-local-id", "note_id": str(nid)})
-    models = models_from_snapshot(raw)
-    notes = {str(note["id"]): note for note in raw["notes"]}
-    linked = {str(owner["note_id"]) for owner in owners}
-    for nid in sorted(linked - notes.keys()):
-        issues.append({"kind": "missing-anki-note", "note_id": nid})
-    selected_notes = {nid: note for nid, note in notes.items() if nid in linked}
-    selected_cards = {str(c["id"]): c for c in raw["cards"] if str(c["nid"]) in selected_notes}
-    events: dict[str, list[dict[str, Any]]] = {cid: [] for cid in selected_cards}
-    collection_key = str(raw["col"][0]["crt"])
-    for review in sorted(raw["revlog"], key=lambda r: r["id"]):
-        cid = str(review["cid"])
-        if cid not in events:
-            continue
-        events[cid].append({
-            "id": f"anki:{collection_key}:{review['id']}", "anki_card_id": cid,
-            "review_time_ms": review["id"], "rating": review["ease"],
-            "duration_ms": review["time"], "review_type": review["type"],
-            "interval": interval(review["ivl"]), "previous_interval": interval(review["lastIvl"]),
-            "raw": review,
-        })
-    generated: dict[tuple[str, int], dict[str, Any]] = {}
-    local_cards: list[dict[str, Any]] = []
-    seen: set[tuple[str, str]] = set()
-    for group, definition in config["groups"].items():
-        export = exports[group]
-        for note in sources.source_notes(vault, export):
-            identity = note_uid(note.metadata)
-            if not identity:
-                issues.append({"kind": "missing-note-identity", "path": str(note.path)})
-                continue
-            if (group, identity) in seen:
-                issues.append({"kind": "duplicate-group-note", "group": group, "identity": identity})
-                continue
-            seen.add((group, identity))
-            # The pilot supports CSV text mappings; other groups remain archived.
-            relative = str(note.path).split("#row-")[0]
-            source = Path(relative).resolve().relative_to(vault.resolve()).as_posix()
-            if not source.endswith(".csv") or any(f.transform.__name__ != "text" for f in export.fields):
-                issues.append({"kind": "unsupported-review-source", "group": group})
-                continue
-            fields = {field.anki: field.transform(note.metadata.get(field.source), note) for field in export.fields}
-            nid = identity.removeprefix("anki:") if identity.startswith("anki:") else None
-            anki_note = notes.get(nid) if nid else None
-            model = models.get(anki_note["mid"], {}) if anki_note else {}
-            for template in definition["templates"]:
-                card = {
-                    "id": card_uid(group, identity, template["key"]), "group": group,
-                    "note_uid": identity, "template_key": template["key"], "template": template,
-                    "source": {"path": source, "kind": "csv", "field_map": {f.anki: f.source for f in export.fields}},
-                    "fields": fields, "active": template["enabled"] and all(fields[f].strip() for f in template["required_fields"]),
-                    "anki_notetype": template["anki_notetype"], "anki_ordinal": template["anki_ordinal"],
-                    "supported": True,
-                }
-                if nid:
-                    if model.get("name") != template["anki_notetype"]:
-                        issues.append({"kind": "notetype-mismatch", "note_id": nid, "template": template["key"]})
-                        continue
-                    matching = [c for c in selected_cards.values() if str(c["nid"]) == nid and c["ord"] == template["anki_ordinal"]]
-                    if len(matching) != 1 or (nid, template["anki_ordinal"]) in generated:
-                        issues.append({"kind": "ambiguous-or-missing-card", "note_id": nid, "template": template["key"]})
-                        continue
-                    generated[(nid, template["anki_ordinal"])] = card
-                else:
-                    card.update(anki_card_id=None, raw=None, history=[], due_ms=None, queue=0, card_type=0)
-                    local_cards.append(card)
-    cards = []
-    unsupported = []
-    for cid, source in selected_cards.items():
-        generated_card = generated.get((str(source["nid"]), source["ord"]))
-        card = dict(generated_card or {"id": f"anki:{collection_key}:card:{cid}", "group": None, "active": False})
-        due = normalize_due(source, day_zero, zone, rollover)
-        has_answers = any(event["rating"] in {1, 2, 3, 4} and event["review_type"] in {0, 1, 2, 3} for event in events[cid])
-        supported = (source["queue"] in {0, 1, 2, 3} and source["type"] in {0, 1, 2, 3}
-                     and not source.get("odid") and (source["queue"] == 0 or has_answers))
-        if not supported:
-            unsupported.append(cid)
-        card.update(anki_card_id=cid, raw=source, history=events[cid], due_ms=due,
-                    queue=source["queue"], card_type=source["type"], supported=supported and generated_card is not None,
-                    active=card["active"] and supported)
-        cards.append(card)
-    cards.extend(local_cards)
-    selected_raw = {key: value for key, value in raw.items() if key not in {"notes", "cards", "revlog"}}
-    selected_raw.update(notes=list(selected_notes.values()), cards=list(selected_cards.values()),
-                        revlog=[event["raw"] for history in events.values() for event in history])
-    # Duplicate ownership makes all activations unsafe, including across groups.
-    if issues:
-        for card in cards:
-            card["active"] = False
-            card["supported"] = False
-    report = {
-        "notes": len(selected_notes), "cards": len(selected_cards),
-        "review_events": sum(map(len, events.values())), "active_cards": sum(c["active"] for c in cards),
-        "unlinked_anki_notes": sorted(notes.keys() - linked), "unsupported_card_ids": unsupported,
-        "issues": issues, "models": models,
-    }
-    return {"format_version": VERSION, "collection_key": collection_key,
-            "timing": {"day_zero": day_zero.isoformat(), "timezone": timezone_name, "rollover_hour": rollover},
-            "scheduler": config["scheduler"], "cards": cards, "raw": selected_raw, "report": report}
 
 
 def write_immutable(path: Path, value: Any) -> None:
@@ -386,59 +275,5 @@ def write_immutable(path: Path, value: Any) -> None:
             raise SRSError(f"immutable artifact differs: {path}")
 
 
-def publish(data: dict[str, Any], destination: Path) -> Path:
-    """Publish immutable partitions then atomically switch the desktop pointer."""
-    # A configuration/content revision must not invalidate existing event IDs.
-    import_id = digest({"raw": data["raw"], "timing": data["timing"]})
-    previous = destination / "manifest.json"
-    if previous.exists():
-        manifest = json.loads(previous.read_text(encoding="utf-8"))
-        if manifest.get("collection_key") != data["collection_key"]:
-            raise SRSError("cannot mix Anki collections in one SRS directory")
-        has_reviews = any((destination / "events").glob("*.json")) or any((destination / "reviews").glob("*.jsonl"))
-        if has_reviews and manifest.get("import_id") != import_id:
-            raise SRSError("reviews already exist: baseline replacement is blocked; keep the original import")
-        old_cards = [card for partition in manifest["partitions"]
-                     for card in json.loads((destination / partition).read_text(encoding="utf-8"))]
-        new_ids = {card["id"] for card in data["cards"]}
-        if has_reviews:
-            old_bindings = {card["anki_card_id"]: card["id"] for card in old_cards if card.get("group") and card.get("anki_card_id")}
-            for card in data["cards"]:
-                previous_id = old_bindings.get(card.get("anki_card_id"))
-                if card.get("group") and previous_id and previous_id != card["id"]:
-                    raise SRSError("Anki card remapping would change a permanent template identity")
-        # Removed templates remain addressable by their old events.
-        for card in old_cards:
-            if card["id"] in new_ids:
-                continue
-            previous_card = dict(card, active=False, supported=False)
-            if "history_path" in card:
-                histories = json.loads((destination / card["history_path"]).read_text(encoding="utf-8"))
-                previous_card["history"] = histories.get(card["id"], [])
-                previous_card.pop("history_path")
-            data["cards"].append(previous_card)
-    revision = digest(data)
-    root = destination / "imports" / revision
-    write_immutable(root / "raw.json", data["raw"])
-    write_immutable(root / "report.json", data["report"])
-    partitions = []
-    for start in range(0, len(data["cards"]), 250):
-        name = f"cards-{start // 250:05d}.json"
-        history_name = f"history-{start // 250:05d}.json"
-        history_path = f"imports/{revision}/{history_name}"
-        selected = data["cards"][start:start + 250]
-        # Startup loads only card metadata. Large imported histories are lazy.
-        write_immutable(root / history_name, {card["id"]: card.get("history", []) for card in selected})
-        runtime = [dict({key: value for key, value in card.items() if key not in {"history", "raw", "template", "fields", "history_path"}}, history_path=history_path)
-                   for card in selected]
-        write_immutable(root / name, runtime)
-        partitions.append(f"imports/{revision}/{name}")
-    manifest = {"format_version": VERSION, "import_id": import_id,
-                "revision": revision, "collection_key": data["collection_key"], "scheduler": data["scheduler"],
-                "timing": data["timing"], "partitions": partitions}
-    write_immutable(root / "manifest.json", manifest)
-    temporary = destination / "manifest.pending"
-    temporary.write_text(canonical(manifest) + "\n", encoding="utf-8")
-    temporary.replace(previous)
-    (destination / "reviews").mkdir(exist_ok=True)
-    return root
+# Version 2 catalog stores no retained Anki note content.
+from catalog import build_export, publish, generate_templates, partition_paths

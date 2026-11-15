@@ -15,7 +15,7 @@ from typing import Any, Iterable
 import yaml
 
 import sources as exporter
-from anki import AnkiConnect
+from ankiconnect import AnkiConnect
 from managed_tags import MANAGED_TAGS
 
 
