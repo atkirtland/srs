@@ -277,7 +277,7 @@
       const frontText=images(renderV2(card.template.front,special,card.anki_ordinal,false,config));
       const backText=images(renderV2(card.template.back,{...special,FrontSide:frontText},card.anki_ordinal,true,config));
       templateScriptParts(frontText,config.allow_javascript);templateScriptParts(backText,config.allow_javascript);
-      if(!frontText.trim() || !backText.trim())throw Error("Template produced an empty question or answer");
+      if(!frontText.trim())throw Error("Template produced an empty question");
       return {...card,source:{...card.source,path},fields,frontText,backText};
     }
     async function readSources() {

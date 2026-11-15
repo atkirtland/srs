@@ -2863,7 +2863,7 @@ function preparePresidents(notes) {
   }
   return new Map(notes.map(note=>{
     const terms=note.metadata.terms||[],join=key=>[...new Set(terms.flatMap(t=>[t[key]].flat()).filter(v=>v!=null&&String(v).trim()).map(String))].join(", ");
-    const adjacent=delta=>[...new Set(terms.map(t=>orders.get(Number(t.order)+delta)).filter(name=>name&&name!==String(note.metadata.name||note.filename)))].join(", ");
+    const adjacent=delta=>[...new Set(terms.map(t=>orders.get(Number(t.order)+delta)).filter(name=>name&&name!==String(note.metadata.name||note.filename)))].join(", ") || (terms.some(t=>Number(t.order)===(delta<0?1:Math.max(...orders.keys())))?"None":"");
     return [note.path,{...note.metadata,Order:join("order"),"Vice President(s)":join("vice_presidents"),
       "Term Years":join("term_years"),Term:join("dates"),Party:join("party"),Predecessor:adjacent(-1),Successor:adjacent(1)}];
   }));
@@ -2873,10 +2873,10 @@ function preparePresidents(notes) {
 class ContentCheckProgress {
   constructor(storage,key){
     this.storage=storage;this.key=key;this.signature=null;this.results=new Map();this.active=false;this.deck=null;this.group="";
-    try{const saved=JSON.parse(storage.getItem(key)||"null");if(saved?.version===1){this.signature=saved.signature;this.results=new Map(saved.results);this.active=saved.active===true;this.deck=saved.deck;this.group=saved.group||"";}}catch{}
+    try{const saved=JSON.parse(storage.getItem(key)||"null");if(saved?.version===2){this.signature=saved.signature;this.results=new Map(saved.results);this.active=saved.active===true;this.deck=saved.deck;this.group=saved.group||"";}}catch{}
   }
   bind(signature){if(this.signature!==signature){this.signature=signature;this.results.clear();this.active=false;this.save();}}
-  save(){try{this.storage.setItem(this.key,JSON.stringify({version:1,signature:this.signature,results:[...this.results],active:this.active,deck:this.deck,group:this.group}));}catch{}}
+  save(){try{this.storage.setItem(this.key,JSON.stringify({version:2,signature:this.signature,results:[...this.results],active:this.active,deck:this.deck,group:this.group}));}catch{}}
   invalidate(){this.signature=null;this.results.clear();this.active=false;this.save();}
 }
 async function readCatalogPartitions(paths,read){
@@ -3484,7 +3484,7 @@ class SchedulingIndex {
       const frontText=images(renderV2(card.template.front,special,card.anki_ordinal,false,config));
       const backText=images(renderV2(card.template.back,{...special,FrontSide:frontText},card.anki_ordinal,true,config));
       templateScriptParts(frontText,config.allow_javascript);templateScriptParts(backText,config.allow_javascript);
-      if(!frontText.trim() || !backText.trim())throw Error("Template produced an empty question or answer");
+      if(!frontText.trim())throw Error("Template produced an empty question");
       return {...card,source:{...card.source,path},fields,frontText,backText};
     }
     async function readSources() {

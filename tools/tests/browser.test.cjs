@@ -781,7 +781,8 @@ test('president terms provide fields, preserve multiple terms and derive adjacen
  assert.equal(adams.Term,'1797-03-04–1801-03-04');assert.equal(adams['Term Years'],'1797–1801');
  assert.equal(adams.Party,'Federalist');assert.equal(adams.Predecessor,'George Washington');assert.equal(adams.Successor,'Thomas Jefferson');
  assert.equal(prepared.get('jefferson.md').Order,'3, 4');
- assert.equal(prepared.get('washington.md').Predecessor,'');
+ assert.equal(prepared.get('washington.md').Predecessor,'None');
+ assert.equal(prepared.get('jefferson.md').Successor,'None');
  assert.equal(notes[1].metadata.Order,undefined);
  assert.throws(()=>SRS.preparePresidents([...notes,{path:'bad.md',metadata:{name:'Other',terms:[{order:2}]}}]),/Duplicate president order/);
 });

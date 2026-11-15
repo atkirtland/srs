@@ -159,6 +159,8 @@ def prepare_president_notes(notes: list[Note]) -> list[Note]:
             metadata[field] = ", ".join(dict.fromkeys(str(v) for v in values if v is not None and str(v).strip()))
         for field, delta in {"Predecessor": -1, "Successor": 1}.items():
             metadata[field] = ", ".join(dict.fromkeys(orders[t["order"] + delta] for t in terms if t["order"] + delta in orders and orders[t["order"] + delta] != str(note.metadata.get("name") or note.filename)))
+            if not metadata[field] and any(t["order"] == (1 if delta < 0 else max(orders, default=0)) for t in terms):
+                metadata[field] = "None"
         result.append(Note(note.path, metadata, note.body))
     return result
 
