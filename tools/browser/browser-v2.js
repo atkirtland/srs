@@ -247,16 +247,16 @@ function deckTree(cards, states, manifest, now, activity = []) {
   roots.forEach(n => visit(n, null));
   return roots.filter(n => !(n.id === "1" && n.total === 0 && !n.children.length && roots.length > 1));
 }
-function reviewQueueV2(cards, states, events, manifest, now, group, introducedCount, deckId = null, skipped = new Set(), cardFilter = null, precomputedTree = null) {
+function reviewQueueV2(cards, states, events, manifest, now, group, introducedCount, deckId = null, skipped = new Set(), cardFilter = null, precomputedTree = null, context = null) {
   if (!manifest.scheduling) return reviewQueue(cards, states, events, manifest, now, group, introducedCount);
   const tree = precomputedTree || deckTree(cards, states, manifest, now, events);
-  const nodesById = new Map(), kinds = new Map(), today = dayNumber(now, manifest.timing);
+  const nodesById = context?.nodesById || new Map(), kinds = context?.kinds || new Map(), today = dayNumber(now, manifest.timing);
   const kindOf = c => {
     if (!kinds.has(c.id)) kinds.set(c.id, queueKind(c, states.get(c.id), manifest, now, today));
     return kinds.get(c.id);
   };
   const find = nodes => {for (const n of nodes) {nodesById.set(n.id,n); find(n.children);}};
-  find(tree);
+  if(!nodesById.size)find(tree);
   const node = nodesById.get(deckId);
   const selected = node ? [node] : tree;
   const allowed = new Map();

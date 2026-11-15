@@ -487,3 +487,13 @@ Queue behavior follows Anki's published [deck tree](https://github.com/ankitects
 [limits](https://github.com/ankitects/anki/blob/25.09.2/rslib/src/decks/limits.rs), and
 [parameter precedence](https://github.com/ankitects/anki/blob/25.09.2/rslib/src/deckconfig/mod.rs).
 The bundled ts-fsrs library is MIT licensed; see `THIRD_PARTY_LICENSE.txt`.
+
+### Reviewer performance and content checks
+
+The reviewer reads catalog partitions four at a time and keeps configuration, review projections, deck memberships, queues, and parsed sources in memory while the view is open. Deck navigation reuses these caches. Relevant vault changes invalidate affected content; unrelated vault edits do not refresh the reviewer. Reviews still check current configuration, source content, and review ancestry before saving. Review-log indexing remains persistent and incremental.
+
+Card questions and answers render when opened. The homepage shows **known content errors** and **unchecked** cards; unchecked does not mean valid. Scheduling counts include both. Use **Tools → Check content** to validate the selected deck/group (or all cards from the unfiltered homepage). Checks run in batches and can be cancelled. Completed results last until the view closes or their dependencies change. In the card browser, **Search card content** explicitly checks the chosen scope and includes rendered text in search; results are incomplete while cards remain unchecked. Opening a card always validates it before enabling ratings.
+
+Use **Tools → Performance details** to inspect recent stage timings and cumulative file-read, source-read, rendering, and index-sync counts. To compare desktop and Android, reopen the view and record the cold-load measurements; then open the same deck twice, Bury a card, and submit a review, inspecting the counters after each operation. Warm navigation should not reread unchanged catalog/configuration/log files or render unvisited cards. Record content-check measurements separately. Refresh clears runtime caches; Rebuild local index rebuilds review projections.
+
+For a synthetic 30,000-card scheduling benchmark, run `tools/.venv/bin/node tools/tests/benchmark-reviewer.cjs` from the project root. It reports membership/count calculation, warm cache lookup, selected queue, and answer-refresh costs. It does not measure vault I/O or predict device-specific load times.

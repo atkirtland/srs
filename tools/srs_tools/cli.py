@@ -41,8 +41,9 @@ def main(argv=None):
     refresh = commands.add_parser('refresh-cards', help='discover vault cards without changing review baselines')
     train = commands.add_parser('train', help='train standalone FSRS using the unified review logs')
     prune = commands.add_parser('prune-missing-sources', help='preview removal of unreviewed local cards whose source identity no longer exists')
+    audit = commands.add_parser('audit-decks', help='flag parent matches outside all child decks (read-only)')
     prune.add_argument('--apply', action='store_true')
-    for command in (refresh, train, prune):
+    for command in (refresh, train, prune, audit):
         command.add_argument('--data', type=Path, default=REVIEWER / 'data')
         command.add_argument('--study', type=Path, help='legacy study.json or configuration directory (default: --config)')
         command.add_argument('--config', type=Path, default=REVIEWER / 'config', help='configuration directory')
@@ -65,6 +66,11 @@ def main(argv=None):
             from .study import refresh_cards
             result = refresh_cards(args.vault.resolve(), args.data, args.study or args.config, args.config)
             print(json.dumps(result, indent=2))
+        elif args.command == 'audit-decks':
+            from .audit import audit_decks
+            result = audit_decks(args.vault.resolve(), args.data, args.study or args.config)
+            print(json.dumps(result, indent=2))
+            return 1 if result['issues'] else 0
         elif args.command == 'prune-missing-sources':
             from .prune import prune
             print(json.dumps(prune(args.vault, args.data, args.study or args.config, args.apply), indent=2))

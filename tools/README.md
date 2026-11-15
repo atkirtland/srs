@@ -19,6 +19,8 @@ Omit `--apply` to train and evaluate without updating a profile.
 | Command | Purpose |
 | --- | --- |
 | `srs.py upgrade-layout` | Separate legacy configuration, scheduling profiles and generated note/card bindings. |
+| `srs.py audit-decks` | Flag cards matching a parent but none of its descendants; report IDs without changing decks. Exit 0: clear; 1: gaps; 2: failure. |
+| `srs.py prune-missing-sources` | Preview removal of unreviewed generated cards with missing sources; `--apply` removes eligible cards. |
 | `srs.py refresh-cards` | Discover source/template card variants while preserving identities, schedules, and logs. |
 | `srs.py train --profile <id>` | Train and evaluate standalone FSRS from unified reviews; `--apply` updates future answers. |
 | `srs.py seed-csv-uids <csv>` | Assign persistent IDs to new CSV rows. |

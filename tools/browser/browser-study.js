@@ -1,3 +1,10 @@
+async function readCatalogPartitions(paths,read){
+  const results=new Array(paths.length);let next=0;
+  await Promise.all(Array.from({length:Math.min(4,paths.length)},async()=>{
+    while(next<paths.length){const i=next++;results[i]=await read(paths[i]);}
+  }));
+  return results.flat();
+}
 // Editable study configuration is independent of imported scheduling baselines.
 function composeStudyDocuments(parts) {
   for(const doc of Object.values(parts))if(doc?.format_version!==1)throw Error("Unsupported configuration layout");
@@ -98,8 +105,25 @@ function studyRuntimeManifest(original,config) {
   }
   return {...original,scheduling:meta,study:config};
 }
-function studyDeckTree(cards,states,manifest,now,activity,skipped,group) {
+// Resolve direct filters once, then union children without counting a card twice.
+function studyMemberships(cards,config,manifest){
+  const result=new Map(),children=new Map();
+  for(const [id,deck] of Object.entries(config.decks)){
+    result.set(id,new Set());
+    if(!children.has(deck.parent_id))children.set(deck.parent_id,[]);
+    children.get(deck.parent_id).push(id);
+  }
+  for(const card of cards)if(!card.retired)for(const [id,deck] of Object.entries(config.decks))if(matchesStudyFilter(card,deck.filter,manifest))result.get(id).add(card.id);
+  const merge=id=>{const target=result.get(id);for(const child of children.get(id)||[])for(const cid of merge(child))target.add(cid);return target;};
+  for(const id of children.get(null)||[])merge(id);
+  // Root parent_id may be omitted in older documents.
+  for(const id of children.get(undefined)||[])merge(id);
+  return result;
+}
+function studyDeckTree(cards,states,manifest,now,activity,skipped,group,memberships) {
+  memberships=memberships||studyMemberships(cards,manifest.study,manifest);
   const config=manifest.study, base=deckTree(cards,states,manifest,now,activity);
+  const queueContext={nodesById:new Map(),kinds:new Map()};
   const native=new Map();const visit=nodes=>nodes.forEach(n=>{native.set(n.id,n);visit(n.children);});visit(base);
   const nodes=new Map();
   for(const [id,deck] of Object.entries(config.decks)){
@@ -108,8 +132,8 @@ function studyDeckTree(cards,states,manifest,now,activity,skipped,group) {
     const q=deck.filter, direct=Object.keys(q).length===2 && q.include_children===true && q.deck_ids?.length===1 &&
       !descendants.some(d=>!d.filter.deck_ids?.every(x=>native.get(x)?.name.startsWith((native.get(q.deck_ids[0])?.name||"\0")+"::")));
     const target=direct && !group && native.get(q.deck_ids[0]);
-    const queue=target || reviewQueueV2(cards,states,activity,manifest,now,group,undefined,null,skipped,c=>studyDeckMatches(c,id,config,manifest),base);
-    const matching=target ? null : cards.filter(c=>(!group||c.group===group)&&studyDeckMatches(c,id,config,manifest));
+    const queue=target || reviewQueueV2(cards,states,activity,manifest,now,group,undefined,null,skipped,c=>memberships.get(id).has(c.id),base,queueContext);
+    const matching=target ? null : cards.filter(c=>(!group||c.group===group)&&memberships.get(id).has(c.id));
     nodes.set(id,{id,...deck,children:[],new:queue.new??queue.fresh,learning:queue.learning,review:queue.review,
       errors:target?target.errors:matching.filter(c=>c.content_error).length,total:target?target.total:matching.length});
   }

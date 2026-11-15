@@ -302,9 +302,9 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   let cardPath='srs/data/imports/r/cards-00000.json';
   put('srs/data/manifest.json',JSON.stringify(m));put(cardPath,JSON.stringify(cs));put('srs/config.json',JSON.stringify(config));
   put('vocab.csv','anki_note_id,word,definition\n1,broken,\n2,ready,answer\n');
-  let scans=0;
-  const vault={getName:()=>`test-ui-${crypto.randomUUID()}`,getFiles:()=>{scans++;return [...files.values()];},getAbstractFileByPath:p=>files.get(p),read:async f=>f.text,
-    create:async(p,t)=>put(p,t),modify:async(f,t)=>put(f.path,t),createFolder:async p=>files.set(p,{path:p}),append:async(f,t)=>{f.text+=t;f.stat.mtime++;f.stat.size=f.text.length;},on:()=>()=>{}};
+  let scans=0;const reads=[];const listeners=new Map();
+  const vault={getName:()=>`test-ui-${crypto.randomUUID()}`,getFiles:()=>{scans++;return [...files.values()];},getAbstractFileByPath:p=>files.get(p),read:async f=>{reads.push(f.path);return f.text;},
+    create:async(p,t)=>put(p,t),modify:async(f,t)=>put(f.path,t),createFolder:async p=>files.set(p,{path:p}),append:async(f,t)=>{f.text+=t;f.stat.mtime++;f.stat.size=f.text.length;},on:(name,fn)=>{listeners.set(name,fn);return ()=>{};}};
   const component={register:f=>cleanups.push(f),registerEvent:()=>{},registerInterval:()=>{}};
   class FixedDate extends Date {constructor(...args){super(...(args.length?args:[now]));}static now(){return now;}}
   const context={dv:{app:{vault,metadataCache:{getFileCache:()=>({}),on:()=>()=>{}},workspace:{openLinkText:()=>{}}},component,container:root,
@@ -315,6 +315,11 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   const button=text=>root.querySelectorAll('button').find(b=>b.textContent===text);
   for(let i=0;i<100&&!button('Review');i++)await tick();
   assert.ok(button('Review'),'default deck homepage appears');
+  assert.equal(reads.filter(p=>p==='vocab.csv').length,0,'homepage does not read or render source content');
+  assert.ok(root.querySelectorAll('div').some(e=>e.textContent.includes('3 unchecked')));
+  const beforeUnrelated=reads.length;
+  listeners.get('modify')({path:'unrelated.md'});await tick();
+  assert.equal(reads.length,beforeUnrelated,'unrelated edits cause no data reads');
   const deckSearch=root.querySelectorAll('input').find(e=>e.attr['aria-label']==='Find a deck');
   deckSearch.value='Parent::A';deckSearch.oninput();
   assert.ok(!root.querySelectorAll('summary').some(e=>e.attr['aria-label']==='Other'));
@@ -331,12 +336,13 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='2 matching cards'));
   button('Decks').onclick();
   for(let i=0;i<100&&!button('Review');i++)await tick();
-  const scansAtHome=scans;
+  const scansAtHome=scans;const readsAtHome=reads.length;
   // Other sorts before Parent, so open the Parent root explicitly.
   root.querySelectorAll('button').filter(b=>b.textContent==='Review')[1].onclick({preventDefault(){}});
   for(let i=0;i<100&&!button('Rating unavailable');i++)await tick();
   assert.ok(button('Rating unavailable'),'missing fields remain accessible');
-  assert.equal(scans-scansAtHome,1,'opening a deck only scans for log changes, without resolving sources again');
+  assert.equal(scans-scansAtHome,1,'first selected source is located lazily');
+  assert.deepEqual(reads.slice(readsAtHome),['vocab.csv'],'deck opening reads only the selected source');
   assert.ok(root.querySelectorAll('span').some(e=>e.textContent===' · 1 content errors'));
   assert.ok(root.querySelectorAll('summary').some(e=>e.textContent==='Inspect 1 content errors'));
   assert.ok(!root.querySelectorAll('span').some(e=>e.textContent===' · 2 content errors'));
@@ -344,7 +350,11 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   button('Bury').onclick();
   for(let i=0;i<100&&!button('Show answer');i++)await tick();
   assert.ok(button('Show answer'));
-  assert.equal(scans-scansBeforeBury,1,'burying reuses the resolved source catalog');
+  assert.equal(scans-scansBeforeBury,0,'burying reuses source and review snapshots');
+  const warmReads=reads.length;
+  button('Performance details').onclick();
+  assert.equal(reads.length,warmReads,'performance inspection performs no file reads');
+  assert.ok(root.querySelectorAll('div').some(e=>e.textContent.includes('Render selected card')));
   assert.equal([...files.keys()].filter(p=>p.endsWith('.jsonl')).length,0);
   const priorIds=JSON.parse(files.get(cardPath).text).map(c=>c.id);
   config.groups.test.templates[0].front='Edited {{word}}';put('srs/config.json',JSON.stringify(config));
@@ -370,7 +380,7 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   assert.ok(search);
   search.value='ready';search.oninput();
   assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='1 matching cards'));
-  button('Edited ready').onclick();
+  await button('Edited ready').onclick();
   assert.ok(root.querySelectorAll('h5').some(e=>e.textContent==='Question'));
   assert.ok(root.querySelectorAll('h5').some(e=>e.textContent==='Answer'));
   assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='answer'),'editor shows the answer preview');
@@ -401,8 +411,11 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   const finalDeck=root.querySelectorAll('select').find(e=>e.attr['aria-label']==='Card deck');finalDeck.value='';finalDeck.onchange();
   const finalSearch=root.querySelectorAll('input').find(e=>e.attr['aria-label']==='Search cards');
   finalSearch.value='';finalSearch.oninput();
+  const cancelledCheck=button('Check content').onclick();
+  await tick();button('Cancel content check').onclick();await cancelledCheck;
+  await button('Check content').onclick();
   assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='2 matching cards'));
-  finalSearch.value='not present';finalSearch.oninput();
+  const checkedSearch=root.querySelectorAll('input').find(e=>e.attr['aria-label']==='Search cards');checkedSearch.value='not present';checkedSearch.oninput();
   assert.ok(root.querySelectorAll('p').some(e=>e.textContent==='No cards match these filters. Try a different search or deck.'));
   const liveStudy=studyConfiguration(m);
   liveStudy.decks.all={name:'All cards',parent_id:null,filter:{}};
@@ -438,7 +451,7 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   await button('Save deck').onclick();
   assert.deepEqual(JSON.parse(files.get('srs/config/decks.json').text).decks['vocabulary-practice'].filter,{paths:['vocab.csv']});
   assert.equal(files.has('srs/study.json'),false,'UI saves never recreate the legacy combined configuration');
-  assert.ok(root.querySelectorAll('summary').some(e=>e.attr['aria-label']==='Vocabulary practice'));
+  assert.ok(root.querySelectorAll('summary').some(e=>e.attr['aria-label']==='Vocabulary practice'),root.querySelectorAll('div').map(e=>e.textContent).join(' | '));
   cleanups.forEach(f=>f());
 });
 
@@ -545,4 +558,25 @@ test('retired conversion cards stay out of queues, counts and template validatio
     assert.deepEqual([node.new,node.learning,node.review,node.total,node.errors],[0,0,0,0,0]);
   }
   assert.equal(SRS.reviewQueueV2(cs,states(cs),[],runtime,now).cards.length,0);
+});
+
+test('membership index equals recursive filters for parents, overlaps and retired cards',()=>{
+  const m=manifest(),config=studyConfiguration(m),cs=cards([0,1,2,0]);
+  config.decks.first={name:'First',parent_id:null,filter:{groups:['one']}};
+  config.decks.second={name:'Second',parent_id:'first',filter:{tags:['special']}};
+  cs.forEach((c,i)=>Object.assign(c,{group:i%2?'two':'one',card_settings:{tags:i===1?['special']:[]}}));
+  cs[3].retired=true;
+  const members=SRS.studyMemberships(cs,config,m);
+  for(const id of Object.keys(config.decks))for(const card of cs)assert.equal(members.get(id).has(card.id),SRS.studyDeckMatches(card,id,config,m));
+  const runtime=SRS.studyRuntimeManifest(m,config),states=new Map(cs.map(c=>[c.id,{state:c.baseline}]));
+  assert.deepEqual(SRS.studyDeckTree(cs,states,runtime,now,[],new Set(),'',members),SRS.studyDeckTree(cs,states,runtime,now,[],new Set(),''));
+});
+
+test('catalog reads are limited to four, preserve partition order and reject incomplete snapshots',async()=>{
+  let active=0,peak=0;
+  const paths=Array.from({length:11},(_,i)=>i);
+  const result=await SRS.readCatalogPartitions(paths,async i=>{active++;peak=Math.max(peak,active);await new Promise(r=>setTimeout(r,(11-i)%4));active--;return [i];});
+  assert.deepEqual(result,paths);assert.equal(peak,4);assert.equal(active,0);
+  await assert.rejects(SRS.readCatalogPartitions(paths,async i=>{if(i===2)throw Error('missing partition');return [i];}),/missing partition/);
+  assert.deepEqual(await SRS.readCatalogPartitions([],async()=>assert.fail('unexpected read')),[]);
 });
