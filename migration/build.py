@@ -9,8 +9,8 @@ from configuration import US_STATES_BY_SLUG
 hook = '''
   if (globalThis.__SRS_TEST__) {
     globalThis.SRS = {schedulerV2, effectiveSettings, renderV2, transformField, fieldsFromNote,
-      deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber,
-      ReviewIndex, appendReview, validateEvent, parseCSV, indexRows, configuredCards, initialState};
+      deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
+      ReviewIndex, appendReview, validateEvent, saveSchedulerConfig, verifySchedulerConfig, parseCSV, indexRows, configuredCards, initialState};
     return;
   }
 '''

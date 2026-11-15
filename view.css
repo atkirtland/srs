@@ -8,3 +8,10 @@
 .ankobs-srs .srs-errors { color: var(--text-muted); }
 .ankobs-srs details { margin-left: .8rem; }
 .ankobs-srs summary { cursor: pointer; padding: .2rem; }
+.ankobs-srs .srs-card-filters input { width: 100%; min-height: 44px; }
+.ankobs-srs .srs-card-editor:empty { display: none; }
+.ankobs-srs .srs-card-editor { padding: .8rem; margin: .8rem 0; border: 1px solid var(--background-modifier-border); }
+.ankobs-srs .srs-card-editor label { display: block; margin: .6rem 0; }
+.ankobs-srs .srs-card-editor input[type="text"] { display: block; width: 100%; min-height: 44px; }
+.ankobs-srs .srs-card-row { border-top: 1px solid var(--background-modifier-border); padding: .4rem 0; }
+.ankobs-srs .srs-card-row span { display: block; color: var(--text-muted); font-size: .9em; }

@@ -14,6 +14,8 @@ and `kind` inside each record.
 ```text
 data/
   manifest.json
+  scheduler-configs/
+    <sha256>.json
   imports/<revision>/
     report.json
     cards-00000.json
@@ -29,7 +31,7 @@ data/
 
 [schemas/data.schema.json](schemas/data.schema.json) is a JSON Schema Draft
 2020-12 document describing these files. Its root accepts a manifest, card
-partition, import report, or individual event. Validate **each JSONL line
+partition, scheduler configuration, import report, or individual event. Validate **each JSONL line
 separately**, not a complete JSONL file as one JSON document. Specific types are
 available through these schema references:
 
@@ -37,11 +39,13 @@ available through these schema references:
 | --- | --- |
 | `data/manifest.json` | `schemas/data.schema.json#/$defs/Manifest` |
 | `cards-*.json` | `schemas/data.schema.json#/$defs/CardPartition` |
+| `scheduler-configs/<sha256>.json` | `schemas/data.schema.json#/$defs/SchedulerConfig` |
 | Import `report.json` | `schemas/data.schema.json#/$defs/ImportReport` |
 | Any review-log line | `schemas/data.schema.json#/$defs/Event` |
 | Historical observation | `schemas/data.schema.json#/$defs/HistoricalReview` |
 | Imported baseline | `schemas/data.schema.json#/$defs/SchedulingBaseline` |
 | New answer | `schemas/data.schema.json#/$defs/Answer` |
+| Card settings change | `schemas/data.schema.json#/$defs/CardSettingsEvent` |
 | Preserved version 1 answer | `schemas/data.schema.json#/$defs/LegacyAnswer` |
 
 These schemas document structure; they are not automatically invoked by the
@@ -55,7 +59,7 @@ fields, rather than retaining the full native Anki protobuf objects.
 
 ## Shared conventions
 
-- Timestamps such as `snapshot_ms`, `review_time_ms`, `due`, `due_ms`, and
+- Timestamps such as `snapshot_ms`, `review_time_ms`, `time_ms`, `due`, `due_ms`, and
   `last_review` are Unix **milliseconds**. Durations are milliseconds unless
   the field explicitly says seconds or days.
 - Anki card, note, deck, preset, and revlog identities generally use strings
@@ -287,13 +291,14 @@ parent: <previous answer UUID or import:<import_id>:<card_id>>
 review_time_ms, duration_ms
 rating: 1 | 2 | 3 | 4       Again | Hard | Good | Easy
 was_new, was_review         booleans describing the prior state
-scheduler_version: ts-fsrs@5.2.3/FSRS-6
-scheduler_config: <effective settings used for this answer>
+scheduler_config_id: <SHA-256 of the immutable scheduler configuration>
 state: <complete resulting scheduler state>
 ```
 
-`scheduler_config` records the effective weights, parameter provenance, retention,
-interval limits, learning/relearning steps, and relevant reviewer options.
+`scheduler_config_id` references `data/scheduler-configs/<id>.json`, described
+below. Older version 2 answers with inline `scheduler_version` and
+`scheduler_config` remain readable; existing logs are not rewritten. Each answer
+has either the reference or the inline fields, never both.
 `state.last_review` must equal `review_time_ms`. Keeping complete resulting
 states avoids reconstructing the winner by replaying conflicting branches.
 
@@ -307,6 +312,76 @@ Preserved version 1 answer events lack `kind` and may omit `deck_id` and
 `was_review`. The reviewer still reads them from monthly logs. New writes use
 version 2 monthly logs. There is no `events/` directory in the current format.
 
+### Immutable scheduler configurations
+
+Each distinct effective interval configuration is written once, before its first
+answer is appended, to `data/scheduler-configs/<sha256>.json`:
+
+```text
+scheduler_version: ts-fsrs@5.2.3/FSRS-6
+settings:
+  algorithm, weights, desired_retention, maximum_interval, minimum_interval
+  learning_steps, relearning_steps, enable_fuzz, short_term_with_steps
+  parameter_field, parameter_policy, source_anki_version
+```
+
+Optional fields are omitted when absent. Daily allowances (`new_cards_per_day`)
+and mutable preset IDs are excluded: they do not affect the answer's interval.
+Identical interval settings can therefore share a file across decks and devices.
+The scheduler version is included in the document and hash, rather than repeated
+on every new answer.
+
+The lowercase 64-character ID is the SHA-256 of the document's canonical UTF-8
+JSON: object keys sorted recursively, array order preserved, JavaScript JSON
+number/string encoding, no whitespace or trailing newline. The file may end in
+a newline; whitespace does not participate in the hash. The reviewer checks
+that referenced files exist, validate, and match their hashes when indexing new
+answers. An error leaves that log uncheckpointed for retry after syncing or repair.
+Each distinct configuration is read once per incremental indexing pass.
+
+Files are immutable and retained across configuration changes and reimports.
+Missing/corrupt files produce a diagnostic; the writer never overwrites them.
+Sync this directory alongside monthly logs. Old configurations support auditing
+past answers; future answers continue to use current settings with the saved
+card state. The manifest remains the source of current deck settings.
+
+### Card settings change: `card_settings`
+
+The **Cards** manager and the reviewer's **Card settings** button write settings
+for one stable card UID. These are independent of vault note content, templates,
+and imported scheduling baselines:
+
+```json
+{
+  "format_version": 2,
+  "kind": "card_settings",
+  "id": "11111111-1111-4111-8111-111111111111",
+  "device_id": "example-device",
+  "card_id": "22222222-2222-4222-8222-222222222222",
+  "time_ms": 946684800000,
+  "changes": {"suspended": true, "tags": ["extra-practice"]}
+}
+```
+
+Only changed fields are written. `suspended` is a boolean and `tags` is a list of
+unique, nonempty strings. A null value removes an override; the index retains
+its timestamp so an older edit cannot resurrect it. Omitted fields stay unchanged.
+Tags are card-specific and do not modify source-note tags.
+
+Settings share `reviews/computer-YYYY-MM.jsonl` and Android's corresponding logs
+with answers, using `time_ms` to choose the UTC month and the same 32 MiB rollover.
+There is no separate mutable settings file. The greatest `(time_ms, id)` wins
+**per field**: an offline tag edit and a suspension edit combine, while conflicting
+edits to the same field resolve deterministically. Each tag list is one field.
+
+Settings events have no `import_id`, scheduler configuration, or resulting state.
+They follow the card UID across reimports, do not compete with answers, and do
+not consume daily allowances. A settings-only log does not block a new imported
+baseline; a log containing answers still does. Restoring an imported suspended
+card resumes its saved queue type without resetting its memory state. Removing
+the suspension override restores the imported suspension status. Retired cards
+remain excluded regardless of overrides.
+
 ## Import report and local caches
 
 `imports/<revision>/report.json` contains `notes`, `cards`, `review_events`,
@@ -317,7 +392,7 @@ report's original unverified status. The schema here covers the import report,
 not that separate verification report.
 
 IndexedDB holds the device-local incremental index: file checkpoints, event
-deduplication, current answers, imported observations, activity, and reconstructed
+deduplication, current answers, per-field card settings, imported observations, activity, and reconstructed
 baseline caches. Those are not synced `data/` JSON files. They can be rebuilt
 from the store. Session Bury choices are also not written as review events.
 

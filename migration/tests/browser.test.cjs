@@ -139,9 +139,152 @@ test('named devices write readable logs while UUID device records remain valid',
   SRS.validateEvent(answer(),'import');
   assert.throws(()=>SRS.validateEvent({...answer(),device_id:'../other'},'import'),/Invalid/);
 });
+test('scheduler archives deduplicate effective settings by canonical hash and never overwrite files',async()=>{
+  const files=new Map();let creates=0;
+  const store={read:async p=>files.get(p)??null,create:async(p,t)=>{creates++;files.set(p,t);}};
+  const id=await SRS.saveSchedulerConfig(store,'configs',options);
+  const path=`configs/${id}.json`, bytes=files.get(path);
+  const reordered=Object.fromEntries(Object.entries(options).reverse());
+  assert.equal(await SRS.saveSchedulerConfig(store,'configs',{...reordered,new_cards_per_day:99,preset_id:'other'}),id);
+  assert.equal(creates,1);assert.equal(files.size,1);assert.equal(files.get(path),bytes);
+  const saved=await SRS.verifySchedulerConfig(id,bytes);
+  assert.deepEqual(saved.settings.weights,options.weights);
+  assert.equal(saved.settings.parameter_policy,options.parameter_policy);
+  assert.ok(!('new_cards_per_day' in saved.settings));assert.ok(!('preset_id' in saved.settings));
+  const changed=await SRS.saveSchedulerConfig(store,'configs',{...options,desired_retention:.9});
+  assert.notEqual(changed,id);assert.equal(files.get(path),bytes);
+  const weights=[...options.weights];weights[0]+=.01;
+  assert.notEqual(await SRS.saveSchedulerConfig(store,'configs',{...options,weights}),id);
+  await assert.rejects(()=>SRS.saveSchedulerConfig(store,'configs',options,'unknown scheduler'),/Unsupported scheduler version/);
+  files.set(path,JSON.stringify({...saved,settings:{...saved.settings,desired_retention:.95}}));
+  const corrupt=files.get(path);
+  await assert.rejects(()=>SRS.saveSchedulerConfig(store,'configs',options),/hash mismatch/);
+  assert.equal(files.get(path),corrupt);
+  await assert.rejects(()=>SRS.verifySchedulerConfig(id,null),/Missing scheduler configuration/);
+  await assert.rejects(()=>SRS.verifySchedulerConfig(id,'{'),/Malformed scheduler configuration/);
+  // A concurrent writer may create the identical immutable file first.
+  const raced=new Map();
+  const racingStore={read:async p=>raced.get(p)??null,create:async(p,t)=>{raced.set(p,t);throw Error('Already exists');}};
+  assert.equal(await SRS.saveSchedulerConfig(racingStore,'configs',options),id);
+});
+test('hashed scheduler references coexist with inline reviews and validate before indexing or checkpointing',async()=>{
+  const files=new Map(), store={read:async p=>files.get(p)??null,create:async(p,t)=>files.set(p,t)};
+  const id=await SRS.saveSchedulerConfig(store,'configs',options);
+  const indexed=await SRS.ReviewIndex.open(`config-refs-${crypto.randomUUID()}`,'import',timing,indexedDB);
+  const known=new Set(['card-0']);
+  const ref=(eventId,stamp,configId=id)=>{
+    const {scheduler_config,scheduler_version,...event}=answer(eventId,stamp);
+    return {...event,scheduler_config_id:configId};
+  };
+  const first=ref('33333333-3333-4333-8333-333333333333',now);
+  SRS.validateEvent(first,'import');
+  assert.throws(()=>SRS.validateEvent({...first,scheduler_config:options},'import'),/reference/);
+  assert.throws(()=>SRS.validateEvent({...first,scheduler_version:'anything'},'import'),/reference/);
+  assert.throws(()=>SRS.validateEvent({...first,scheduler_config_id:'../config'},'import'),/reference/);
+  assert.throws(()=>SRS.validateEvent({...first,scheduler_config_id:[id]},'import'),/reference/);
+  assert.throws(()=>SRS.validateEvent({...first,format_version:1},'import'),/reference/);
+  let text=JSON.stringify(first)+'\n';
+  const descriptors=()=>[{path:'reviews/computer-2026-11.jsonl',stat:{mtime:text.length,size:text.length}}];
+  await assert.rejects(()=>indexed.sync(descriptors(),()=>text,known,{readSchedulerConfig:()=>null}),/Missing scheduler configuration/);
+  assert.equal((await indexed.latest()).size,0);
+  assert.equal(await indexed.get('files',descriptors()[0].path),undefined,'missing configs leave the file uncheckpointed');
+  await assert.rejects(()=>indexed.sync(descriptors(),()=>text,known,{readSchedulerConfig:()=>JSON.stringify({})}),/hash mismatch/);
+  await assert.rejects(()=>indexed.ingest([first],known),/configuration reader/);
+  const legacy={...answer(),format_version:1};delete legacy.kind;
+  const events=[legacy,...Array.from({length:501},(_,i)=>ref(`00000000-0000-4000-8000-${String(i).padStart(12,'0')}`,now+i+1))];
+  text=events.map(e=>JSON.stringify(e)+'\n').join('');
+  let configReads=0;
+  const readSchedulerConfig=id=>{configReads++;return files.get(`configs/${id}.json`)??null;};
+  await indexed.sync(descriptors(),()=>text,known,{readSchedulerConfig});
+  assert.equal(configReads,1,'one config read across multiple ingest batches');
+  const winner=(await indexed.latest()).get('card-0');
+  assert.equal(winner.scheduler_config_id,id);assert.ok(!('scheduler_config' in winner));
+  assert.equal(winner.review_time_ms,now+501);
+  assert.equal((await indexed.activityToday(now)).length,502);
+  assert.equal((await indexed.sync(descriptors(),()=>{throw Error('Unchanged log read');},known,{readSchedulerConfig})).parsed,0);
+  assert.equal(configReads,1);
+  await indexed.clear();await indexed.sync(descriptors(),()=>text,known,{readSchedulerConfig});
+  assert.deepEqual((await indexed.latest()).get('card-0'),winner);
+  indexed.close();
+});
+test('card settings merge per field across offline branches, resets and index rebuilds without study activity',async()=>{
+  const name=`settings-${crypto.randomUUID()}`, index=await SRS.ReviewIndex.open(name,'import',timing,indexedDB);
+  const setting=(id,time_ms,changes)=>({format_version:2,kind:'card_settings',id,device_id:'android',card_id:'card-0',time_ms,changes});
+  const first=setting(eventId,now,{suspended:true,tags:['first']});
+  const tags=setting('33333333-3333-4333-8333-333333333333',now+1,{tags:['focused']});
+  const restore=setting('44444444-4444-4444-8444-444444444444',now+2,{suspended:false});
+  await index.ingest([restore,tags,first],new Set(['card-0']));
+  assert.deepEqual((await index.cardSettings()).get('card-0'),{suspended:false,tags:['focused']});
+  const reset=setting('55555555-5555-4555-8555-555555555555',now+3,{tags:null});
+  await index.ingest([reset,first],new Set(['card-0']));
+  assert.deepEqual((await index.cardSettings()).get('card-0'),{suspended:false});
+  // A timestamp tie uses the event ID, independently for each field.
+  const tied=setting('66666666-6666-4666-8666-666666666666',now+2,{suspended:true});
+  await index.ingest([tied],new Set(['card-0']));
+  const expected={suspended:true};
+  assert.deepEqual((await index.cardSettings()).get('card-0'),expected);
+  assert.equal((await index.latest()).size,0);
+  assert.equal((await index.activityToday(now)).length,0);
+  assert.equal(await index.introducedToday(now),0);
+  const files=new Map(),store={read:async p=>files.get(p)??null,create:async(p,t)=>files.set(p,t),append:async(p,t)=>files.set(p,files.get(p)+t)};
+  for(const event of [first,tags,restore,reset,tied])assert.equal(await SRS.appendReview(store,'reviews',event),'reviews/android-2026-11.jsonl');
+  const descriptors=[...files].map(([path,text])=>({path,stat:{mtime:1,size:text.length}}));
+  await index.clear();
+  await index.sync(descriptors,f=>files.get(f.path),new Set(['card-0']));
+  assert.deepEqual((await index.cardSettings()).get('card-0'),expected);
+  assert.equal((await index.sync(descriptors,()=>{throw Error('Unchanged log read');},new Set(['card-0']))).parsed,0);
+  index.close();
+  const reopened=await SRS.ReviewIndex.open(name,'changed-baseline',timing,indexedDB);
+  await reopened.sync(descriptors,f=>files.get(f.path),new Set(['card-0']));
+  assert.deepEqual((await reopened.cardSettings()).get('card-0'),expected,'settings survive a changed import identity');
+  reopened.close();
+  for(const changes of [{suspended:'yes'},{tags:['x','x']},{tags:['']},{unrecognized:true},{}])
+    assert.throws(()=>SRS.validateEvent(setting(eventId,now,changes),'import'));
+});
+test('suspension applies to individual card UIDs and restores native suspended cards without changing saved state',()=>{
+  const m=manifest(),cs=cards([0,2,-1]);
+  cs[0].note_uid=cs[1].note_uid='same-note';
+  cs[0].card_settings={suspended:true};
+  cs[2].card_type=2;cs[2].baseline.state=2;
+  const saved=JSON.stringify(cs.map(c=>c.baseline));
+  let queue=SRS.reviewQueueV2(cs,states(cs),[],m,now);
+  assert.deepEqual(queue.cards.map(c=>c.id),['card-1']);
+  cs[2].card_settings={suspended:false};
+  queue=SRS.reviewQueueV2(cs,states(cs),[],m,now);
+  assert.deepEqual(new Set(queue.cards.map(c=>c.id)),new Set(['card-1','card-2']));
+  assert.equal(JSON.stringify(cs.map(c=>c.baseline)),saved);
+  cs[2].card_settings={};
+  assert.equal(SRS.cardSuspended(cs[2],states(cs).get(cs[2].id)),true);
+});
+test('adding card settings upgrades the local database without rebuilding historical log checkpoints',async()=>{
+  const name=`upgrade-${crypto.randomUUID()}`;
+  const old=await new Promise((resolve,reject)=>{
+    const opening=indexedDB.open(name,2);
+    opening.onupgradeneeded=()=>{
+      const db=opening.result;
+      for(const store of ['meta','files','seen','latest','baselines'])db.createObjectStore(store);
+      db.createObjectStore('observations',{keyPath:'id'}).createIndex('card_id','card_id');
+      db.createObjectStore('activity',{keyPath:'id'}).createIndex('day','day');
+      db.createObjectStore('introduced',{keyPath:['day','card_id']}).createIndex('day','day');
+    };
+    opening.onsuccess=()=>resolve(opening.result);opening.onerror=()=>reject(opening.error);
+  });
+  await new Promise((resolve,reject)=>{
+    const tx=old.transaction(['meta','files','latest'],'readwrite');
+    tx.objectStore('meta').put('import','import');tx.objectStore('meta').put(2,'schema');
+    tx.objectStore('files').put({mtime:1,size:100},'historical-log');
+    tx.objectStore('latest').put(answer(),'card-0');
+    tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error);
+  });old.close();
+  const upgraded=await SRS.ReviewIndex.open(name,'import',timing,indexedDB);
+  assert.equal((await upgraded.get('files','historical-log')).size,100);
+  assert.equal((await upgraded.latest()).get('card-0').id,eventId);
+  assert.equal((await upgraded.cardSettings()).size,0);
+  upgraded.close();
+});
 test('reviewer scopes content errors, reuses resolved content, and Bury writes nothing; live edits preserve identity',async()=>{
   class Element {
-    constructor(tag='div',options={}) {this.tag=tag;this.children=[];this.textContent=options.text||'';this.value=options.value||'';}
+    constructor(tag='div',options={}) {this.tag=tag;this.children=[];this.textContent=options.text||'';this.value=options.value||'';this.type=options.type;this.attr=options.attr||{};}
     createEl(tag,options){const e=new Element(tag,options);this.children.push(e);return e;}
     createDiv(options){return this.createEl('div',options);}
     empty(){this.children=[];this.textContent='';}
@@ -160,7 +303,7 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   put('vocab.csv','anki_note_id,word,definition\n1,broken,\n2,ready,answer\n');
   let scans=0;
   const vault={getName:()=>`test-ui-${crypto.randomUUID()}`,getFiles:()=>{scans++;return [...files.values()];},getAbstractFileByPath:p=>files.get(p),read:async f=>f.text,
-    create:async(p,t)=>put(p,t),append:async(f,t)=>{f.text+=t;f.stat.mtime++;f.stat.size=f.text.length;},on:()=>()=>{}};
+    create:async(p,t)=>put(p,t),createFolder:async p=>files.set(p,{path:p}),append:async(f,t)=>{f.text+=t;f.stat.mtime++;f.stat.size=f.text.length;},on:()=>()=>{}};
   const component={register:f=>cleanups.push(f),registerEvent:()=>{},registerInterval:()=>{}};
   class FixedDate extends Date {constructor(...args){super(...(args.length?args:[now]));}static now(){return now;}}
   const context={dv:{app:{vault,metadataCache:{getFileCache:()=>({}),on:()=>()=>{}},workspace:{openLinkText:()=>{}}},component,container:root,
@@ -197,6 +340,38 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   const logs=[...files.values()].filter(f=>f.path.endsWith('.jsonl'));
   assert.equal(logs.length,1);const event=JSON.parse(logs[0].text);
   assert.match(logs[0].path,/\/computer-2026-11.jsonl$/);assert.equal(event.device_id,'computer');
-  assert.equal(event.card_id,'card-1');assert.equal(event.kind,'answer');assert.equal(event.scheduler_config.preset_id,'1');
+  assert.equal(event.card_id,'card-1');assert.equal(event.kind,'answer');
+  assert.match(event.scheduler_config_id,/^[0-9a-f]{64}$/);
+  assert.ok(!('scheduler_config' in event));assert.ok(!('scheduler_version' in event));
+  const savedConfig=JSON.parse(files.get(`srs/data/scheduler-configs/${event.scheduler_config_id}.json`).text);
+  assert.deepEqual(savedConfig.settings.weights,options.weights);
+  assert.equal(savedConfig.scheduler_version,'ts-fsrs@5.2.3/FSRS-6');
+  assert.ok(!('preset_id' in savedConfig.settings));assert.ok(!('new_cards_per_day' in savedConfig.settings));
+  button('Cards').onclick();
+  for(let i=0;i<100&&!root.querySelectorAll('input').length;i++)await tick();
+  const search=root.querySelectorAll('input').find(e=>e.type==='search');
+  assert.ok(search);
+  search.value='ready';search.oninput();
+  assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='1 matching cards'));
+  button('Edited ready').onclick();
+  let checkbox=root.querySelectorAll('input').find(e=>e.type==='checkbox');
+  const tagsInput=root.querySelectorAll('input').find(e=>e.type==='text');
+  checkbox.checked=true;checkbox.onchange();tagsInput.value='focused, focused, hard';tagsInput.oninput();
+  await button('Save card settings').onclick();
+  let events=logs[0].text.trim().split('\n').map(JSON.parse);
+  assert.equal(events.length,2);assert.equal(events[1].kind,'card_settings');
+  assert.equal(events[1].card_id,'card-1');assert.deepEqual(events[1].changes,{suspended:true,tags:['focused','hard']});
+  assert.ok(!('state' in events[1]));assert.ok(!('import_id' in events[1]));
+  const status=root.querySelectorAll('select').find(e=>e.attr['aria-label']==='Card status');
+  status.value='suspended';status.onchange();
+  assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='1 matching cards'));
+  const tagSearch=root.querySelectorAll('input').find(e=>e.type==='search');tagSearch.value='focused';tagSearch.oninput();
+  assert.ok(button('Edited ready'),'card-specific tags are searchable');
+  checkbox=root.querySelectorAll('input').find(e=>e.type==='checkbox');checkbox.checked=false;checkbox.onchange();
+  await button('Save card settings').onclick();
+  events=logs[0].text.trim().split('\n').map(JSON.parse);
+  assert.deepEqual(events[2].changes,{suspended:false});
+  assert.equal(events.filter(e=>e.kind==='answer').length,1,'settings do not create answers');
+  assert.deepEqual(JSON.parse(files.get(cardPath).text).map(c=>c.id),priorIds);
   cleanups.forEach(f=>f());
 });

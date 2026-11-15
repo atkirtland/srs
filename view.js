@@ -1902,8 +1902,10 @@
   var SCHEDULER_VERSION = "ts-fsrs@5.2.3/FSRS-6";
   var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   var DEVICE = /^(?:anki|computer|android|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
-  function validateOptions(options) {
-    if (!options || options.algorithm !== "FSRS-6" || options.enable_fuzz !== false || !Number.isFinite(options.desired_retention) || options.desired_retention <= 0 || options.desired_retention >= 1 || !Number.isInteger(options.maximum_interval) || options.maximum_interval < 1 || options.maximum_interval > 36500 || !Number.isInteger(options.new_cards_per_day) || options.new_cards_per_day < 0) throw Error("Unsupported scheduler configuration");
+  var SCHEDULER_CONFIG_ID = /^[0-9a-f]{64}$/;
+  function validateOptions(options, requireDailyLimit = true) {
+    if (!options || options.algorithm !== "FSRS-6" || options.enable_fuzz !== false || !Number.isFinite(options.desired_retention) || options.desired_retention <= 0 || options.desired_retention >= 1 || !Number.isInteger(options.maximum_interval) || options.maximum_interval < 1 || options.maximum_interval > 36500 ||
+        (requireDailyLimit || options.new_cards_per_day !== undefined) && (!Number.isInteger(options.new_cards_per_day) || options.new_cards_per_day < 0)) throw Error("Unsupported scheduler configuration");
   }
   function scheduler(options) {
     validateOptions(options);
@@ -1941,6 +1943,18 @@
     if (state.last_review !== void 0 && !Number.isFinite(state.last_review)) throw Error("Invalid last_review");
   }
   function validateEvent(event, importId) {
+    if (event?.format_version === 2 && event.kind === "card_settings") {
+      if (!UUID.test(event.id) || !DEVICE.test(event.device_id) || typeof event.card_id !== "string" || !event.card_id ||
+          !Number.isSafeInteger(event.time_ms) || event.time_ms < 0 || !event.changes || typeof event.changes !== "object" || Array.isArray(event.changes) ||
+          !Object.keys(event.changes).length) throw Error("Invalid card settings event");
+      for (const [key,value] of Object.entries(event.changes)) {
+        if (!["suspended","tags"].includes(key)) throw Error(`Unknown card setting: ${key}`);
+        if (value === null) continue;
+        if (key === "suspended" && typeof value !== "boolean" || key === "tags" &&
+            (!Array.isArray(value) || value.some(tag=>typeof tag!=="string" || !tag.trim()) || new Set(value).size!==value.length)) throw Error(`Invalid card setting: ${key}`);
+      }
+      return event;
+    }
     if (event?.format_version === 2 && ["historical_review", "scheduling_baseline"].includes(event.kind)) {
       if (typeof event.id !== "string" || !Number.isSafeInteger(event.review_time_ms) || !DEVICE.test(event.device_id)) throw Error("Invalid imported event");
       if (event.kind === "historical_review") {
@@ -1952,10 +1966,15 @@
       return event;
     }
     if (event?.format_version === 2 && event.kind !== "answer") throw Error("Unknown event kind");
-    if (!event || ![1, 2].includes(event.format_version) || !UUID.test(event.id) || !DEVICE.test(event.device_id) || (typeof event.card_id !== "string" || !event.card_id) || event.import_id !== importId || ![SCHEDULER_VERSION, "ts-fsrs@5.2.3/FSRS-6"].includes(event.scheduler_version) || ![1, 2, 3, 4].includes(event.rating) || !Number.isSafeInteger(event.review_time_ms) || event.review_time_ms < 0 || !Number.isFinite(event.duration_ms) || event.duration_ms < 0 || typeof event.was_new !== "boolean" || typeof event.parent !== "string" || !event.scheduler_config || event.scheduler_config.algorithm !== "FSRS-6") throw Error("Invalid or incompatible review event");
+    if (!event || ![1, 2].includes(event.format_version) || !UUID.test(event.id) || !DEVICE.test(event.device_id) || (typeof event.card_id !== "string" || !event.card_id) || event.import_id !== importId || ![1, 2, 3, 4].includes(event.rating) || !Number.isSafeInteger(event.review_time_ms) || event.review_time_ms < 0 || !Number.isFinite(event.duration_ms) || event.duration_ms < 0 || typeof event.was_new !== "boolean" || typeof event.parent !== "string") throw Error("Invalid or incompatible review event");
     validateState(event.state);
     if (!UUID.test(event.parent) && event.parent !== `import:${importId}:${event.card_id}`) throw Error("Invalid parent state reference");
-    validateOptions(event.scheduler_config);
+    if (Object.hasOwn(event,"scheduler_config_id")) {
+      if(event.format_version!==2 || typeof event.scheduler_config_id!=="string" || !SCHEDULER_CONFIG_ID.test(event.scheduler_config_id) || Object.hasOwn(event,"scheduler_config") || Object.hasOwn(event,"scheduler_version"))throw Error("Invalid scheduler configuration reference");
+    } else {
+      if(event.scheduler_version!==SCHEDULER_VERSION)throw Error("Unsupported scheduler version");
+      validateOptions(event.scheduler_config);
+    }
     if (event.state.last_review !== event.review_time_ms) throw Error("Review timestamp and state disagree");
     return event;
   }
@@ -2116,6 +2135,36 @@
     const data = await crypto.subtle.digest("SHA-256", encoder.encode(text));
     return Array.from(new Uint8Array(data), (byte) => byte.toString(16).padStart(2, "0")).join("");
   }
+  function validateSchedulerConfig(document) {
+    if(!document || document.scheduler_version!==SCHEDULER_VERSION)throw Error("Unsupported scheduler version");
+    validateOptions(document.settings,false);
+    const weights=document.settings.weights;
+    if(weights!==undefined && (!Array.isArray(weights) || ![17,19,21].includes(weights.length) || weights.some(value=>!Number.isFinite(value)) || !document.settings.parameter_policy))throw Error("Unsupported trained scheduler parameters");
+  }
+  async function verifySchedulerConfig(id,text) {
+    if(typeof id!=="string" || !SCHEDULER_CONFIG_ID.test(id))throw Error("Invalid scheduler configuration reference");
+    if(text===null || text===undefined)throw Error(`Missing scheduler configuration: ${id}`);
+    let document;
+    try{document=JSON.parse(text);}catch{throw Error(`Malformed scheduler configuration: ${id}`);}
+    if(await hash(canonical(document))!==id)throw Error(`Scheduler configuration hash mismatch: ${id}`);
+    validateSchedulerConfig(document);
+    return document;
+  }
+  async function saveSchedulerConfig(store,directory,settings,schedulerVersion=SCHEDULER_VERSION) {
+    // Daily allowances and preset labels do not affect an answer's calculation.
+    const {new_cards_per_day,preset_id,...parameters}=settings;
+    const document=JSON.parse(JSON.stringify({scheduler_version:schedulerVersion,settings:parameters}));
+    validateSchedulerConfig(document);
+    const text=canonical(document), id=await hash(text), path=`${directory}/${id}.json`;
+    if(await store.read(path)===null) {
+      if(store.mkdir)await store.mkdir(directory);
+      try{await store.create(path,text+"\n");}
+      catch(error){if(await store.read(path)===null)throw error;}
+    }
+    // Never overwrite an existing file, including a corrupt or conflicting copy.
+    await verifySchedulerConfig(id,await store.read(path));
+    return id;
+  }
   function compare(a, b) {
     return a.review_time_ms - b.review_time_ms || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   }
@@ -2135,7 +2184,7 @@
   async function appendReview(store, directory, event, limit = LOG_LIMIT) {
     const line = JSON.stringify(event) + "\n";
     if (bytes(line) > limit) throw Error("Review record exceeds log size limit");
-    const month = new Date(event.review_time_ms).toISOString().slice(0, 7);
+    const month = new Date(event.kind === "card_settings" ? event.time_ms : event.review_time_ms).toISOString().slice(0, 7);
     let part = 1;
     if (store.list) {
       const stem = `${event.device_id}-${month}`;
@@ -2207,10 +2256,10 @@
     }
     static async open(name, importId, timing, factory = globalThis.indexedDB) {
       if (!factory) throw Error("IndexedDB is unavailable; a persistent local review index is required");
-      const opening = factory.open(name, 2);
+      const opening = factory.open(name, 3);
       opening.onupgradeneeded = () => {
         const db = opening.result;
-        for (const name2 of ["meta", "files", "seen", "latest", "baselines"]) if (!db.objectStoreNames.contains(name2)) db.createObjectStore(name2);
+        for (const name2 of ["meta", "files", "seen", "latest", "baselines", "card_settings"]) if (!db.objectStoreNames.contains(name2)) db.createObjectStore(name2);
         if (!db.objectStoreNames.contains("observations")) {
           const observations = db.createObjectStore("observations", {keyPath: "id"});
           observations.createIndex("card_id", "card_id");
@@ -2244,13 +2293,17 @@
       return transaction(this.database, [store], "readwrite", (tx) => request(tx.objectStore(store).put(value, key)));
     }
     async clear() {
-      await transaction(this.database, ["files", "seen", "latest", "introduced", "baselines", "observations", "activity"], "readwrite", async (tx) => {
-        await Promise.all(["files", "seen", "latest", "introduced", "baselines", "observations", "activity"].map((name) => request(tx.objectStore(name).clear())));
+      await transaction(this.database, ["files", "seen", "latest", "introduced", "baselines", "observations", "activity", "card_settings"], "readwrite", async (tx) => {
+        await Promise.all(["files", "seen", "latest", "introduced", "baselines", "observations", "activity", "card_settings"].map((name) => request(tx.objectStore(name).clear())));
       });
     }
     async latest() {
       const events = await transaction(this.database, ["latest"], "readonly", (tx) => request(tx.objectStore("latest").getAll()));
       return new Map(events.map((event) => [event.card_id, event]));
+    }
+    async cardSettings() {
+      const rows=await transaction(this.database,["card_settings"],"readonly",tx=>request(tx.objectStore("card_settings").getAll()));
+      return new Map(rows.map(row=>[row.card_id,Object.fromEntries(Object.entries(row.fields).filter(([,field])=>field.value!==null).map(([key,field])=>[key,field.value]))]));
     }
     async introducedToday(now) {
       const day = studyDay(now, this.timing);
@@ -2263,19 +2316,36 @@
       const day=studyDay(now,this.timing);
       return transaction(this.database,["activity"],"readonly",tx=>request(tx.objectStore("activity").index("day").getAll(day)));
     }
-    async ingest(events, knownCards) {
+    async ingest(events, knownCards, {readSchedulerConfig, configs = new Map()} = {}) {
       const records = await Promise.all(events.map(async (event) => {
         validateEvent(event, this.importId);
+        if(event.scheduler_config_id) {
+          const id=event.scheduler_config_id;
+          if(!readSchedulerConfig)throw Error(`Missing scheduler configuration reader: ${id}`);
+          if(!configs.has(id))configs.set(id,(async()=>verifySchedulerConfig(id,await readSchedulerConfig(id)))());
+          await configs.get(id);
+        }
         if (event.kind !== "historical_review" && !knownCards.has(event.card_id)) throw Error(`Unknown review card: ${event.card_id}`);
-        return { event, hash: await hash(canonical(event)), day: event.was_new ? studyDay(event.review_time_ms, this.timing) : null };
+        return { event, hash: await hash(canonical(event)), day: event.kind !== "card_settings" && event.was_new ? studyDay(event.review_time_ms, this.timing) : null };
       }));
-      await transaction(this.database, ["seen", "latest", "introduced", "observations", "activity"], "readwrite", async (tx) => {
+      await transaction(this.database, ["seen", "latest", "introduced", "observations", "activity", "card_settings"], "readwrite", async (tx) => {
         const seen = tx.objectStore("seen"), latest = tx.objectStore("latest");
         for (const record of records) {
           const previous = await request(seen.get(record.event.id));
           if (previous && previous !== record.hash) throw Error(`Conflicting contents for event ${record.event.id}`);
           if (previous) continue;
           await request(seen.put(record.hash, record.event.id));
+          if (record.event.kind === "card_settings") {
+            const event=record.event, settings=tx.objectStore("card_settings");
+            const row=await request(settings.get(event.card_id)) || {card_id:event.card_id,fields:{}};
+            for(const [key,value] of Object.entries(event.changes)) {
+              const old=row.fields[key];
+              if(!old || event.time_ms>old.time_ms || event.time_ms===old.time_ms && event.id>old.id)
+                row.fields[key]={value,time_ms:event.time_ms,id:event.id};
+            }
+            await request(settings.put(row,event.card_id));
+            continue;
+          }
           if (record.event.kind === "historical_review") {
             if (record.event.card_id) await request(tx.objectStore("observations").put(record.event));
             continue;
@@ -2293,7 +2363,8 @@
      * Checkpoints commit only after every event in that file has been indexed.
      */
     async sync(files, read, knownCards, { progress = () => {
-    }, force = /* @__PURE__ */ new Set() } = {}) {
+    }, force = /* @__PURE__ */ new Set(), readSchedulerConfig } = {}) {
+      const configs=new Map();
       const cached = await transaction(this.database, ["files"], "readonly", async (tx) => {
         const store = tx.objectStore("files");
         const keys = await request(store.getAllKeys());
@@ -2318,7 +2389,7 @@
           if (text.length >= old.length && await hash(text.slice(0, old.length)) === old.hash) start = old.length;
           else {
             await this.clear();
-            const result = await this.sync(files, read, knownCards, { progress });
+            const result = await this.sync(files, read, knownCards, { progress, readSchedulerConfig });
             return { ...result, rebuilt: true };
           }
         }
@@ -2335,12 +2406,12 @@
           }
           parsed++;
           if (batch.length === 500) {
-            await this.ingest(batch, knownCards);
+            await this.ingest(batch, knownCards, {readSchedulerConfig,configs});
             batch = [];
             progress(parsed, file.path);
           }
         }
-        if (batch.length) await this.ingest(batch, knownCards);
+        if (batch.length) await this.ingest(batch, knownCards, {readSchedulerConfig,configs});
         await this.put("files", file.path, { mtime: file.stat?.mtime, size: file.stat?.size, length: text.length, hash: await hash(text) });
         progress(parsed, file.path);
       }
@@ -2501,10 +2572,15 @@ function prepareTaxonomy(notes) {
 function dayNumber(now, timing) {
   return Math.round((Date.parse(studyDay(now, timing)) - Date.parse(timing.day_zero)) / 86400000);
 }
+function cardSuspended(card, value) {
+  return card.card_settings?.suspended ?? ((value?.state?.queue ?? card.queue) === -1);
+}
 function queueKind(card, value, manifest, now, today = dayNumber(now, manifest.timing)) {
-  if (card.retired) return null;
+  if (card.retired || card.card_settings?.suspended === true) return null;
   const state = value?.state;
   let q = state?.queue ?? card.queue;
+  if (q === -1 && card.card_settings?.suspended === false)
+    q = card.card_type === 0 ? 0 : card.card_type === 2 ? 2 : card.scheduling?.due > 1e9 ? 1 : 3;
   const lastUnburied = manifest.scheduling?.collection.lastUnburied ?? 0;
   if ((q === -2 || q === -3) && (today > lastUnburied || today + 7 < lastUnburied))
     q = card.card_type === 0 ? 0 : card.card_type === 2 ? 2 : card.scheduling?.due > 1e9 ? 1 : 3;
@@ -2714,8 +2790,8 @@ function studyDayStart(day, timing) {
 
   if (globalThis.__SRS_TEST__) {
     globalThis.SRS = {schedulerV2, effectiveSettings, renderV2, transformField, fieldsFromNote,
-      deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber,
-      ReviewIndex, appendReview, validateEvent, parseCSV, indexRows, configuredCards, initialState};
+      deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
+      ReviewIndex, appendReview, validateEvent, saveSchedulerConfig, verifySchedulerConfig, parseCSV, indexRows, configuredCards, initialState};
     return;
   }
   (async () => {
@@ -2725,6 +2801,7 @@ function studyDayStart(day, timing) {
     const host = dv.container.createDiv({cls:"ankobs-srs"});
     const notice = host.createDiv(), controls = host.createDiv();
     const home = controls.createEl("button",{text:"Decks"});
+    const manage = controls.createEl("button",{text:"Cards"});
     const select = controls.createEl("select");
     const deviceSelect = controls.createEl("select",{attr:{"aria-label":"This device"}});
     const refresh = controls.createEl("button",{text:"Refresh"});
@@ -2738,6 +2815,7 @@ function studyDayStart(day, timing) {
     let manifest, cards = [], config, index, states, shown, configKey, started = 0;
     let busy = false, disposed = false, refreshTimer, pending = false, selectedDeck = null;
     let reviewing = Boolean(input?.group);
+    let managing=false, managerQuery="", managerStatus="all", managerDeck="", editedCardId=null, managerDirty=false;
     let deviceId = input?.device || localStorage.getItem(`${identity}:device-name`);
     if (!["computer","android"].includes(deviceId))deviceId=/Android/i.test(globalThis.navigator?.userAgent||"")?"android":"computer";
     for(const name of ["computer","android"])deviceSelect.createEl("option",{value:name,text:`Device: ${name}`});
@@ -2749,6 +2827,7 @@ function studyDayStart(day, timing) {
       async list(directory) {return api.vault.getFiles().filter(f=>f.path.startsWith(directory+"/"));},
       async read(path) {const f=api.vault.getAbstractFileByPath(path);return f ? api.vault.read(f) : null;},
       async create(path,text) {await api.vault.create(path,text);},
+      async mkdir(path) {if(!api.vault.getAbstractFileByPath(path))try{await api.vault.createFolder(path);}catch(error){if(!api.vault.getAbstractFileByPath(path))throw error;}},
       async append(path,text) {const f=api.vault.getAbstractFileByPath(path);if(!f)throw Error(`Missing log: ${path}`);await api.vault.append(f,text);}
     };
     async function json(path) {const text=await store.read(path);if(text===null)throw Error(`Missing SRS file: ${path}`);return JSON.parse(text);}
@@ -2760,7 +2839,8 @@ function studyDayStart(day, timing) {
     async function syncIndex() {
       const force=new Set([...dirty].filter(p=>p.startsWith(`${dataRoot}/reviews/`)));
       await index.sync(logFiles(),async f=>{const t=await store.read(f.path);if(t===null)throw Error(`Log disappeared: ${f.path}`);return t;},new Set(cards.map(c=>c.id)),{
-        force, progress:n=>{if(!disposed && n>=500)notice.textContent=`Indexing reviews: ${n.toLocaleString()}…`;}
+        force, readSchedulerConfig:id=>store.read(`${dataRoot}/scheduler-configs/${id}.json`),
+        progress:n=>{if(!disposed && n>=500)notice.textContent=`Indexing reviews: ${n.toLocaleString()}…`;}
       });
       for(const path of force)dirty.delete(path);
     }
@@ -2890,17 +2970,100 @@ function studyDayStart(day, timing) {
       };
       details.ontoggle=()=>{if(details.open && offset===0)page();};
     }
+    function openCardSettings(card) {
+      managing=true;editedCardId=card.id;managerDirty=false;guardedDraw();
+    }
+    function showCardManager(available) {
+      homepage.createEl("h3",{text:"Cards"});
+      const filters=homepage.createDiv({cls:"srs-card-filters"});
+      const search=filters.createEl("input",{type:"search",value:managerQuery,attr:{placeholder:"Search cards, sources, templates, or tags","aria-label":"Search cards"}});
+      const status=filters.createEl("select",{attr:{"aria-label":"Card status"}});
+      for(const [value,text] of [["all","All cards"],["active","Active cards"],["suspended","Suspended cards"]])status.createEl("option",{value,text});
+      status.value=managerStatus;
+      const deck=filters.createEl("select",{attr:{"aria-label":"Card deck"}});
+      deck.createEl("option",{value:"",text:"All decks"});
+      for(const d of Object.values(manifest.scheduling?.decks||{}).sort((a,b)=>a.name.localeCompare(b.name)))deck.createEl("option",{value:d.id,text:d.name});
+      deck.value=managerDeck;
+      const editor=homepage.createDiv({cls:"srs-card-editor"}), summary=homepage.createDiv(), list=homepage.createDiv();
+      const entries=available.map(card=>({card,text:[card.id,card.note_uid,card.anki_notetype,card.template_key,card.source?.path,...(card.source?.candidates||[]),
+        manifest.scheduling?.decks[card.deck_id]?.name,card.frontText,card.backText,card.content_error,...(card.card_settings?.tags||[])].join(" ").toLocaleLowerCase()}));
+      const label=card=>(card.frontText||card.note_uid||card.id).replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().slice(0,140);
+      function edit(card) {
+        editedCardId=card.id;managerDirty=false;editor.empty();
+        editor.createEl("h4",{text:label(card)});
+        editor.createEl("p",{text:`${card.anki_notetype||"Card"} · ${card.template_key||`ordinal ${card.anki_ordinal}`} · ${card.id}`});
+        if(card.source?.path)editor.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
+        if(card.content_error)editor.createEl("p",{text:card.content_error,cls:"srs-errors"});
+        const suspension=editor.createEl("label",{text:"Suspended "});
+        const suspended=suspension.createEl("input",{type:"checkbox"});
+        const originalSuspended=cardSuspended(card,states.get(card.id));suspended.checked=originalSuspended;
+        const tagLabel=editor.createEl("label",{text:"Card tags (comma-separated)"});
+        const tags=tagLabel.createEl("input",{type:"text",value:(card.card_settings?.tags||[]).join(", ")});
+        suspended.onchange=tags.oninput=()=>{managerDirty=true;};
+        const buttons=editor.createDiv();
+        buttons.createEl("button",{text:"Save card settings"}).onclick=()=>{
+          const changes={}, nextTags=[...new Set(tags.value.split(",").map(t=>t.trim()).filter(Boolean))];
+          if(suspended.checked!==originalSuspended)changes.suspended=suspended.checked;
+          if(canonical(nextTags)!==canonical(card.card_settings?.tags||[]))changes.tags=nextTags;
+          return saveCardSettings(card,changes);
+        };
+        buttons.createEl("button",{text:"Use imported defaults"}).onclick=()=>saveCardSettings(card,{suspended:null,tags:null});
+        buttons.createEl("button",{text:"Close settings"}).onclick=()=>{editor.empty();editedCardId=null;managerDirty=false;};
+      }
+      function renderList() {
+        list.empty();
+        const terms=managerQuery.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+        const deckName=manifest.scheduling?.decks[managerDeck]?.name;
+        const matches=entries.filter(({card,text})=>!card.retired && terms.every(term=>text.includes(term)) &&
+          (managerStatus==="all" || cardSuspended(card,states.get(card.id))===(managerStatus==="suspended")) &&
+          (!deckName || manifest.scheduling.decks[card.deck_id]?.name===deckName || manifest.scheduling.decks[card.deck_id]?.name.startsWith(deckName+"::")));
+        summary.textContent=`${matches.length.toLocaleString()} matching cards`;
+        let offset=0, more;
+        const page=()=>{
+          if(more)more.remove();
+          for(const {card} of matches.slice(offset,offset+50)) {
+            const row=list.createDiv({cls:"srs-card-row"});
+            row.createEl("button",{text:label(card)}).onclick=()=>edit(card);
+            row.createEl("span",{text:`${cardSuspended(card,states.get(card.id))?"Suspended":"Active"} · ${card.template_key||card.anki_ordinal} · ${manifest.scheduling?.decks[card.deck_id]?.name||""}${card.card_settings?.tags?.length?" · "+card.card_settings.tags.join(", "):""}`});
+          }
+          offset+=50;
+          if(offset<matches.length){more=list.createEl("button",{text:"Show more cards"});more.onclick=page;}
+        };page();
+      }
+      search.oninput=()=>{managerQuery=search.value;renderList();};
+      status.onchange=()=>{managerStatus=status.value;renderList();};
+      deck.onchange=()=>{managerDeck=deck.value;renderList();};
+      renderList();
+      const selected=available.find(card=>card.id===editedCardId);if(selected)edit(selected);
+    }
+    async function saveCardSettings(card,changes) {
+      if(busy)return;
+      if(!Object.keys(changes).length){notice.textContent="No settings changed.";return;}
+      busy=true;homepage.querySelectorAll("button").forEach(button=>button.disabled=true);
+      try {
+        await withStoreLock(identity,async()=>{
+          if((await json(`${dataRoot}/manifest.json`)).revision!==manifest.revision)throw Error("Catalog changed; reopen the view");
+          await syncIndex();
+          const event={format_version:2,kind:"card_settings",id:crypto.randomUUID(),device_id:deviceId,card_id:card.id,time_ms:Date.now(),changes};
+          validateEvent(event,manifest.import_id);
+          dirty.add(await appendReview(store,`${dataRoot}/reviews`,event));await syncIndex();
+        });
+        managerDirty=false;await draw();notice.textContent="Card settings saved.";
+      }catch(e){message(e);homepage.querySelectorAll("button").forEach(button=>button.disabled=false);}
+      finally{busy=false;if(pending && !managerDirty){pending=false;scheduleRefresh();}}
+    }
     async function draw() {
       if(disposed)return;
       clearCard();counts.empty();notice.textContent="";
       if((await json(`${dataRoot}/manifest.json`)).revision!==manifest.revision)throw Error("Card catalog changed; reopen this view");
       config=await json(`${root}/config.json`);configKey=canonical(config);
-      const snapshot=await withStoreLock(identity,async()=>{await syncIndex();return {latest:await index.latest(),activity:await index.activityToday(Date.now())};});
-      const available=await readSources();states=new Map();
+      const snapshot=await withStoreLock(identity,async()=>{await syncIndex();return {latest:await index.latest(),activity:await index.activityToday(Date.now()),settings:await index.cardSettings()};});
+      const available=(await readSources()).map(card=>({...card,card_settings:snapshot.settings.get(card.id)||{}}));states=new Map();
       for(const card of available) {
         const projection=card.baseline || {state:card.queue===0?State.New:card.card_type===3?State.Relearning:card.queue===2?State.Review:State.Learning,due:card.due_ms,queue:card.queue,anki_due:card.anki_due};
         states.set(card.id,current(card,projection,snapshot.latest.get(card.id)));
       }
+      if(managing){showCardManager(available);return;}
       const queue=reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value,undefined,selectedDeck,skipped);
       const errors=contentProblems(available).length;
       if(!reviewing && manifest.scheduling) {
@@ -2921,6 +3084,7 @@ function studyDayStart(day, timing) {
       shown=card;started=Date.now();
       const skip=()=>{skipped.add(card.id);guardedDraw();};
       actions.createEl("button",{text:"Bury"}).onclick=skip;
+      source.createEl("button",{text:"Card settings"}).onclick=()=>openCardSettings(card);
       if(card.source?.path)source.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
       if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       dv.el("div",card.frontText,{container:front});
@@ -2949,16 +3113,18 @@ function studyDayStart(day, timing) {
           if((await json(`${dataRoot}/manifest.json`)).revision!==manifest.revision)throw Error("Catalog changed; reopen the view");
           if(canonical(await json(`${root}/config.json`))!==configKey)return "Configuration changed. Queue refreshed.";
           await syncIndex();
+          if(canonical((await index.cardSettings()).get(card.id)||{})!==canonical(card.card_settings))return "Card settings changed. Queue refreshed.";
           const value=current(card,states.get(card.id).state,await index.get("latest",card.id));
           if(value.parent!==states.get(card.id).parent)return "Card reviewed on another device. Queue refreshed.";
           const live=await resolveSource(card);
           if(canonical(live.fields)!==canonical(card.fields))return "Source changed. Queue refreshed.";
           const now=Date.now(),options=effectiveSettings(card,manifest);
+          const next=nextStateV2(card,value.state,options,manifest,now,rating);
+          const schedulerConfigId=await saveSchedulerConfig(store,`${dataRoot}/scheduler-configs`,options);
           const event={format_version:2,kind:"answer",id:crypto.randomUUID(),device_id:deviceId,card_id:card.id,
             deck_id:card.original_deck_id||card.deck_id,import_id:manifest.import_id,parent:value.parent,
             review_time_ms:now,duration_ms:Math.max(0,now-started),rating,was_new:value.state.state===State.New,
-            was_review:value.state.state===State.Review,scheduler_version:SCHEDULER_VERSION,
-            scheduler_config:options,state:nextStateV2(card,value.state,options,manifest,now,rating)};
+            was_review:value.state.state===State.Review,scheduler_config_id:schedulerConfigId,state:next};
           validateEvent(event,manifest.import_id);
           dirty.add(await appendReview(store,`${dataRoot}/reviews`,event));await syncIndex();return null;
         });
@@ -2966,11 +3132,20 @@ function studyDayStart(day, timing) {
       }catch(e){clearCard();message(e);notice.textContent+=" — review paused. Refresh to retry.";}
       finally{busy=false;if(pending){pending=false;scheduleRefresh();}}
     }
-    async function guardedDraw(){if(busy){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
-    function scheduleRefresh(file,oldPath){if(disposed)return;if(file){dirty.add(file.path);if(oldPath)dirty.add(oldPath);if(!file.path.startsWith(`${dataRoot}/reviews/`) || (oldPath && !oldPath.startsWith(`${dataRoot}/reviews/`)))sourceGeneration++;}clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);}
-    home.onclick=()=>{reviewing=false;selectedDeck=null;guardedDraw();};
-    select.onchange=()=>{reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
-    refresh.onclick=()=>{cache.clear();sourceGeneration++;guardedDraw();};
+    async function guardedDraw(){if(busy || managing && managerDirty){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
+    function scheduleRefresh(file,oldPath){
+      if(disposed)return;
+      if(file){
+        dirty.add(file.path);if(oldPath)dirty.add(oldPath);
+        const contentChange=path=>!path.startsWith(`${dataRoot}/reviews/`) && path!==`${dataRoot}/scheduler-configs` && !path.startsWith(`${dataRoot}/scheduler-configs/`);
+        if(contentChange(file.path) || oldPath && contentChange(oldPath))sourceGeneration++;
+      }
+      clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);
+    }
+    home.onclick=()=>{managing=false;managerDirty=false;reviewing=false;selectedDeck=null;guardedDraw();};
+    manage.onclick=()=>{managing=true;managerDirty=false;guardedDraw();};
+    select.onchange=()=>{managing=false;managerDirty=false;reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
+    refresh.onclick=()=>{if(managing && managerDirty){notice.textContent="Save or close the card settings before refreshing.";return;}cache.clear();sourceGeneration++;guardedDraw();};
     rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     try {
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");

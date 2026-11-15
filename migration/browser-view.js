@@ -5,6 +5,7 @@
     const host = dv.container.createDiv({cls:"ankobs-srs"});
     const notice = host.createDiv(), controls = host.createDiv();
     const home = controls.createEl("button",{text:"Decks"});
+    const manage = controls.createEl("button",{text:"Cards"});
     const select = controls.createEl("select");
     const deviceSelect = controls.createEl("select",{attr:{"aria-label":"This device"}});
     const refresh = controls.createEl("button",{text:"Refresh"});
@@ -18,6 +19,7 @@
     let manifest, cards = [], config, index, states, shown, configKey, started = 0;
     let busy = false, disposed = false, refreshTimer, pending = false, selectedDeck = null;
     let reviewing = Boolean(input?.group);
+    let managing=false, managerQuery="", managerStatus="all", managerDeck="", editedCardId=null, managerDirty=false;
     let deviceId = input?.device || localStorage.getItem(`${identity}:device-name`);
     if (!["computer","android"].includes(deviceId))deviceId=/Android/i.test(globalThis.navigator?.userAgent||"")?"android":"computer";
     for(const name of ["computer","android"])deviceSelect.createEl("option",{value:name,text:`Device: ${name}`});
@@ -29,6 +31,7 @@
       async list(directory) {return api.vault.getFiles().filter(f=>f.path.startsWith(directory+"/"));},
       async read(path) {const f=api.vault.getAbstractFileByPath(path);return f ? api.vault.read(f) : null;},
       async create(path,text) {await api.vault.create(path,text);},
+      async mkdir(path) {if(!api.vault.getAbstractFileByPath(path))try{await api.vault.createFolder(path);}catch(error){if(!api.vault.getAbstractFileByPath(path))throw error;}},
       async append(path,text) {const f=api.vault.getAbstractFileByPath(path);if(!f)throw Error(`Missing log: ${path}`);await api.vault.append(f,text);}
     };
     async function json(path) {const text=await store.read(path);if(text===null)throw Error(`Missing SRS file: ${path}`);return JSON.parse(text);}
@@ -40,7 +43,8 @@
     async function syncIndex() {
       const force=new Set([...dirty].filter(p=>p.startsWith(`${dataRoot}/reviews/`)));
       await index.sync(logFiles(),async f=>{const t=await store.read(f.path);if(t===null)throw Error(`Log disappeared: ${f.path}`);return t;},new Set(cards.map(c=>c.id)),{
-        force, progress:n=>{if(!disposed && n>=500)notice.textContent=`Indexing reviews: ${n.toLocaleString()}…`;}
+        force, readSchedulerConfig:id=>store.read(`${dataRoot}/scheduler-configs/${id}.json`),
+        progress:n=>{if(!disposed && n>=500)notice.textContent=`Indexing reviews: ${n.toLocaleString()}…`;}
       });
       for(const path of force)dirty.delete(path);
     }
@@ -170,17 +174,100 @@
       };
       details.ontoggle=()=>{if(details.open && offset===0)page();};
     }
+    function openCardSettings(card) {
+      managing=true;editedCardId=card.id;managerDirty=false;guardedDraw();
+    }
+    function showCardManager(available) {
+      homepage.createEl("h3",{text:"Cards"});
+      const filters=homepage.createDiv({cls:"srs-card-filters"});
+      const search=filters.createEl("input",{type:"search",value:managerQuery,attr:{placeholder:"Search cards, sources, templates, or tags","aria-label":"Search cards"}});
+      const status=filters.createEl("select",{attr:{"aria-label":"Card status"}});
+      for(const [value,text] of [["all","All cards"],["active","Active cards"],["suspended","Suspended cards"]])status.createEl("option",{value,text});
+      status.value=managerStatus;
+      const deck=filters.createEl("select",{attr:{"aria-label":"Card deck"}});
+      deck.createEl("option",{value:"",text:"All decks"});
+      for(const d of Object.values(manifest.scheduling?.decks||{}).sort((a,b)=>a.name.localeCompare(b.name)))deck.createEl("option",{value:d.id,text:d.name});
+      deck.value=managerDeck;
+      const editor=homepage.createDiv({cls:"srs-card-editor"}), summary=homepage.createDiv(), list=homepage.createDiv();
+      const entries=available.map(card=>({card,text:[card.id,card.note_uid,card.anki_notetype,card.template_key,card.source?.path,...(card.source?.candidates||[]),
+        manifest.scheduling?.decks[card.deck_id]?.name,card.frontText,card.backText,card.content_error,...(card.card_settings?.tags||[])].join(" ").toLocaleLowerCase()}));
+      const label=card=>(card.frontText||card.note_uid||card.id).replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().slice(0,140);
+      function edit(card) {
+        editedCardId=card.id;managerDirty=false;editor.empty();
+        editor.createEl("h4",{text:label(card)});
+        editor.createEl("p",{text:`${card.anki_notetype||"Card"} · ${card.template_key||`ordinal ${card.anki_ordinal}`} · ${card.id}`});
+        if(card.source?.path)editor.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
+        if(card.content_error)editor.createEl("p",{text:card.content_error,cls:"srs-errors"});
+        const suspension=editor.createEl("label",{text:"Suspended "});
+        const suspended=suspension.createEl("input",{type:"checkbox"});
+        const originalSuspended=cardSuspended(card,states.get(card.id));suspended.checked=originalSuspended;
+        const tagLabel=editor.createEl("label",{text:"Card tags (comma-separated)"});
+        const tags=tagLabel.createEl("input",{type:"text",value:(card.card_settings?.tags||[]).join(", ")});
+        suspended.onchange=tags.oninput=()=>{managerDirty=true;};
+        const buttons=editor.createDiv();
+        buttons.createEl("button",{text:"Save card settings"}).onclick=()=>{
+          const changes={}, nextTags=[...new Set(tags.value.split(",").map(t=>t.trim()).filter(Boolean))];
+          if(suspended.checked!==originalSuspended)changes.suspended=suspended.checked;
+          if(canonical(nextTags)!==canonical(card.card_settings?.tags||[]))changes.tags=nextTags;
+          return saveCardSettings(card,changes);
+        };
+        buttons.createEl("button",{text:"Use imported defaults"}).onclick=()=>saveCardSettings(card,{suspended:null,tags:null});
+        buttons.createEl("button",{text:"Close settings"}).onclick=()=>{editor.empty();editedCardId=null;managerDirty=false;};
+      }
+      function renderList() {
+        list.empty();
+        const terms=managerQuery.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+        const deckName=manifest.scheduling?.decks[managerDeck]?.name;
+        const matches=entries.filter(({card,text})=>!card.retired && terms.every(term=>text.includes(term)) &&
+          (managerStatus==="all" || cardSuspended(card,states.get(card.id))===(managerStatus==="suspended")) &&
+          (!deckName || manifest.scheduling.decks[card.deck_id]?.name===deckName || manifest.scheduling.decks[card.deck_id]?.name.startsWith(deckName+"::")));
+        summary.textContent=`${matches.length.toLocaleString()} matching cards`;
+        let offset=0, more;
+        const page=()=>{
+          if(more)more.remove();
+          for(const {card} of matches.slice(offset,offset+50)) {
+            const row=list.createDiv({cls:"srs-card-row"});
+            row.createEl("button",{text:label(card)}).onclick=()=>edit(card);
+            row.createEl("span",{text:`${cardSuspended(card,states.get(card.id))?"Suspended":"Active"} · ${card.template_key||card.anki_ordinal} · ${manifest.scheduling?.decks[card.deck_id]?.name||""}${card.card_settings?.tags?.length?" · "+card.card_settings.tags.join(", "):""}`});
+          }
+          offset+=50;
+          if(offset<matches.length){more=list.createEl("button",{text:"Show more cards"});more.onclick=page;}
+        };page();
+      }
+      search.oninput=()=>{managerQuery=search.value;renderList();};
+      status.onchange=()=>{managerStatus=status.value;renderList();};
+      deck.onchange=()=>{managerDeck=deck.value;renderList();};
+      renderList();
+      const selected=available.find(card=>card.id===editedCardId);if(selected)edit(selected);
+    }
+    async function saveCardSettings(card,changes) {
+      if(busy)return;
+      if(!Object.keys(changes).length){notice.textContent="No settings changed.";return;}
+      busy=true;homepage.querySelectorAll("button").forEach(button=>button.disabled=true);
+      try {
+        await withStoreLock(identity,async()=>{
+          if((await json(`${dataRoot}/manifest.json`)).revision!==manifest.revision)throw Error("Catalog changed; reopen the view");
+          await syncIndex();
+          const event={format_version:2,kind:"card_settings",id:crypto.randomUUID(),device_id:deviceId,card_id:card.id,time_ms:Date.now(),changes};
+          validateEvent(event,manifest.import_id);
+          dirty.add(await appendReview(store,`${dataRoot}/reviews`,event));await syncIndex();
+        });
+        managerDirty=false;await draw();notice.textContent="Card settings saved.";
+      }catch(e){message(e);homepage.querySelectorAll("button").forEach(button=>button.disabled=false);}
+      finally{busy=false;if(pending && !managerDirty){pending=false;scheduleRefresh();}}
+    }
     async function draw() {
       if(disposed)return;
       clearCard();counts.empty();notice.textContent="";
       if((await json(`${dataRoot}/manifest.json`)).revision!==manifest.revision)throw Error("Card catalog changed; reopen this view");
       config=await json(`${root}/config.json`);configKey=canonical(config);
-      const snapshot=await withStoreLock(identity,async()=>{await syncIndex();return {latest:await index.latest(),activity:await index.activityToday(Date.now())};});
-      const available=await readSources();states=new Map();
+      const snapshot=await withStoreLock(identity,async()=>{await syncIndex();return {latest:await index.latest(),activity:await index.activityToday(Date.now()),settings:await index.cardSettings()};});
+      const available=(await readSources()).map(card=>({...card,card_settings:snapshot.settings.get(card.id)||{}}));states=new Map();
       for(const card of available) {
         const projection=card.baseline || {state:card.queue===0?State.New:card.card_type===3?State.Relearning:card.queue===2?State.Review:State.Learning,due:card.due_ms,queue:card.queue,anki_due:card.anki_due};
         states.set(card.id,current(card,projection,snapshot.latest.get(card.id)));
       }
+      if(managing){showCardManager(available);return;}
       const queue=reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value,undefined,selectedDeck,skipped);
       const errors=contentProblems(available).length;
       if(!reviewing && manifest.scheduling) {
@@ -201,6 +288,7 @@
       shown=card;started=Date.now();
       const skip=()=>{skipped.add(card.id);guardedDraw();};
       actions.createEl("button",{text:"Bury"}).onclick=skip;
+      source.createEl("button",{text:"Card settings"}).onclick=()=>openCardSettings(card);
       if(card.source?.path)source.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
       if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       dv.el("div",card.frontText,{container:front});
@@ -229,16 +317,18 @@
           if((await json(`${dataRoot}/manifest.json`)).revision!==manifest.revision)throw Error("Catalog changed; reopen the view");
           if(canonical(await json(`${root}/config.json`))!==configKey)return "Configuration changed. Queue refreshed.";
           await syncIndex();
+          if(canonical((await index.cardSettings()).get(card.id)||{})!==canonical(card.card_settings))return "Card settings changed. Queue refreshed.";
           const value=current(card,states.get(card.id).state,await index.get("latest",card.id));
           if(value.parent!==states.get(card.id).parent)return "Card reviewed on another device. Queue refreshed.";
           const live=await resolveSource(card);
           if(canonical(live.fields)!==canonical(card.fields))return "Source changed. Queue refreshed.";
           const now=Date.now(),options=effectiveSettings(card,manifest);
+          const next=nextStateV2(card,value.state,options,manifest,now,rating);
+          const schedulerConfigId=await saveSchedulerConfig(store,`${dataRoot}/scheduler-configs`,options);
           const event={format_version:2,kind:"answer",id:crypto.randomUUID(),device_id:deviceId,card_id:card.id,
             deck_id:card.original_deck_id||card.deck_id,import_id:manifest.import_id,parent:value.parent,
             review_time_ms:now,duration_ms:Math.max(0,now-started),rating,was_new:value.state.state===State.New,
-            was_review:value.state.state===State.Review,scheduler_version:SCHEDULER_VERSION,
-            scheduler_config:options,state:nextStateV2(card,value.state,options,manifest,now,rating)};
+            was_review:value.state.state===State.Review,scheduler_config_id:schedulerConfigId,state:next};
           validateEvent(event,manifest.import_id);
           dirty.add(await appendReview(store,`${dataRoot}/reviews`,event));await syncIndex();return null;
         });
@@ -246,11 +336,20 @@
       }catch(e){clearCard();message(e);notice.textContent+=" — review paused. Refresh to retry.";}
       finally{busy=false;if(pending){pending=false;scheduleRefresh();}}
     }
-    async function guardedDraw(){if(busy){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
-    function scheduleRefresh(file,oldPath){if(disposed)return;if(file){dirty.add(file.path);if(oldPath)dirty.add(oldPath);if(!file.path.startsWith(`${dataRoot}/reviews/`) || (oldPath && !oldPath.startsWith(`${dataRoot}/reviews/`)))sourceGeneration++;}clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);}
-    home.onclick=()=>{reviewing=false;selectedDeck=null;guardedDraw();};
-    select.onchange=()=>{reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
-    refresh.onclick=()=>{cache.clear();sourceGeneration++;guardedDraw();};
+    async function guardedDraw(){if(busy || managing && managerDirty){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
+    function scheduleRefresh(file,oldPath){
+      if(disposed)return;
+      if(file){
+        dirty.add(file.path);if(oldPath)dirty.add(oldPath);
+        const contentChange=path=>!path.startsWith(`${dataRoot}/reviews/`) && path!==`${dataRoot}/scheduler-configs` && !path.startsWith(`${dataRoot}/scheduler-configs/`);
+        if(contentChange(file.path) || oldPath && contentChange(oldPath))sourceGeneration++;
+      }
+      clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);
+    }
+    home.onclick=()=>{managing=false;managerDirty=false;reviewing=false;selectedDeck=null;guardedDraw();};
+    manage.onclick=()=>{managing=true;managerDirty=false;guardedDraw();};
+    select.onchange=()=>{managing=false;managerDirty=false;reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
+    refresh.onclick=()=>{if(managing && managerDirty){notice.textContent="Save or close the card settings before refreshing.";return;}cache.clear();sourceGeneration++;guardedDraw();};
     rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     try {
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");

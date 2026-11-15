@@ -149,10 +149,15 @@ function prepareTaxonomy(notes) {
 function dayNumber(now, timing) {
   return Math.round((Date.parse(studyDay(now, timing)) - Date.parse(timing.day_zero)) / 86400000);
 }
+function cardSuspended(card, value) {
+  return card.card_settings?.suspended ?? ((value?.state?.queue ?? card.queue) === -1);
+}
 function queueKind(card, value, manifest, now, today = dayNumber(now, manifest.timing)) {
-  if (card.retired) return null;
+  if (card.retired || card.card_settings?.suspended === true) return null;
   const state = value?.state;
   let q = state?.queue ?? card.queue;
+  if (q === -1 && card.card_settings?.suspended === false)
+    q = card.card_type === 0 ? 0 : card.card_type === 2 ? 2 : card.scheduling?.due > 1e9 ? 1 : 3;
   const lastUnburied = manifest.scheduling?.collection.lastUnburied ?? 0;
   if ((q === -2 || q === -3) && (today > lastUnburied || today + 7 < lastUnburied))
     q = card.card_type === 0 ? 0 : card.card_type === 2 ? 2 : card.scheduling?.due > 1e9 ? 1 : 3;

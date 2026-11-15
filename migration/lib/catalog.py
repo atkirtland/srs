@@ -15,6 +15,21 @@ import scheduling
 LOG_LIMIT = 32 * 1024 * 1024
 
 
+def settings_only_log(path):
+    """Settings survive a baseline replacement; answers still block it."""
+    try:
+        with path.open() as lines:
+            for line in lines:
+                if not line.strip():
+                    continue
+                event = json.loads(line)
+                if not isinstance(event, dict) or event.get("format_version") != 2 or event.get("kind") != "card_settings":
+                    return False
+        return True
+    except (ValueError, OSError):
+        return False
+
+
 def partition_paths(manifest):
     if "partition_count" in manifest:
         count = manifest["partition_count"]
@@ -254,7 +269,7 @@ def publish(data, destination):
             new_reviews = [p for p in (destination / "reviews").glob("*.jsonl")
                            if not any(p.name.startswith(prefix + "-") for prefix in
                                       ("anki", str(uuid.uuid5(uuid.NAMESPACE_URL, f"ankobs:import:{data['collection_key']}"))))]
-            if new_reviews:
+            if any(not settings_only_log(path) for path in new_reviews):
                 raise SRSError("new answers exist: changing the scheduling baseline is blocked")
             import_id = baseline_digest
     device = "anki"

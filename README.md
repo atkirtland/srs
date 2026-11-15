@@ -26,6 +26,21 @@ The first opening indexes review logs in persistent local IndexedDB. Later openi
 process only changed logs. Vault content is resolved once per open view and reused
 while reviewing; source or template changes, or Refresh, invalidate that cache.
 
+Open **Cards** to search questions, answers, source paths, card IDs, templates,
+and card-specific tags. Filter by deck or suspension status, then select a card
+to suspend/restore it or edit its tags. **Card settings** opens the same editor
+from the reviewer. Settings apply to that individual card, including when a note
+generates several cards. **Use imported defaults** removes its explicit overrides.
+Settings are synced in the device's monthly logs and survive reimports; they do
+not change the card's saved schedule or count as studying. Suspension excludes
+the card from review counts and queues until it is restored.
+
+New answers reference an immutable scheduler configuration under
+`data/scheduler-configs/<sha256>.json`. Identical interval settings share a file;
+changed settings create a new one. Existing inline review configurations remain
+readable. These archive files are retained across reimports and should sync with
+the review logs.
+
 ## Take a desktop snapshot
 
 Synchronize and close Anki before copying `collection.anki2`. The importer refuses

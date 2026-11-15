@@ -212,6 +212,38 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(srs.SRSError, "baseline is blocked"):
             srs.publish(changed, destination)
 
+    def test_settings_logs_survive_reimport_and_do_not_block_a_new_baseline(self):
+        data = self.build()
+        destination = self.root / "store"
+        srs.publish(data, destination)
+        previous = json.loads((destination / "manifest.json").read_text())
+        card_id = data["cards"][0]["id"]
+        event = {"format_version": 2, "kind": "card_settings", "id": "11111111-1111-4111-8111-111111111111",
+                 "card_id": card_id, "device_id": "computer", "time_ms": 946684800000,
+                 "changes": {"suspended": True, "tags": ["focused"]}}
+        path = destination / "reviews/computer-2026-11.jsonl"
+        text = json.dumps(event) + "\n"
+        path.write_text(text)
+        archived = destination / "scheduler-configs" / ("a" * 64 + ".json")
+        archived.parent.mkdir()
+        archived.write_text('{"scheduler_version":"retained","settings":{}}\n')
+        archived_bytes = archived.read_bytes()
+        srs.publish(self.build(), destination)
+        self.assertEqual(path.read_text(), text)
+        self.assertEqual(archived.read_bytes(), archived_bytes)
+        changed = self.build()
+        changed["scheduling"]["presets"]["1"]["settings"]["desired_retention"] = .8
+        srs.publish(changed, destination)
+        current = json.loads((destination / "manifest.json").read_text())
+        self.assertNotEqual(previous["import_id"], current["import_id"])
+        self.assertEqual(path.read_text(), text)
+        self.assertEqual(archived.read_bytes(), archived_bytes)
+        self.assertIn(card_id, [c["id"] for p in srs.partition_paths(current)
+                              for c in json.loads((destination / p).read_text())])
+        path.write_text(text + json.dumps({"format_version": 2, "kind": "answer"}) + "\n")
+        with self.assertRaisesRegex(srs.SRSError, "baseline is blocked"):
+            srs.publish(self.build(), destination)
+
     def test_native_backend_all_six_presets_and_four_states(self):
         node = os.environ.get("NODE") or shutil.which("node")
         if not node:

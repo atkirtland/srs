@@ -4,7 +4,8 @@
     {"$ref": "#/$defs/Manifest"},
     {"$ref": "#/$defs/CardPartition"},
     {"$ref": "#/$defs/ImportReport"},
-    {"$ref": "#/$defs/Event"}
+    {"$ref": "#/$defs/Event"},
+    {"$ref": "#/$defs/SchedulerConfig"}
   ],
   "$defs": {
     "Timing": {
@@ -36,7 +37,7 @@
       },
       "required": ["due", "stability", "difficulty", "elapsed_days", "scheduled_days", "reps", "lapses", "learning_steps", "state"]
     },
-    "SchedulerOptions": {
+    "SchedulerParameters": {
       "type": "object",
       "properties": {
         "algorithm": {"const": "FSRS-6"},
@@ -54,8 +55,10 @@
         "preset_id": {"type": "string"},
         "source_anki_version": {"anyOf": [{"type": "string"}, {"type": "null"}]}
       },
-      "required": ["algorithm", "desired_retention", "maximum_interval", "new_cards_per_day", "enable_fuzz"]
+      "required": ["algorithm", "desired_retention", "maximum_interval", "enable_fuzz"]
     },
+    "SchedulerConfig": {"type": "object", "properties": {"scheduler_version": {"const": "ts-fsrs@5.2.3/FSRS-6"}, "settings": {"$ref": "#/$defs/SchedulerParameters"}}, "required": ["scheduler_version", "settings"]},
+    "SchedulerOptions": {"allOf": [{"$ref": "#/$defs/SchedulerParameters"}, {"required": ["new_cards_per_day"]}]},
     "Preset": {
       "type": "object",
       "properties": {"id": {"type": "string"}, "settings": {"$ref": "#/$defs/PresetSettings"}},
@@ -293,6 +296,7 @@
         "rating": {"enum": [1, 2, 3, 4]},
         "was_new": {"type": "boolean"},
         "was_review": {"type": "boolean"},
+        "scheduler_config_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "scheduler_version": {"type": "string"},
         "scheduler_config": {"$ref": "#/$defs/SchedulerOptions"},
         "state": {"$ref": "#/$defs/State"}
@@ -311,10 +315,9 @@
         "rating",
         "was_new",
         "was_review",
-        "scheduler_version",
-        "scheduler_config",
         "state"
-      ]
+      ],
+      "oneOf": [{"required": ["scheduler_version", "scheduler_config"], "not": {"required": ["scheduler_config_id"]}}, {"required": ["scheduler_config_id"], "not": {"anyOf": [{"required": ["scheduler_config"]}, {"required": ["scheduler_version"]}]}}]
     },
     "LegacyAnswer": {
       "type": "object",
@@ -356,7 +359,8 @@
         {"$ref": "#/$defs/HistoricalReview"},
         {"$ref": "#/$defs/SchedulingBaseline"},
         {"$ref": "#/$defs/Answer"},
-        {"$ref": "#/$defs/LegacyAnswer"}
+        {"$ref": "#/$defs/LegacyAnswer"},
+        {"$ref": "#/$defs/CardSettingsEvent"}
       ]
     },
     "ImportReport": {
@@ -419,6 +423,72 @@
         "fsrsShortTermWithStepsEnabled": {"type": ["boolean", "null"]}
       },
       "required": []
+    },
+    "CardSettingsChanges": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "suspended": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "pattern": "\\S"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "CardSettingsEvent": {
+      "type": "object",
+      "properties": {
+        "format_version": {
+          "const": 2
+        },
+        "kind": {
+          "const": "card_settings"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "device_id": {
+          "$ref": "#/$defs/Device"
+        },
+        "card_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "time_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "changes": {
+          "$ref": "#/$defs/CardSettingsChanges"
+        }
+      },
+      "required": [
+        "format_version",
+        "kind",
+        "id",
+        "device_id",
+        "card_id",
+        "time_ms",
+        "changes"
+      ]
     }
   }
 }

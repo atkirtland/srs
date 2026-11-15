@@ -1902,8 +1902,10 @@
   var SCHEDULER_VERSION = "ts-fsrs@5.2.3/FSRS-6";
   var UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   var DEVICE = /^(?:anki|computer|android|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
-  function validateOptions(options) {
-    if (!options || options.algorithm !== "FSRS-6" || options.enable_fuzz !== false || !Number.isFinite(options.desired_retention) || options.desired_retention <= 0 || options.desired_retention >= 1 || !Number.isInteger(options.maximum_interval) || options.maximum_interval < 1 || options.maximum_interval > 36500 || !Number.isInteger(options.new_cards_per_day) || options.new_cards_per_day < 0) throw Error("Unsupported scheduler configuration");
+  var SCHEDULER_CONFIG_ID = /^[0-9a-f]{64}$/;
+  function validateOptions(options, requireDailyLimit = true) {
+    if (!options || options.algorithm !== "FSRS-6" || options.enable_fuzz !== false || !Number.isFinite(options.desired_retention) || options.desired_retention <= 0 || options.desired_retention >= 1 || !Number.isInteger(options.maximum_interval) || options.maximum_interval < 1 || options.maximum_interval > 36500 ||
+        (requireDailyLimit || options.new_cards_per_day !== undefined) && (!Number.isInteger(options.new_cards_per_day) || options.new_cards_per_day < 0)) throw Error("Unsupported scheduler configuration");
   }
   function scheduler(options) {
     validateOptions(options);
@@ -1941,6 +1943,18 @@
     if (state.last_review !== void 0 && !Number.isFinite(state.last_review)) throw Error("Invalid last_review");
   }
   function validateEvent(event, importId) {
+    if (event?.format_version === 2 && event.kind === "card_settings") {
+      if (!UUID.test(event.id) || !DEVICE.test(event.device_id) || typeof event.card_id !== "string" || !event.card_id ||
+          !Number.isSafeInteger(event.time_ms) || event.time_ms < 0 || !event.changes || typeof event.changes !== "object" || Array.isArray(event.changes) ||
+          !Object.keys(event.changes).length) throw Error("Invalid card settings event");
+      for (const [key,value] of Object.entries(event.changes)) {
+        if (!["suspended","tags"].includes(key)) throw Error(`Unknown card setting: ${key}`);
+        if (value === null) continue;
+        if (key === "suspended" && typeof value !== "boolean" || key === "tags" &&
+            (!Array.isArray(value) || value.some(tag=>typeof tag!=="string" || !tag.trim()) || new Set(value).size!==value.length)) throw Error(`Invalid card setting: ${key}`);
+      }
+      return event;
+    }
     if (event?.format_version === 2 && ["historical_review", "scheduling_baseline"].includes(event.kind)) {
       if (typeof event.id !== "string" || !Number.isSafeInteger(event.review_time_ms) || !DEVICE.test(event.device_id)) throw Error("Invalid imported event");
       if (event.kind === "historical_review") {
@@ -1952,10 +1966,15 @@
       return event;
     }
     if (event?.format_version === 2 && event.kind !== "answer") throw Error("Unknown event kind");
-    if (!event || ![1, 2].includes(event.format_version) || !UUID.test(event.id) || !DEVICE.test(event.device_id) || (typeof event.card_id !== "string" || !event.card_id) || event.import_id !== importId || ![SCHEDULER_VERSION, "ts-fsrs@5.2.3/FSRS-6"].includes(event.scheduler_version) || ![1, 2, 3, 4].includes(event.rating) || !Number.isSafeInteger(event.review_time_ms) || event.review_time_ms < 0 || !Number.isFinite(event.duration_ms) || event.duration_ms < 0 || typeof event.was_new !== "boolean" || typeof event.parent !== "string" || !event.scheduler_config || event.scheduler_config.algorithm !== "FSRS-6") throw Error("Invalid or incompatible review event");
+    if (!event || ![1, 2].includes(event.format_version) || !UUID.test(event.id) || !DEVICE.test(event.device_id) || (typeof event.card_id !== "string" || !event.card_id) || event.import_id !== importId || ![1, 2, 3, 4].includes(event.rating) || !Number.isSafeInteger(event.review_time_ms) || event.review_time_ms < 0 || !Number.isFinite(event.duration_ms) || event.duration_ms < 0 || typeof event.was_new !== "boolean" || typeof event.parent !== "string") throw Error("Invalid or incompatible review event");
     validateState(event.state);
     if (!UUID.test(event.parent) && event.parent !== `import:${importId}:${event.card_id}`) throw Error("Invalid parent state reference");
-    validateOptions(event.scheduler_config);
+    if (Object.hasOwn(event,"scheduler_config_id")) {
+      if(event.format_version!==2 || typeof event.scheduler_config_id!=="string" || !SCHEDULER_CONFIG_ID.test(event.scheduler_config_id) || Object.hasOwn(event,"scheduler_config") || Object.hasOwn(event,"scheduler_version"))throw Error("Invalid scheduler configuration reference");
+    } else {
+      if(event.scheduler_version!==SCHEDULER_VERSION)throw Error("Unsupported scheduler version");
+      validateOptions(event.scheduler_config);
+    }
     if (event.state.last_review !== event.review_time_ms) throw Error("Review timestamp and state disagree");
     return event;
   }
@@ -2116,6 +2135,36 @@
     const data = await crypto.subtle.digest("SHA-256", encoder.encode(text));
     return Array.from(new Uint8Array(data), (byte) => byte.toString(16).padStart(2, "0")).join("");
   }
+  function validateSchedulerConfig(document) {
+    if(!document || document.scheduler_version!==SCHEDULER_VERSION)throw Error("Unsupported scheduler version");
+    validateOptions(document.settings,false);
+    const weights=document.settings.weights;
+    if(weights!==undefined && (!Array.isArray(weights) || ![17,19,21].includes(weights.length) || weights.some(value=>!Number.isFinite(value)) || !document.settings.parameter_policy))throw Error("Unsupported trained scheduler parameters");
+  }
+  async function verifySchedulerConfig(id,text) {
+    if(typeof id!=="string" || !SCHEDULER_CONFIG_ID.test(id))throw Error("Invalid scheduler configuration reference");
+    if(text===null || text===undefined)throw Error(`Missing scheduler configuration: ${id}`);
+    let document;
+    try{document=JSON.parse(text);}catch{throw Error(`Malformed scheduler configuration: ${id}`);}
+    if(await hash(canonical(document))!==id)throw Error(`Scheduler configuration hash mismatch: ${id}`);
+    validateSchedulerConfig(document);
+    return document;
+  }
+  async function saveSchedulerConfig(store,directory,settings,schedulerVersion=SCHEDULER_VERSION) {
+    // Daily allowances and preset labels do not affect an answer's calculation.
+    const {new_cards_per_day,preset_id,...parameters}=settings;
+    const document=JSON.parse(JSON.stringify({scheduler_version:schedulerVersion,settings:parameters}));
+    validateSchedulerConfig(document);
+    const text=canonical(document), id=await hash(text), path=`${directory}/${id}.json`;
+    if(await store.read(path)===null) {
+      if(store.mkdir)await store.mkdir(directory);
+      try{await store.create(path,text+"\n");}
+      catch(error){if(await store.read(path)===null)throw error;}
+    }
+    // Never overwrite an existing file, including a corrupt or conflicting copy.
+    await verifySchedulerConfig(id,await store.read(path));
+    return id;
+  }
   function compare(a, b) {
     return a.review_time_ms - b.review_time_ms || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
   }
@@ -2135,7 +2184,7 @@
   async function appendReview(store, directory, event, limit = LOG_LIMIT) {
     const line = JSON.stringify(event) + "\n";
     if (bytes(line) > limit) throw Error("Review record exceeds log size limit");
-    const month = new Date(event.review_time_ms).toISOString().slice(0, 7);
+    const month = new Date(event.kind === "card_settings" ? event.time_ms : event.review_time_ms).toISOString().slice(0, 7);
     let part = 1;
     if (store.list) {
       const stem = `${event.device_id}-${month}`;
@@ -2207,10 +2256,10 @@
     }
     static async open(name, importId, timing, factory = globalThis.indexedDB) {
       if (!factory) throw Error("IndexedDB is unavailable; a persistent local review index is required");
-      const opening = factory.open(name, 2);
+      const opening = factory.open(name, 3);
       opening.onupgradeneeded = () => {
         const db = opening.result;
-        for (const name2 of ["meta", "files", "seen", "latest", "baselines"]) if (!db.objectStoreNames.contains(name2)) db.createObjectStore(name2);
+        for (const name2 of ["meta", "files", "seen", "latest", "baselines", "card_settings"]) if (!db.objectStoreNames.contains(name2)) db.createObjectStore(name2);
         if (!db.objectStoreNames.contains("observations")) {
           const observations = db.createObjectStore("observations", {keyPath: "id"});
           observations.createIndex("card_id", "card_id");
@@ -2244,13 +2293,17 @@
       return transaction(this.database, [store], "readwrite", (tx) => request(tx.objectStore(store).put(value, key)));
     }
     async clear() {
-      await transaction(this.database, ["files", "seen", "latest", "introduced", "baselines", "observations", "activity"], "readwrite", async (tx) => {
-        await Promise.all(["files", "seen", "latest", "introduced", "baselines", "observations", "activity"].map((name) => request(tx.objectStore(name).clear())));
+      await transaction(this.database, ["files", "seen", "latest", "introduced", "baselines", "observations", "activity", "card_settings"], "readwrite", async (tx) => {
+        await Promise.all(["files", "seen", "latest", "introduced", "baselines", "observations", "activity", "card_settings"].map((name) => request(tx.objectStore(name).clear())));
       });
     }
     async latest() {
       const events = await transaction(this.database, ["latest"], "readonly", (tx) => request(tx.objectStore("latest").getAll()));
       return new Map(events.map((event) => [event.card_id, event]));
+    }
+    async cardSettings() {
+      const rows=await transaction(this.database,["card_settings"],"readonly",tx=>request(tx.objectStore("card_settings").getAll()));
+      return new Map(rows.map(row=>[row.card_id,Object.fromEntries(Object.entries(row.fields).filter(([,field])=>field.value!==null).map(([key,field])=>[key,field.value]))]));
     }
     async introducedToday(now) {
       const day = studyDay(now, this.timing);
@@ -2263,19 +2316,36 @@
       const day=studyDay(now,this.timing);
       return transaction(this.database,["activity"],"readonly",tx=>request(tx.objectStore("activity").index("day").getAll(day)));
     }
-    async ingest(events, knownCards) {
+    async ingest(events, knownCards, {readSchedulerConfig, configs = new Map()} = {}) {
       const records = await Promise.all(events.map(async (event) => {
         validateEvent(event, this.importId);
+        if(event.scheduler_config_id) {
+          const id=event.scheduler_config_id;
+          if(!readSchedulerConfig)throw Error(`Missing scheduler configuration reader: ${id}`);
+          if(!configs.has(id))configs.set(id,(async()=>verifySchedulerConfig(id,await readSchedulerConfig(id)))());
+          await configs.get(id);
+        }
         if (event.kind !== "historical_review" && !knownCards.has(event.card_id)) throw Error(`Unknown review card: ${event.card_id}`);
-        return { event, hash: await hash(canonical(event)), day: event.was_new ? studyDay(event.review_time_ms, this.timing) : null };
+        return { event, hash: await hash(canonical(event)), day: event.kind !== "card_settings" && event.was_new ? studyDay(event.review_time_ms, this.timing) : null };
       }));
-      await transaction(this.database, ["seen", "latest", "introduced", "observations", "activity"], "readwrite", async (tx) => {
+      await transaction(this.database, ["seen", "latest", "introduced", "observations", "activity", "card_settings"], "readwrite", async (tx) => {
         const seen = tx.objectStore("seen"), latest = tx.objectStore("latest");
         for (const record of records) {
           const previous = await request(seen.get(record.event.id));
           if (previous && previous !== record.hash) throw Error(`Conflicting contents for event ${record.event.id}`);
           if (previous) continue;
           await request(seen.put(record.hash, record.event.id));
+          if (record.event.kind === "card_settings") {
+            const event=record.event, settings=tx.objectStore("card_settings");
+            const row=await request(settings.get(event.card_id)) || {card_id:event.card_id,fields:{}};
+            for(const [key,value] of Object.entries(event.changes)) {
+              const old=row.fields[key];
+              if(!old || event.time_ms>old.time_ms || event.time_ms===old.time_ms && event.id>old.id)
+                row.fields[key]={value,time_ms:event.time_ms,id:event.id};
+            }
+            await request(settings.put(row,event.card_id));
+            continue;
+          }
           if (record.event.kind === "historical_review") {
             if (record.event.card_id) await request(tx.objectStore("observations").put(record.event));
             continue;
@@ -2293,7 +2363,8 @@
      * Checkpoints commit only after every event in that file has been indexed.
      */
     async sync(files, read, knownCards, { progress = () => {
-    }, force = /* @__PURE__ */ new Set() } = {}) {
+    }, force = /* @__PURE__ */ new Set(), readSchedulerConfig } = {}) {
+      const configs=new Map();
       const cached = await transaction(this.database, ["files"], "readonly", async (tx) => {
         const store = tx.objectStore("files");
         const keys = await request(store.getAllKeys());
@@ -2318,7 +2389,7 @@
           if (text.length >= old.length && await hash(text.slice(0, old.length)) === old.hash) start = old.length;
           else {
             await this.clear();
-            const result = await this.sync(files, read, knownCards, { progress });
+            const result = await this.sync(files, read, knownCards, { progress, readSchedulerConfig });
             return { ...result, rebuilt: true };
           }
         }
@@ -2335,12 +2406,12 @@
           }
           parsed++;
           if (batch.length === 500) {
-            await this.ingest(batch, knownCards);
+            await this.ingest(batch, knownCards, {readSchedulerConfig,configs});
             batch = [];
             progress(parsed, file.path);
           }
         }
-        if (batch.length) await this.ingest(batch, knownCards);
+        if (batch.length) await this.ingest(batch, knownCards, {readSchedulerConfig,configs});
         await this.put("files", file.path, { mtime: file.stat?.mtime, size: file.stat?.size, length: text.length, hash: await hash(text) });
         progress(parsed, file.path);
       }
