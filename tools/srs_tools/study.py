@@ -306,7 +306,7 @@ def template_conditions_allow_question(template, note, rule):
     return bool(re.sub(r'<[^>]*>', '', question).strip())
 
 
-def discover(vault, config, templates, manifest, issues=None, note_bindings=None):
+def _discover_uncached(vault, config, templates, manifest, issues=None, note_bindings=None, identities=None):
     """Return metadata only; content is transient and always re-read by the view."""
     found = []
     if issues is None:
@@ -367,6 +367,8 @@ def discover(vault, config, templates, manifest, issues=None, note_bindings=None
             if identity in seen:
                 raise ValueError(f'Duplicate source identity in rule {group}: {identity}')
             seen.add(identity)
+            if identities is not None:
+                identities.append(identity)
             path = Path(str(note.path).split('#row-')[0]).resolve().relative_to(vault.resolve()).as_posix()
             source = dict(path=path, kind='block' if rule.get('kind') == 'block' else 'csv' if path.endswith('.csv') else 'markdown', fields=rule['fields'])
             if rule.get('prepare'):
@@ -396,6 +398,35 @@ def discover(vault, config, templates, manifest, issues=None, note_bindings=None
     return found
 
 
+def discover(vault, config, templates, manifest, issues=None, note_bindings=None, cache=None):
+    if cache is None:
+        return _discover_uncached(vault, config, templates, manifest, issues, note_bindings)
+    from .source_cache import source_files, digest
+    def cache_context(group, rule, templates, manifest):
+        return digest([group, rule, templates['groups'][group], manifest.get('scheduling')])
+    found, seen = [], set()
+    for group, rule in config.get('source_rules', {}).items():
+        context = cache_context(group, rule, templates, manifest)
+        for path in source_files(vault, rule, issues=issues, group=group, filenames=True):
+            def load():
+                bindings, identities = [], []
+                single = {**rule, 'sources': [path.relative_to(vault.resolve()).as_posix()]}
+                items = _discover_uncached(vault, {**config, 'source_rules': {group: single}}, templates, manifest, note_bindings=bindings, identities=identities)
+                # Type conversion needs only identities and source bindings. Never
+                # persist note properties/tags or field values in this cache.
+                return dict(cards=items, identities=identities, notes=[{k: b[k] for k in ('group', 'note_uid', 'source')} for b in bindings])
+            result = cache.read(path, context, load)
+            for identity in result['identities']:
+                key = (group, identity)
+                if key in seen:
+                    raise ValueError(f'Duplicate source identity in rule {group}: {identity}')
+                seen.add(key)
+            found.extend(result['cards'])
+            if note_bindings is not None:
+                note_bindings.extend(result['notes'])
+    return found
+
+
 def refresh_cards(vault, data, study_path, config_path, choose_mapping=None):
     config = validate(layout.load_study(study_path, data)); templates = layout.load_templates(config_path)
     for group,rule in config['source_rules'].items():
@@ -404,10 +435,20 @@ def refresh_cards(vault, data, study_path, config_path, choose_mapping=None):
         keys={t['key'] for t in templates['groups'][group]['templates']}
         if set(rule['templates']) - keys:
             raise ValueError(f'Unknown templates in source rule {group}: {set(rule["templates"])-keys}')
-    manifest, cards = load_cards(data, config)
+    catalog.recover(data)
+    manifest = read(data / 'manifest.json')
     issues=[]
     note_bindings = []
-    found = discover(vault, config, templates, manifest, issues, note_bindings)
+    from .source_cache import source_cache, unchanged_snapshot
+    with source_cache(vault, data, "refresh") as cache:
+        signature, file_count = unchanged_snapshot(cache, config, templates, manifest)
+        previous = cache.checkpoint(signature)
+        if previous is not None:
+            cache.keep_existing()
+            return {**previous, 'scan':dict(parsed_files=0, reused_files=file_count, hashed_files=0)}
+        manifest, cards = load_cards(data, config)
+        found = discover(vault, config, templates, manifest, issues, note_bindings, cache)
+        scan = dict(cache.stats)
     from .conversion import convert, prompt_mapping
     converted, conversions = convert(cards, found, note_bindings, choose_mapping or prompt_mapping)
     # Match imported cloze ordinals separately, retaining their existing template keys/UIDs.
@@ -465,7 +506,14 @@ def refresh_cards(vault, data, study_path, config_path, choose_mapping=None):
         cards.append(card); known[key] = card; uids.add(uid); variants.add(variant); added += 1
     # An unavailable source does not delete or retire existing cards. They remain inspectable errors.
     if not added and not updated:
-        return {'added':0, 'updated':0, 'cards':len(cards), 'revision':manifest['revision'],'issues':issues}
+        result = {'added':0, 'updated':0, 'cards':len(cards), 'revision':manifest['revision'],'issues':issues,'scan':scan}
+        with source_cache(vault, data, 'refresh') as cache:
+            # Recheck: source/catalog edits during discovery must prevent reuse.
+            current, _ = unchanged_snapshot(cache, config, templates, manifest)
+            cache.keep_existing()
+            if current == signature:
+                cache.save_checkpoint(signature, result)
+        return result
     revision = str(uuid.uuid4())  # Cache invalidation token, not a storage directory.
     normalized = 'note_partition_count' in manifest or Path(study_path).suffix != '.json'
     notes, stored_cards = layout.separate_cards(cards) if normalized else (None, cards)
@@ -473,7 +521,7 @@ def refresh_cards(vault, data, study_path, config_path, choose_mapping=None):
     catalog.publish(data, manifest, replacement, stored_cards, notes,
                     added_at=datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
     # The imported baseline identity, all logs, and immutable scheduler archives stay intact.
-    return {'added':added, 'updated':updated, 'cards':len(cards), 'revision':revision,'issues':issues, 'type_conversions':conversions}
+    return {'added':added, 'updated':updated, 'cards':len(cards), 'revision':revision,'issues':issues, 'type_conversions':conversions,'scan':scan}
 
 
 def attach_properties(vault, cards):

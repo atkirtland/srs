@@ -110,6 +110,7 @@ def hydrate_cards(cards, notes, config):
     if len(bindings) != len(notes):
         raise ValueError('Duplicate SRS note binding')
     result = []
+    fields = {key: runtime_fields(rule['fields']) for key, rule in config.get('source_rules', {}).items()}
     for card in cards:
         if card['note_id'] not in bindings:
             raise ValueError(f'Missing SRS note binding: {card["note_id"]}')
@@ -120,7 +121,7 @@ def hydrate_cards(cards, notes, config):
             if rule is None:
                 source['error'] = f'Missing source rule: {note["rule_id"]}'
             else:
-                source['fields'] = runtime_fields(rule['fields'])
+                source['fields'] = fields[note['rule_id']]
                 if rule.get('prepare'):
                     source['prepare'] = rule['prepare']
         result.append({**card, 'group': note['rule_id'], 'note_uid': note['uid'], 'source': source})
