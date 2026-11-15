@@ -39,7 +39,19 @@
     globalThis.visualViewport?.addEventListener("resize",sizeReviewer);
     component.register(()=>{globalThis.removeEventListener?.("resize",sizeReviewer);globalThis.visualViewport?.removeEventListener("resize",sizeReviewer);});
     const dirty = new Set(), cache = new Map(), skipped = new Set();
-    let taxonomy;
+    let taxonomy, presidents;
+    let progressStorage;try{progressStorage=globalThis.sessionStorage;}catch{}
+    const scanProgress=new ContentCheckProgress(progressStorage,`${identity}:content-check:${input?.group||""}`);
+    let scanSignature;
+    function bindScanProgress(){
+      if(scanSignature===undefined){
+        const versions=api.vault.getFiles().filter(f=>!f.path.startsWith(root+"/")).map(f=>[f.path,f.stat?.mtime,f.stat?.size]).sort((a,b)=>a[0].localeCompare(b[0]));
+        scanSignature=JSON.stringify([baseManifest.import_id,baseManifest.revision,configKey,versions]);
+      }
+      scanProgress.bind(scanSignature);
+    }
+    function invalidateScanProgress(){scanSignature=undefined;scanProgress.invalidate();}
+
     const contentCache=new Map(), metadataCache=new Map(), metrics=[];
     const counters={fileReads:0,sourceReads:0,renders:0,indexSyncs:0,schedulingBuilds:0,cardPreparations:0};
     let hydrationKey, statesSnapshot, statesRevision;
@@ -56,7 +68,7 @@
     performanceButton.onclick=()=>{notice.textContent=JSON.stringify({...counters,scheduling:schedulingIndex?.stats})+" · "+metrics.map(x=>`${x.name}: ${x.ms}ms`).join(" · ");};
     const checkButton=toolBody.createEl("button",{text:"Check content"});
     const cancelCheck=toolBody.createEl("button",{text:"Cancel content check"});
-    cancelCheck.onclick=()=>{operation++;checking=false;notice.textContent="Content check cancelled; completed results retained.";};
+    cancelCheck.onclick=()=>{scanProgress.active=false;scanProgress.save();operation++;checking=false;notice.textContent="Content check cancelled; completed results retained.";};
     function resetQueues(){membershipCache.clear();profileCache.clear();schedulingIndex=null;runtimeCards=null;}
     function deckMatches(card,id){return membershipCache.get(id)?.has(card.id)??studyDeckMatches(card,id,studyConfig,manifest);}
     function inScope(card,deck=selectedDeck){return !card.retired && (!select.value||card.group===select.value) && (!deck || (studyConfig?deckMatches(card,deck):manifest.scheduling.decks[card.deck_id]?.name===manifest.scheduling.decks[deck]?.name||manifest.scheduling.decks[card.deck_id]?.name.startsWith(manifest.scheduling.decks[deck]?.name+"::")));}
@@ -71,14 +83,24 @@
     }
     async function checkContent(deck=selectedDeck){
       if(checking||busy||managerDirty)return;
+      bindScanProgress();scanProgress.active=true;scanProgress.deck=deck;scanProgress.group=select.value;scanProgress.save();
       checking=true;const token=++operation;
       try{const all=(await readSources()).filter(c=>inScope(c,deck));
         for(let i=0;i<all.length;i++){
           if(disposed||token!==operation)return;
-          await rendered(all[i]);
+          const card=all[i];
+          if(!scanProgress.results.has(card.id)){
+            const result=await rendered(card);
+            if(disposed||token!==operation)return;
+            scanProgress.results.set(card.id,result.content_error||null);
+          }
+          if(i%100===0)scanProgress.save();
           if(i%25===0){notice.textContent=`Checking content: ${i+1}/${all.length}`;await new Promise(resolve=>setTimeout(resolve,0));}
         }
-      }catch(e){message(e);}finally{if(token===operation){checking=false;pending=false;await guardedDraw();}}
+      }catch(e){message(e);}finally{
+        if(!disposed){scanProgress.active=false;scanProgress.save();}
+        if(token===operation){checking=false;pending=false;await guardedDraw();}
+      }
     }
     checkButton.onclick=()=>checkContent(managing?managerDeck:selectedDeck);
 
@@ -109,7 +131,7 @@
     deviceSelect.value=deviceId;
     localStorage.setItem(`${identity}:device-name`,deviceId);
     deviceSelect.onchange=()=>{deviceId=deviceSelect.value;localStorage.setItem(`${identity}:device-name`,deviceId);};
-    component.register(() => {disposed=true;operation++;clearTimeout(refreshTimer);index?.close();});
+    component.register(() => {scanProgress.save();disposed=true;operation++;clearTimeout(refreshTimer);index?.close();});
     const store = {
       async list(directory) {return directory===`${dataRoot}/reviews`?[...reviewFileMap().values()]:api.vault.getFiles().filter(f=>f.path.startsWith(directory+"/"));},
       async read(path) {counters.fileReads++;const f=api.vault.getAbstractFileByPath(path);return f ? api.vault.read(f) : null;},
@@ -222,6 +244,17 @@
         }
         metadata=taxonomy.get(path)||metadata;
       }
+      if(card.source.prepare==="prepare_president_notes") {
+        if(!presidents){
+          const notes=[];
+          for(const f of api.vault.getFiles().filter(f=>f.path.startsWith("wiki/people/us-presidents/")&&f.path.endsWith(".md"))){
+            const parsed=await noteAt(f);
+            notes.push({path:f.path,filename:f.basename||f.path.split("/").at(-1).replace(/\.md$/,""),metadata:parsed.metadata});
+          }
+          presidents=preparePresidents(notes);
+        }
+        metadata=presidents.get(path)||metadata;
+      }
       if(card.source.kind==="block") {
         const matches=(data.blocks??=sourceBlocks(data.text)).filter(block=>block.identity===card.note_uid);
         if(matches.length!==1)throw Error(matches.length?"Duplicate block identity":"Missing Markdown block identity");
@@ -301,20 +334,30 @@
     function showErrors(available) {
       const count=schedulingIndex?.counts(selectedDeck,select.value).errors??contentProblems(available).length;
       if(!count)return;
-      let problems;
       const details=homepage.createEl("details");details.createEl("summary",{text:`Inspect ${count} content errors`});
-      let offset=0,more;
-      const page=()=>{
-        problems??=contentProblems(available);
-        if(more)more.disabled=true;
-        for(const card of problems.slice(offset,offset+50)) {
-          const row=details.createDiv();row.createEl("p",{text:`${card.anki_notetype||"Card"} · ${card.note_uid||card.id}: ${card.content_error}`});
-          if(card.source?.path)row.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"","tab");
+      let loaded=false;
+      details.ontoggle=()=>{
+        if(!details.open||loaded)return;loaded=true;
+        for(const category of groupContentErrors(contentProblems(available))){
+          const section=details.createEl("details");section.createEl("summary",{text:`${category.category} · ${category.groups.reduce((n,g)=>n+g.cards.length,0)} errors`});
+          for(const group of category.groups){
+            const bucket=section.createEl("details");bucket.createEl("summary",{text:`${group.type} · ${group.error} · ${group.cards.length} cards`});
+            let offset=0,more;
+            const page=()=>{
+              more?.remove();
+              for(const card of group.cards.slice(offset,offset+50)){
+                const row=bucket.createDiv();row.createEl("p",{text:card.note_uid||card.id});
+                if(card.source?.path)row.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"","tab");
+              }
+              offset+=50;
+              if(offset<group.cards.length){more=bucket.createEl("button",{text:"Show more cards"});more.onclick=page;}
+            };
+            bucket.ontoggle=()=>{if(bucket.open&&offset===0)page();};
+          }
         }
-        offset+=50;if(offset<problems.length){more=details.createEl("button",{text:"Show more errors"});more.onclick=page;}
       };
-      details.ontoggle=()=>{if(details.open && offset===0)page();};
     }
+
     function openCardSettings(card) {
       if(!leaveEditor())return;
       panel="";managing=true;editedCardId=card.id;managerDirty=false;guardedDraw();
@@ -585,13 +628,13 @@
       manage.setAttribute("aria-pressed",String(managing));
       const freshManifest=catalogDirty?await json(`${dataRoot}/manifest.json`):baseManifest;
       if(freshManifest.import_id!==baseManifest.import_id)throw Error("Imported baseline changed; reopen this view");
-      if(freshManifest.revision!==baseManifest.revision){await loadCatalog(freshManifest);resolvedCards=null;contentCache.clear();metadataCache.clear();resetQueues();}
+      if(freshManifest.revision!==baseManifest.revision){invalidateScanProgress();await loadCatalog(freshManifest);resolvedCards=null;contentCache.clear();metadataCache.clear();resetQueues();}
       const loaded=await cachedConfiguration();
       if(runtimeLoaded!==loaded||runtimeBase!==baseManifest){
         studyConfig=loaded.study;studyParts=loaded.parts;studyKey=canonical(studyConfig);
         manifest=studyConfig?studyRuntimeManifest(baseManifest,studyConfig):baseManifest;
         config=loaded.templates;const nextConfigKey=canonical({templates:config,study:studyConfig});
-        if(configKey!==nextConfigKey){contentCache.clear();metadataCache.clear();resolvedCards=null;resetQueues();operation++;}
+        if(configKey!==nextConfigKey){scanSignature=undefined;contentCache.clear();metadataCache.clear();resolvedCards=null;resetQueues();operation++;}
         configKey=nextConfigKey;runtimeLoaded=loaded;runtimeBase=baseManifest;
       }
       catalogDirty=false;
@@ -608,12 +651,14 @@
         }));
         indexDirty=false;
       }
+      bindScanProgress();
       const snapshot=snapshotCache;
       const sources=await measure("Source metadata",readSources);
       if(!runtimeCards||runtimeSources!==sources||runtimeSnapshot!==snapshot){
         counters.cardPreparations++;
         runtimePositions.clear();knownErrors.clear();
         runtimeCards=await measure("Card index preparation",async()=>sources.map((card,i)=>{
+          if(scanProgress.results.get(card.id))card={...card,content_error:scanProgress.results.get(card.id),validation:"error"};
           if(contentCache.has(card.id))card={...card,...contentCache.get(card.id)};
           const value={...card,card_settings:snapshot.settings.get(card.id)||{}};
           if(studyConfig){if(!profileCache.has(card.id)){try{studyProfileId(value,studyConfig,manifest);profileCache.set(card.id,null);}catch(e){profileCache.set(card.id,e.message);}}if(profileCache.get(card.id))value.content_error=profileCache.get(card.id);}
@@ -639,7 +684,7 @@
       if(managing){showCardManager(available);return;}
       if(!reviewing && manifest.scheduling) {
         const queue={tree:await measure("Deck screen",()=>schedulingIndex.tree(select.value))};
-        showDecks(queue,available);notice.textContent=`${cards.length.toLocaleString()} cards · ${knownErrors.size.toLocaleString()} known content errors · ${(schedulingIndex.counts().total-contentCache.size).toLocaleString()} unchecked`;
+        showDecks(queue,available);notice.textContent=`${cards.length.toLocaleString()} cards · ${knownErrors.size.toLocaleString()} known content errors · ${(Math.max(0,schedulingIndex.counts().total-new Set([...contentCache.keys(),...scanProgress.results.keys()]).size)).toLocaleString()} unchecked`;
         return;
       }
       const queue=await measure("Selected queue",()=>schedulingIndex?schedulingIndex.queue(selectedDeck,select.value):reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value));
@@ -758,19 +803,19 @@
           if(path===`${dataRoot}/manifest.json`||path===`${dataRoot}/catalog.pending.json`||path.startsWith(`${dataRoot}/cards/`)||path.startsWith(`${dataRoot}/notes/`)){catalogDirty=true;indexDirty=true;relevant=true;}
           if(path.startsWith(`${root}/config/`)||[`${root}/config.json`,`${root}/study.json`,`${dataRoot}/profiles.json`].includes(path)){runtimeDirty=true;contentCache.clear();metadataCache.clear();resolvedCards=null;relevant=true;}
           for(const card of cards){
-            const dependent=card.source?.path===path||card.source?.candidates?.some(p=>path===p||path.startsWith(p+"/"))||card.source?.prepare==="prepare_taxonomy_notes"&&path.startsWith("wiki/life/");
+            const dependent=card.source?.prepare==="prepare_president_notes"&&path.startsWith("wiki/people/us-presidents/")||card.source?.path===path||card.source?.candidates?.some(p=>path===p||path.startsWith(p+"/"))||card.source?.prepare==="prepare_taxonomy_notes"&&path.startsWith("wiki/life/");
             if(dependent){contentCache.delete(card.id);metadataCache.delete(card.id);dirty.add(path);relevant=true;resolvedCards=null;}
           }
         }
         if(!relevant)return;
-        if(paths.some(path=>!path.startsWith(`${dataRoot}/reviews/`))){sourceGeneration++;operation++;checking=false;candidateSources.clear();taxonomy=null;resetQueues();}
+        if(paths.some(path=>!path.startsWith(`${dataRoot}/reviews/`))){invalidateScanProgress();sourceGeneration++;operation++;checking=false;candidateSources.clear();taxonomy=null;presidents=null;resetQueues();}
       }else{indexDirty=true;}
       clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);
     }
     home.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=false;managerDirty=false;reviewing=false;selectedDeck=null;guardedDraw();};
     manage.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=true;managerDirty=false;guardedDraw();};
     select.onchange=()=>{operation++;checking=false;if(!leaveEditor()){select.value=activeGroup;return;}activeGroup=select.value;panel="";managing=false;managerDirty=false;reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
-    refresh.onclick=()=>{if(managerDirty){notice.textContent="Save or discard changes before refreshing.";return;}reviewFiles=null;cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;sourceGeneration++;operation++;checking=false;resetQueues();guardedDraw();};
+    refresh.onclick=()=>{if(managerDirty){notice.textContent="Save or discard changes before refreshing.";return;}reviewFiles=null;cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;presidents=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;invalidateScanProgress();sourceGeneration++;operation++;checking=false;resetQueues();guardedDraw();};
     rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     profilesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="profiles";guardedDraw();};
     sourcesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="sources";guardedDraw();};
@@ -803,5 +848,9 @@
       for(const name of ["create","modify","delete","rename"])component.registerEvent(api.vault.on(name,scheduleRefresh));
       component.registerEvent(api.metadataCache.on("changed",scheduleRefresh));
       component.registerInterval(setInterval(()=>{if(manifest&&!shown&&!checking&&!busy&&!managerDirty&&(Date.now()>=nextWake||timeKey!==String(dayNumber(Date.now(),manifest.timing)))){nextWake=Infinity;guardedDraw();}},1000));await guardedDraw();
+      if(scanProgress.active&&!disposed){
+        select.value=scanProgress.group;activeGroup=select.value;
+        await checkContent(scanProgress.deck);
+      }
     }catch(e){message(e);}
   })();

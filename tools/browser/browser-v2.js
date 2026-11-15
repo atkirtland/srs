@@ -124,6 +124,7 @@ function transformField(name, value, note) {
     case "functional_group_name": return text(value).replace(/-group$/i, "").replace(/^./, x => x.toUpperCase());
     case "ph_front": return text(note.metadata.name_zh) || text(note.metadata.name_en) || note.filename;
     case "ph_units": return "pH";
+    case "title_or_filename": return (Array.isArray(value) ? text(value[0]) : text(value)) || note.filename;
     case "first_alias": if (!Array.isArray(value) || !text(value[0])) throw Error("Missing first alias"); return text(value[0]);
     case "chinese_alias": {const v = list(value).find(x => /\p{Script=Han}/u.test(text(x))); if (!v) throw Error("Missing Chinese alias"); return text(v);}
     case "wikilink_label": return label(value);
@@ -405,4 +406,46 @@ function studyDayStart(day, timing) {
     guess += target - Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute,+p.second);
   }
   return guess;
+}
+
+function groupContentErrors(cards) {
+  const categories=new Map();
+  for(const card of cards){
+    const category=card.group||"Other",type=card.anki_notetype||"Card",error=card.content_error;
+    if(!error)continue;
+    if(!categories.has(category))categories.set(category,new Map());
+    const groups=categories.get(category),key=JSON.stringify([type,error]);
+    if(!groups.has(key))groups.set(key,{type,error,cards:[]});
+    groups.get(key).cards.push(card);
+  }
+  return [...categories].sort(([a],[b])=>a.localeCompare(b)).map(([category,groups])=>({category,
+    groups:[...groups.values()].sort((a,b)=>a.type.localeCompare(b.type)||a.error.localeCompare(b.error)).map(group=>({...group,
+      cards:group.cards.sort((a,b)=>(a.note_uid||a.id).localeCompare(b.note_uid||b.id)||a.id.localeCompare(b.id))}))}));
+}
+
+function preparePresidents(notes) {
+  const orders=new Map();
+  for(const note of notes)for(const term of note.metadata.terms||[]){
+    const order=Number(term.order);if(!Number.isInteger(order)||order<1)throw Error("Invalid president term order");
+    const name=String(note.metadata.name||note.filename);
+    if(orders.has(order)&&orders.get(order)!==name)throw Error(`Duplicate president order: ${order}`);
+    orders.set(order,name);
+  }
+  return new Map(notes.map(note=>{
+    const terms=note.metadata.terms||[],join=key=>[...new Set(terms.flatMap(t=>[t[key]].flat()).filter(v=>v!=null&&String(v).trim()).map(String))].join(", ");
+    const adjacent=delta=>[...new Set(terms.map(t=>orders.get(Number(t.order)+delta)).filter(name=>name&&name!==String(note.metadata.name||note.filename)))].join(", ");
+    return [note.path,{...note.metadata,Order:join("order"),"Vice President(s)":join("vice_presidents"),
+      "Term Years":join("term_years"),Term:join("dates"),Party:join("party"),Predecessor:adjacent(-1),Successor:adjacent(1)}];
+  }));
+}
+
+// Checkpoints contain validation outcomes only, never rendered note content.
+class ContentCheckProgress {
+  constructor(storage,key){
+    this.storage=storage;this.key=key;this.signature=null;this.results=new Map();this.active=false;this.deck=null;this.group="";
+    try{const saved=JSON.parse(storage.getItem(key)||"null");if(saved?.version===1){this.signature=saved.signature;this.results=new Map(saved.results);this.active=saved.active===true;this.deck=saved.deck;this.group=saved.group||"";}}catch{}
+  }
+  bind(signature){if(this.signature!==signature){this.signature=signature;this.results.clear();this.active=false;this.save();}}
+  save(){try{this.storage.setItem(this.key,JSON.stringify({version:1,signature:this.signature,results:[...this.results],active:this.active,deck:this.deck,group:this.group}));}catch{}}
+  invalidate(){this.signature=null;this.results.clear();this.active=false;this.save();}
 }

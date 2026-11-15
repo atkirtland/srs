@@ -98,3 +98,6 @@
   background: var(--background-primary);
 }
 .ankobs-srs[data-reviewing="true"] > .srs-actions button { flex: 1 1 6rem; height: auto; white-space: normal; }
+
+.ankobs-srs .srs-rotated-image { display: grid; place-items: center; width: min(100%, 40dvh, 40rem); aspect-ratio: 1; margin: 0 auto; }
+.ankobs-srs .srs-rotated-image img { max-width: 100%; max-height: min(40dvh, 100%); transform: rotate(var(--srs-image-rotation)); }

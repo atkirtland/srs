@@ -728,10 +728,11 @@ test('background redraws wait for content checking to finish without cancelling 
   const sandbox={setTimeout,checked:[],draws:0};
   vm.createContext(sandbox);
   vm.runInContext(`let checking=false,busy=false,managerDirty=false,disposed=false,operation=0,pending=false;
-    let selectedDeck=null;const managing=false,managerDeck=null,notice={};
+    let selectedDeck=null;const managing=false,managerDeck=null,notice={},select={value:""};
+    const scanProgress={active:false,results:new Map(),save(){}};function bindScanProgress(){}
     async function readSources(){return Array.from({length:80},(_,id)=>({id}));}
     function inScope(){return true;}
-    async function rendered(card){checked.push(card.id);await guardedDraw();}
+    async function rendered(card){checked.push(card.id);await guardedDraw();return card;}
     async function draw(){draws++;}
     function message(e){throw e;}function clearCard(){}function scheduleRefresh(){throw Error('Unexpected repeated redraw');}
     ${scan}\n${draw}\n globalThis.run=checkContent;`,sandbox);
@@ -754,4 +755,85 @@ test('scheduled wakeups preserve a running scan and unsaved edits, then refresh 
   vm.runInContext('managerDirty=false',sandbox);
   sandbox.callbacks[0]();assert.equal(sandbox.draws,1);
   sandbox.callbacks[0]();assert.equal(sandbox.draws,1);
+});
+
+test('content errors group by category, card type and exact error with deterministic card order',()=>{
+ const input=[
+  {id:'3',group:'z',anki_notetype:'Basic',content_error:'Missing field'},
+  {id:'2',note_uid:'anki:2',group:'a',anki_notetype:'Basic',content_error:'Missing field'},
+  {id:'1',note_uid:'anki:1',group:'a',anki_notetype:'Basic',content_error:'Missing field'},
+  {id:'4',group:'a',anki_notetype:'Cloze',content_error:'Missing field'},
+  {id:'5',group:'a',anki_notetype:'Basic',content_error:'Missing image'},
+  {id:'6',group:'a'}];
+ const grouped=SRS.groupContentErrors(input);
+ assert.deepEqual(grouped.map(c=>c.category),['a','z']);
+ assert.deepEqual(grouped[0].groups.map(g=>[g.type,g.error,g.cards.length]),[['Basic','Missing field',2],['Basic','Missing image',1],['Cloze','Missing field',1]]);
+ assert.deepEqual(grouped[0].groups[0].cards.map(c=>c.id),['1','2']);
+ assert.equal(input[0].id,'3');
+});
+
+test('president terms provide fields, preserve multiple terms and derive adjacent presidents',()=>{
+ const notes=[{path:'washington.md',filename:'washington',metadata:{name:'George Washington',terms:[{order:1}]}},
+ {path:'adams.md',filename:'adams',metadata:{name:'John Adams',hometown:'Massachusetts',terms:[{order:2,dates:'1797-03-04–1801-03-04',term_years:'1797–1801',party:'Federalist',vice_presidents:['Thomas Jefferson']}]}},
+ {path:'jefferson.md',filename:'jefferson',metadata:{name:'Thomas Jefferson',terms:[{order:3},{order:4}]}}];
+ const prepared=SRS.preparePresidents(notes),adams=prepared.get('adams.md');
+ assert.equal(adams.Order,'2');assert.equal(adams['Vice President(s)'],'Thomas Jefferson');
+ assert.equal(adams.Term,'1797-03-04–1801-03-04');assert.equal(adams['Term Years'],'1797–1801');
+ assert.equal(adams.Party,'Federalist');assert.equal(adams.Predecessor,'George Washington');assert.equal(adams.Successor,'Thomas Jefferson');
+ assert.equal(prepared.get('jefferson.md').Order,'3, 4');
+ assert.equal(prepared.get('washington.md').Predecessor,'');
+ assert.equal(notes[1].metadata.Order,undefined);
+ assert.throws(()=>SRS.preparePresidents([...notes,{path:'bad.md',metadata:{name:'Other',terms:[{order:2}]}}]),/Duplicate president order/);
+});
+
+test('poetry uses its filename without an alias; Chinese CSV preserves a genuinely blank answer',()=>{
+ assert.equal(SRS.transformField('title_or_filename',undefined,{filename:'憫農'}),'憫農');
+ assert.equal(SRS.transformField('title_or_filename',[],{filename:'憫農'}),'憫農');
+ assert.equal(SRS.transformField('title_or_filename',['Other title'],{filename:'憫農'}),'Other title');
+ const rows=SRS.indexRows(SRS.parseCSV('anki_note_id,tags,name_en,name_zh,pronunciation,definition\n1003,example oa::managed::list,example-term,,,example definition\n1004,chinese,example root,示例,,\n'));
+ assert.equal(rows.get('anki:1004').name_zh,'示例');
+ assert.throws(()=>SRS.fieldsFromNote({source:{fields:[{anki:'word2',source:'name_zh',transform:'comma_separated_labels',required:true}]},template:{required_fields:['word2']}},{metadata:rows.get('anki:1003')}),/Missing required field: word2/);
+});
+
+test('content check checkpoints survive view replacement, resume unfinished work and invalidate changed sources',()=>{
+ const data=new Map(),storage={getItem:k=>data.get(k),setItem:(k,v)=>data.set(k,v)};
+ let progress=new SRS.ContentCheckProgress(storage,'scan');progress.bind('catalog/config/source-versions');
+ progress.active=true;progress.deck='deck';progress.group='vocab';
+ progress.results.set('valid',null);progress.results.set('broken','Missing required field: definition');progress.save();
+ progress=new SRS.ContentCheckProgress(storage,'scan');progress.bind('catalog/config/source-versions');
+ assert.equal(progress.active,true);assert.equal(progress.deck,'deck');assert.equal(progress.group,'vocab');
+ assert.equal(progress.results.has('valid'),true);assert.equal(progress.results.get('broken'),'Missing required field: definition');
+ assert.equal(progress.results.has('unfinished'),false);
+ progress.active=false;progress.save();
+ assert.equal(new SRS.ContentCheckProgress(storage,'scan').active,false);
+ progress.bind('changed-source-version');assert.equal(progress.results.size,0);assert.equal(progress.active,false);
+ progress.results.set('old',null);progress.invalidate();
+ assert.equal(new SRS.ContentCheckProgress(storage,'scan').results.size,0);
+ const denied=new SRS.ContentCheckProgress({getItem(){throw Error('Denied');},setItem(){throw Error('Denied');}},'scan');
+ denied.bind('version');denied.save();
+});
+
+test('an interrupted content scan resumes from completed cards after the view is recreated',async()=>{
+ const source=fs.readFileSync(require('node:path').join(__dirname,'../browser/browser-view.js'),'utf8');
+ const scan=source.slice(source.indexOf('    async function checkContent('),source.indexOf('    checkButton.onclick='));
+ const saved=new Map(),storage={getItem:k=>saved.get(k),setItem:(k,v)=>saved.set(k,v)},checked=[];
+ async function run(interrupt){
+  const progress=new SRS.ContentCheckProgress(storage,'resume');progress.bind('same-sources');
+  const sandbox={setTimeout,scanProgress:progress,checked,interrupt};vm.createContext(sandbox);
+  vm.runInContext(`let checking=false,busy=false,managerDirty=false,disposed=false,operation=0,pending=false,selectedDeck=null;
+    const managing=false,managerDeck=null,notice={},select={value:'vocab'};
+    function bindScanProgress(){}function inScope(){return true;}
+    async function readSources(){return Array.from({length:60},(_,id)=>({id}));}
+    async function rendered(card){
+      if(interrupt&&card.id===20){scanProgress.save();disposed=true;operation++;return card;}
+      checked.push(card.id);return card.id===5?{...card,content_error:'Missing field'}:card;
+    }
+    function message(e){throw e;}async function guardedDraw(){}
+    ${scan}\nglobalThis.run=checkContent;`,sandbox);
+  await sandbox.run();return progress;
+ }
+ const first=await run(true);assert.equal(first.active,true);assert.equal(first.results.size,20);
+ const resumed=await run(false);assert.equal(resumed.active,false);assert.equal(resumed.results.size,60);
+ assert.equal(checked.length,60);assert.equal(new Set(checked).size,60);
+ assert.equal(resumed.results.get(5),'Missing field');
 });

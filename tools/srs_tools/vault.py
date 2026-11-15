@@ -132,6 +132,37 @@ def first_alias(value: Any, note: Note) -> str:
     return rendered
 
 
+def title_or_filename(value: Any, note: Note) -> str:
+    return text(value[0] if isinstance(value, list) and value else value if not isinstance(value, list) else None, note) or note.filename
+
+
+def prepare_president_notes(notes: list[Note]) -> list[Note]:
+    orders = {}
+    for note in notes:
+        for term in note.metadata.get("terms", []):
+            order = term.get("order")
+            if not isinstance(order, int) or isinstance(order, bool) or order < 1:
+                raise ExportError(f"{note.path}: invalid president term order")
+            name = str(note.metadata.get("name") or note.filename)
+            if order in orders and orders[order] != name:
+                raise ExportError(f"Duplicate president order: {order}")
+            orders[order] = name
+    result = []
+    for note in notes:
+        terms = note.metadata.get("terms", [])
+        metadata = dict(note.metadata)
+        for field, key in {"Order": "order", "Vice President(s)": "vice_presidents", "Term Years": "term_years", "Term": "dates", "Party": "party"}.items():
+            values = []
+            for term in terms:
+                value = term.get(key)
+                values.extend(value if isinstance(value, list) else [value])
+            metadata[field] = ", ".join(dict.fromkeys(str(v) for v in values if v is not None and str(v).strip()))
+        for field, delta in {"Predecessor": -1, "Successor": 1}.items():
+            metadata[field] = ", ".join(dict.fromkeys(orders[t["order"] + delta] for t in terms if t["order"] + delta in orders and orders[t["order"] + delta] != str(note.metadata.get("name") or note.filename)))
+        result.append(Note(note.path, metadata, note.body))
+    return result
+
+
 WIKILINK_RE = re.compile(r"^!?\[\[([^\]|#]+)(?:[|#][^\]]*)?\]\]$")
 FRONTMATTER_END_RE = re.compile(r"(?m)^---[ \t]*\r?(?:\n|$)")
 
@@ -434,10 +465,10 @@ TRANSFORMS = {
         comma_separated_labels, country_flags, first_alias,
         functional_group_name, image, image_list, indian_union_territory,
         markdown_body, markdown_link_list, optional_image, ph_front, ph_units,
-        sound, text, us_state_name, wikilink_label,
+        sound, text, title_or_filename, us_state_name, wikilink_label,
     )
 }
-PREPARE_NOTES = {"prepare_taxonomy_notes": prepare_taxonomy_notes}
+PREPARE_NOTES = {"prepare_taxonomy_notes": prepare_taxonomy_notes, "prepare_president_notes": prepare_president_notes}
 def split_frontmatter(path: Path) -> tuple[dict[str, Any], str]:
     content = path.read_text(encoding="utf-8")
     opening = re.match(r"\A---[ \t]*\r?\n", content)
