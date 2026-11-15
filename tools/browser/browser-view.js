@@ -821,9 +821,9 @@
           }
           actions.createEl("button",{text:"Bury"}).onclick=skip;
           for(const [i,label]of["Again","Hard","Good","Easy"].entries()) {
-            const preview=nextStateV2(card,states.get(card.id).state,options,manifest,Date.now(),i+1);
-            const minutes=Math.max(0,Math.round((preview.due-Date.now())/60000));
-            actions.createEl("button",{text:`${label} (${minutes<1440?minutes+"m":Math.round(minutes/1440)+"d"})`}).onclick=()=>answer(card,i+1);
+            const now=Date.now();
+            const preview=nextStateV2(card,states.get(card.id).state,options,manifest,now,i+1);
+            actions.createEl("button",{text:`${label} (${reviewIntervalLabel(preview,now,manifest.timing)})`}).onclick=()=>answer(card,i+1);
           }
         }catch(e){message(e);actions.empty();actions.createEl("button",{text:"Bury"}).onclick=skip;}
       };

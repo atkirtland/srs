@@ -1151,3 +1151,14 @@ test('Anki bridge states select current scheduling without inventing review acti
 
   index.close();
 });
+
+ test('interval labels use study days for reviews and interday learning',()=>{
+  const stamp=Date.parse('2026-11-15T20:00:00Z');
+  const today=SRS.dayNumber(stamp,timing);
+  const due=SRS.studyDayStart(today+2,timing);
+  assert.equal(SRS.reviewIntervalLabel({queue:2,scheduled_days:2,due},stamp,timing),'2d');
+  assert.equal(SRS.reviewIntervalLabel({queue:3,anki_due:today+2,scheduled_days:0,due},stamp,timing),'2d');
+  assert.equal(SRS.reviewIntervalLabel({queue:1,due:stamp+600000},stamp,timing),'10m');
+  const dst=Date.parse('2026-03-07T21:00:00Z'),day=SRS.dayNumber(dst,timing);
+  assert.equal(SRS.reviewIntervalLabel({queue:2,scheduled_days:2,due:SRS.studyDayStart(day+2,timing)},dst,timing),'2d');
+});

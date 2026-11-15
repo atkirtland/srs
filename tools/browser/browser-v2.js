@@ -331,6 +331,12 @@ function reviewQueueV2(cards, states, events, manifest, now, group, introducedCo
     learning:chosen.filter(c => ["intraday","interday"].includes(kindOf(c))).length,
     review:chosen.filter(c => kindOf(c) === "review").length, tree};
 }
+function reviewIntervalLabel(state, now, timing) {
+  if (state.queue === 2) return `${state.scheduled_days}d`;
+  if (state.queue === 3) return `${state.anki_due - dayNumber(now, timing)}d`;
+  const minutes = Math.max(0, Math.round((state.due - now) / 60000));
+  return minutes < 1440 ? `${minutes}m` : `${Math.round(minutes / 1440)}d`;
+}
 function nextStateV2(card, current, options, manifest, now, rating) {
   if (![1,2,3,4].includes(rating)) throw Error("Invalid rating");
   if (current.last_review !== undefined && now < current.last_review) throw Error("Device clock precedes last review");

@@ -8,7 +8,7 @@ yaml_bundle = "\nconst SRSYaml = (() => { const module = {exports: {}}, exports 
 hook = '''
   if (globalThis.__SRS_TEST__) {
     globalThis.SRS = {maintenanceMetadata,CardMaintenance, MaintenanceCache, maintenanceIdentity, maintenanceCardId, maintenanceQuestion, CatalogPublisher,ReviewerSessionCache, CatalogCache, ContentCheckProgress, preparePresidents, groupContentErrors, SchedulingIndex, SchedulingOrder, readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, studyFilterNeedsMetadata, schedulerV2, effectiveSettings, renderV2, templateScriptParts, runTemplateScripts, resolveImageEmbeds, transformField, fieldsFromNote,
-      deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
+      deckTree, queueKind, reviewQueueV2, reviewIntervalLabel, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
       ReviewIndex, appendReview, validateEvent, saveSchedulerConfig, verifySchedulerConfig, parseCSV, indexRows, configuredCards, initialState};
     return;
   }

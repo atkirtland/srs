@@ -2809,6 +2809,12 @@ function reviewQueueV2(cards, states, events, manifest, now, group, introducedCo
     learning:chosen.filter(c => ["intraday","interday"].includes(kindOf(c))).length,
     review:chosen.filter(c => kindOf(c) === "review").length, tree};
 }
+function reviewIntervalLabel(state, now, timing) {
+  if (state.queue === 2) return `${state.scheduled_days}d`;
+  if (state.queue === 3) return `${state.anki_due - dayNumber(now, timing)}d`;
+  const minutes = Math.max(0, Math.round((state.due - now) / 60000));
+  return minutes < 1440 ? `${minutes}m` : `${Math.round(minutes / 1440)}d`;
+}
 function nextStateV2(card, current, options, manifest, now, rating) {
   if (![1,2,3,4].includes(rating)) throw Error("Invalid rating");
   if (current.last_review !== undefined && now < current.last_review) throw Error("Device clock precedes last review");
@@ -3713,7 +3719,7 @@ class CardMaintenance {
 
   if (globalThis.__SRS_TEST__) {
     globalThis.SRS = {maintenanceMetadata,CardMaintenance, MaintenanceCache, maintenanceIdentity, maintenanceCardId, maintenanceQuestion, CatalogPublisher,ReviewerSessionCache, CatalogCache, ContentCheckProgress, preparePresidents, groupContentErrors, SchedulingIndex, SchedulingOrder, readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, studyFilterNeedsMetadata, schedulerV2, effectiveSettings, renderV2, templateScriptParts, runTemplateScripts, resolveImageEmbeds, transformField, fieldsFromNote,
-      deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
+      deckTree, queueKind, reviewQueueV2, reviewIntervalLabel, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
       ReviewIndex, appendReview, validateEvent, saveSchedulerConfig, verifySchedulerConfig, parseCSV, indexRows, configuredCards, initialState};
     return;
   }
@@ -4540,9 +4546,9 @@ class CardMaintenance {
           }
           actions.createEl("button",{text:"Bury"}).onclick=skip;
           for(const [i,label]of["Again","Hard","Good","Easy"].entries()) {
-            const preview=nextStateV2(card,states.get(card.id).state,options,manifest,Date.now(),i+1);
-            const minutes=Math.max(0,Math.round((preview.due-Date.now())/60000));
-            actions.createEl("button",{text:`${label} (${minutes<1440?minutes+"m":Math.round(minutes/1440)+"d"})`}).onclick=()=>answer(card,i+1);
+            const now=Date.now();
+            const preview=nextStateV2(card,states.get(card.id).state,options,manifest,now,i+1);
+            actions.createEl("button",{text:`${label} (${reviewIntervalLabel(preview,now,manifest.timing)})`}).onclick=()=>answer(card,i+1);
           }
         }catch(e){message(e);actions.empty();actions.createEl("button",{text:"Bury"}).onclick=skip;}
       };
