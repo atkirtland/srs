@@ -78,7 +78,7 @@
           await rendered(all[i]);
           if(i%25===0){notice.textContent=`Checking content: ${i+1}/${all.length}`;await new Promise(resolve=>setTimeout(resolve,0));}
         }
-      }catch(e){message(e);}finally{if(token===operation){checking=false;await guardedDraw();}}
+      }catch(e){message(e);}finally{if(token===operation){checking=false;pending=false;await guardedDraw();}}
     }
     checkButton.onclick=()=>checkContent(managing?managerDeck:selectedDeck);
 
@@ -718,7 +718,7 @@
       }catch(e){clearCard();message(e);notice.textContent+=" — review paused. Refresh to retry.";}
       finally{busy=false;if(pending){pending=false;scheduleRefresh();}}
     }
-    async function guardedDraw(){if(checking){operation++;checking=false;}if(busy || managerDirty){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
+    async function guardedDraw(){if(disposed)return;if(checking || busy || managerDirty){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
     undoButton.onclick=async()=>{
       if(busy||!undoReview)return;
       if(!leaveEditor())return;
@@ -802,7 +802,6 @@
       if(activeGroup)select.value=activeGroup;
       for(const name of ["create","modify","delete","rename"])component.registerEvent(api.vault.on(name,scheduleRefresh));
       component.registerEvent(api.metadataCache.on("changed",scheduleRefresh));
-      component.registerInterval(setInterval(()=>{indexDirty=true;if(!shown)guardedDraw();},60000));
-      component.registerInterval(setInterval(()=>{if(manifest&&(Date.now()>=nextWake||timeKey!==String(dayNumber(Date.now(),manifest.timing)))){nextWake=Infinity;if(!shown)guardedDraw();}},1000));await guardedDraw();
+      component.registerInterval(setInterval(()=>{if(manifest&&!shown&&!checking&&!busy&&!managerDirty&&(Date.now()>=nextWake||timeKey!==String(dayNumber(Date.now(),manifest.timing)))){nextWake=Infinity;guardedDraw();}},1000));await guardedDraw();
     }catch(e){message(e);}
   })();

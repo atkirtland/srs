@@ -720,3 +720,38 @@ if (word && sentence) sentence.textContent = sentence.textContent.replace(word, 
     assert.equal(sentence.textContent,word?`（${word}）說${word}`:'說');
   }
 });
+
+test('background redraws wait for content checking to finish without cancelling the scan',async()=>{
+  const source=fs.readFileSync(require('node:path').join(__dirname,'../browser/browser-view.js'),'utf8');
+  const scan=source.slice(source.indexOf('    async function checkContent('),source.indexOf('    checkButton.onclick='));
+  const draw=source.slice(source.indexOf('    async function guardedDraw()'),source.indexOf('\n',source.indexOf('    async function guardedDraw()')));
+  const sandbox={setTimeout,checked:[],draws:0};
+  vm.createContext(sandbox);
+  vm.runInContext(`let checking=false,busy=false,managerDirty=false,disposed=false,operation=0,pending=false;
+    let selectedDeck=null;const managing=false,managerDeck=null,notice={};
+    async function readSources(){return Array.from({length:80},(_,id)=>({id}));}
+    function inScope(){return true;}
+    async function rendered(card){checked.push(card.id);await guardedDraw();}
+    async function draw(){draws++;}
+    function message(e){throw e;}function clearCard(){}function scheduleRefresh(){throw Error('Unexpected repeated redraw');}
+    ${scan}\n${draw}\n globalThis.run=checkContent;`,sandbox);
+  await sandbox.run();
+  assert.equal(sandbox.checked.length,80);
+  assert.equal(sandbox.draws,1);
+  assert.equal(vm.runInContext('checking',sandbox),false);
+});
+
+test('scheduled wakeups preserve a running scan and unsaved edits, then refresh when idle',()=>{
+  const source=fs.readFileSync(require('node:path').join(__dirname,'../browser/browser-view.js'),'utf8');
+  const timer=source.split('\n').find(line=>line.includes('component.registerInterval(setInterval('));
+  const sandbox={Date,callbacks:[],draws:0,setInterval:fn=>{sandbox.callbacks.push(fn);},component:{registerInterval(){}},dayNumber:()=>1};
+  vm.createContext(sandbox);
+  vm.runInContext(`let manifest={timing:{}},shown=null,checking=true,busy=false,managerDirty=false,nextWake=0,timeKey='1';function guardedDraw(){draws++;}${timer.slice(0,timer.indexOf('await guardedDraw();'))}`,sandbox);
+  sandbox.callbacks[0]();assert.equal(sandbox.draws,0);
+  assert.equal(vm.runInContext('nextWake',sandbox),0);
+  vm.runInContext('checking=false;managerDirty=true',sandbox);
+  sandbox.callbacks[0]();assert.equal(sandbox.draws,0);
+  vm.runInContext('managerDirty=false',sandbox);
+  sandbox.callbacks[0]();assert.equal(sandbox.draws,1);
+  sandbox.callbacks[0]();assert.equal(sandbox.draws,1);
+});
