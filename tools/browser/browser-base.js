@@ -2307,6 +2307,10 @@
       const rows=await transaction(this.database,["card_settings"],"readonly",tx=>request(tx.objectStore("card_settings").getAll()));
       return new Map(rows.map(row=>[row.card_id,Object.fromEntries(Object.entries(row.fields).filter(([,field])=>field.value!==null).map(([key,field])=>[key,field.value]))]));
     }
+    async cardSettingsFor(cardId) {
+      const row=await this.get("card_settings",cardId);
+      return Object.fromEntries(Object.entries(row?.fields||{}).filter(([,field])=>field.value!==null).map(([key,field])=>[key,field.value]));
+    }
     async introducedToday(now) {
       const day = studyDay(now, this.timing);
       return transaction(this.database, ["introduced"], "readonly", (tx) => request(tx.objectStore("introduced").index("day").count(day)));
@@ -2365,7 +2369,7 @@
      * Checkpoints commit only after every event in that file has been indexed.
      */
     async sync(files, read, knownCards, { progress = () => {
-    }, force = /* @__PURE__ */ new Set(), readSchedulerConfig } = {}) {
+    }, force = /* @__PURE__ */ new Set(), readSchedulerConfig, onEvents } = {}) {
       const configs=new Map();
       const cached = await transaction(this.database, ["files"], "readonly", async (tx) => {
         const store = tx.objectStore("files");
@@ -2391,7 +2395,7 @@
           if (text.length >= old.length && await hash(text.slice(0, old.length)) === old.hash) start = old.length;
           else {
             await this.clear();
-            const result = await this.sync(files, read, knownCards, { progress, readSchedulerConfig });
+            const result = await this.sync(files, read, knownCards, { progress, readSchedulerConfig, onEvents });
             return { ...result, rebuilt: true };
           }
         }
@@ -2409,11 +2413,12 @@
           parsed++;
           if (batch.length === 500) {
             await this.ingest(batch, knownCards, {readSchedulerConfig,configs});
+            onEvents?.(batch);
             batch = [];
             progress(parsed, file.path);
           }
         }
-        if (batch.length) await this.ingest(batch, knownCards, {readSchedulerConfig,configs});
+        if (batch.length){await this.ingest(batch, knownCards, {readSchedulerConfig,configs});onEvents?.(batch);}
         await this.put("files", file.path, { mtime: file.stat?.mtime, size: file.stat?.size, length: text.length, hash: await hash(text) });
         progress(parsed, file.path);
       }

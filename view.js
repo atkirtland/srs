@@ -2307,6 +2307,10 @@
       const rows=await transaction(this.database,["card_settings"],"readonly",tx=>request(tx.objectStore("card_settings").getAll()));
       return new Map(rows.map(row=>[row.card_id,Object.fromEntries(Object.entries(row.fields).filter(([,field])=>field.value!==null).map(([key,field])=>[key,field.value]))]));
     }
+    async cardSettingsFor(cardId) {
+      const row=await this.get("card_settings",cardId);
+      return Object.fromEntries(Object.entries(row?.fields||{}).filter(([,field])=>field.value!==null).map(([key,field])=>[key,field.value]));
+    }
     async introducedToday(now) {
       const day = studyDay(now, this.timing);
       return transaction(this.database, ["introduced"], "readonly", (tx) => request(tx.objectStore("introduced").index("day").count(day)));
@@ -2365,7 +2369,7 @@
      * Checkpoints commit only after every event in that file has been indexed.
      */
     async sync(files, read, knownCards, { progress = () => {
-    }, force = /* @__PURE__ */ new Set(), readSchedulerConfig } = {}) {
+    }, force = /* @__PURE__ */ new Set(), readSchedulerConfig, onEvents } = {}) {
       const configs=new Map();
       const cached = await transaction(this.database, ["files"], "readonly", async (tx) => {
         const store = tx.objectStore("files");
@@ -2391,7 +2395,7 @@
           if (text.length >= old.length && await hash(text.slice(0, old.length)) === old.hash) start = old.length;
           else {
             await this.clear();
-            const result = await this.sync(files, read, knownCards, { progress, readSchedulerConfig });
+            const result = await this.sync(files, read, knownCards, { progress, readSchedulerConfig, onEvents });
             return { ...result, rebuilt: true };
           }
         }
@@ -2409,11 +2413,12 @@
           parsed++;
           if (batch.length === 500) {
             await this.ingest(batch, knownCards, {readSchedulerConfig,configs});
+            onEvents?.(batch);
             batch = [];
             progress(parsed, file.path);
           }
         }
-        if (batch.length) await this.ingest(batch, knownCards, {readSchedulerConfig,configs});
+        if (batch.length){await this.ingest(batch, knownCards, {readSchedulerConfig,configs});onEvents?.(batch);}
         await this.put("files", file.path, { mtime: file.stat?.mtime, size: file.stat?.size, length: text.length, hash: await hash(text) });
         progress(parsed, file.path);
       }
@@ -2616,12 +2621,13 @@ function queueKind(card, value, manifest, now, today = dayNumber(now, manifest.t
   }
   return null;
 }
-function deckTree(cards, states, manifest, now, activity = []) {
+function deckTree(cards, states, manifest, now, activity = [], aggregates = null) {
   const meta = manifest.scheduling;
   if (!meta) return [];
   const today = dayNumber(now, manifest.timing);
   const nodes = new Map(Object.values(meta.decks).map(deck => [deck.id, {...deck, children: [],
     new: 0, review: 0, intraday: 0, interday: 0, errors: 0, total: 0}]));
+  if(aggregates)for(const [id,raw] of aggregates.raw){const node=nodes.get(id);if(node)for(const key of ["new","review","intraday","interday","errors","total"])node[key]=raw[key]||0;}
   for (const c of cards) {
     if (c.retired) continue;
     const node = nodes.get(c.deck_id);
@@ -2633,7 +2639,7 @@ function deckTree(cards, states, manifest, now, activity = []) {
   }
   const roots = [];
   for (const n of nodes.values()) (nodes.get(n.parent_id)?.children || roots).push(n);
-  const added = new Map(), introduced = new Set();
+  const added = aggregates?.added || new Map(), introduced = new Set();
   const byCard = new Map(cards.map(c => [c.id, c]));
   const currentDay = studyDay(now, manifest.timing);
   for (const event of activity) {
@@ -2963,9 +2969,172 @@ function sourceBlocks(text) {
       front:m[1].trim(),tags:[...new Set([...m[2].matchAll(/(?<![\w/])#([\p{L}\p{N}_/-]+)/gu)].map(t=>t[1]))],back:m[2].split(/\r?\n/).map(l=>l.replace(/^[ \t]{0,3}>[ \t]?/,"")).filter(l=>!/^\s*(?:#[^\s#]+\s*)+$/.test(l)).join("\n").trim()}];
   });
 }
+// In-memory scheduling index. Catalog scans belong to construction, not navigation.
+const INDEX_KINDS = ["new", "review", "intraday", "interday"];
+const indexZeros = () => ({new:0,review:0,intraday:0,interday:0,total:0,errors:0});
+const indexOrder = (a,b) => (a.anki_due??0)-(b.anki_due??0)||a.id.localeCompare(b.id);
+class SchedulingOrder {
+  constructor(compare=indexOrder){this.root=null;this.compare=compare;}
+  priority(id){let h=2166136261;for(let i=0;i<id.length;i++)h=Math.imul(h^id.charCodeAt(i),16777619);return h>>>0;}
+  fix(n){if(!n)return n;n.size=1+(n.left?.size||0)+(n.right?.size||0);n.best=n.card;for(const child of [n.left,n.right])if(child&&this.compare(child.best,n.best)<0)n.best=child.best;return n;}
+  rotate(n,right){const p=n[right?'left':'right'];n[right?'left':'right']=p[right?'right':'left'];p[right?'right':'left']=this.fix(n);return this.fix(p);}
+  insert(card){
+    const add=n=>{if(!n)return this.fix({card,priority:this.priority(card.id),left:null,right:null});const cmp=indexOrder(card,n.card);if(!cmp){n.card=card;return this.fix(n);}const side=cmp<0?'left':'right';n[side]=add(n[side]);return n[side].priority<n.priority?this.rotate(n,cmp<0):this.fix(n);};
+    this.root=add(this.root);
+  }
+  remove(card){
+    const del=n=>{if(!n)return null;const cmp=indexOrder(card,n.card);if(cmp<0)n.left=del(n.left);else if(cmp>0)n.right=del(n.right);else{if(!n.left)return n.right;if(!n.right)return n.left;const right=n.left.priority<n.right.priority;n=this.rotate(n,right);n[right?'right':'left']=del(n[right?'right':'left']);}return this.fix(n);};
+    this.root=del(this.root);
+  }
+  bulk(cards){
+    const stack=[];
+    for(const card of cards){const node={card,priority:this.priority(card.id),left:null,right:null};let last=null;while(stack.length&&stack.at(-1).priority>node.priority)last=stack.pop();node.left=last;if(stack.length)stack.at(-1).right=node;stack.push(node);}
+    this.root=stack[0]||null;const finish=n=>{if(n){finish(n.left);finish(n.right);this.fix(n);}};finish(this.root);
+  }
+  rank(card){let n=this.root,total=0;while(n){if(indexOrder(n.card,card)<=0){total+=1+(n.left?.size||0);n=n.right;}else n=n.left;}return total;}
+  bestThrough(bound){
+    if(!bound)return this.root?.best;
+    let n=this.root,best;const take=c=>{if(c&&(!best||this.compare(c,best)<0))best=c;};
+    while(n){if(indexOrder(n.card,bound)<=0){take(n.left?.best);take(n.card);n=n.right;}else n=n.left;}return best;
+  }
+}
+class SchedulingIndex {
+  constructor(cards,states,manifest,activity,now,memberships){
+    this.cards=new Map(cards.map(c=>[c.id,c]));this.states=states;this.manifest=manifest;this.now=now;this.today=dayNumber(now,manifest.timing);
+    this.scopes=new Map();this.reverse=new Map();this.roots=new Map();this.nativeDecksByRoot=new Map();this.rootScopes=new Map();this.added=new Map();this.introduced=new Set();this.kinds=new Map();this.wakes=[];this.versions=new Map();
+    this.stats={catalogCards:0,cardUpdates:0,countUpdates:0,queueReads:0};this.buried=new Set();this.ordering=new Map();this.building=true;
+    this.deckOrder=Object.entries(manifest.study?.decks||{}).sort(([,a],[,b])=>a.name.localeCompare(b.name));
+    for(const deck of Object.values(manifest.scheduling.decks)){let root=deck;while(root.parent_id)root=manifest.scheduling.decks[root.parent_id];this.roots.set(deck.id,root.id);if(!this.nativeDecksByRoot.has(root.id))this.nativeDecksByRoot.set(root.id,{});this.nativeDecksByRoot.get(root.id)[deck.id]=deck;}
+    const memberDecks=new Map();
+    if(manifest.study){for(const [id,ids] of memberships||studyMemberships(cards,manifest.study,manifest))for(const cid of ids){if(!memberDecks.has(cid))memberDecks.set(cid,[]);memberDecks.get(cid).push(id);}}
+    else for(const card of cards){const ids=[];let deck=manifest.scheduling.decks[card.deck_id];while(deck){ids.push(deck.id);deck=manifest.scheduling.decks[deck.parent_id];}memberDecks.set(card.id,ids);}
+    for(const card of [...cards].sort(indexOrder)){
+      this.stats.catalogCards++;
+      const keys=[];for(const id of [null,...(memberDecks.get(card.id)||[])])for(const group of ['',...(card.group?[card.group]:[])]){
+        const key=JSON.stringify([id,group]);keys.push(key);
+        if(!this.scopes.has(key))this.scopes.set(key,{id,group,buckets:new Map(),counts:null,orders:Object.fromEntries(INDEX_KINDS.map(k=>[k,new SchedulingOrder((a,b)=>this.compareDue(a,b))]))});
+        const root=this.roots.get(card.deck_id);if(!this.rootScopes.has(root))this.rootScopes.set(root,new Set());this.rootScopes.get(root).add(key);
+      }
+      this.reverse.set(card.id,keys);this.change(card,1);this.scheduleWake(card);
+    }
+    this.building=false;
+    for(const scope of this.scopes.values())for(const orders of [scope.orders,...[...scope.buckets.values()].map(b=>b.orders)])for(const order of Object.values(orders)){order.bulk(order.pending||[]);delete order.pending;}
+    for(const event of activity)this.addActivity(event);
+    this.refreshCounts(new Set(this.scopes.keys()));
+  }
+  key(id,group=''){return JSON.stringify([id??null,group||'']);}
+  bucket(scope,id){if(!scope.buckets.has(id))scope.buckets.set(id,{...indexZeros(),orders:Object.fromEntries(INDEX_KINDS.map(k=>[k,new SchedulingOrder((a,b)=>this.compareDue(a,b))]))});return scope.buckets.get(id);}
+  change(card,delta){
+    if(card.retired)return;
+    const kind=delta>0?queueKind(card,this.states.get(card.id),this.manifest,this.now,this.today):this.kinds.get(card.id);
+    if(delta>0){this.kinds.set(card.id,kind);const state=this.states.get(card.id)?.state;this.ordering.set(card.id,{priority:kind==='intraday'?(state.due>this.now?4:0):kind==='interday'?1:kind==='review'?2:3,due:state?.due||0});}
+    for(const key of this.reverse.get(card.id)||[]){const b=this.bucket(this.scopes.get(key),card.deck_id);b.total+=delta;if(card.content_error)b.errors+=delta;if(kind){b[kind]+=delta;if(delta>0&&!this.buried.has(card.id)){for(const order of [b.orders[kind],this.scopes.get(key).orders[kind]]){if(this.building)(order.pending??=[]).push(card);else order.insert(card);}}else{b.orders[kind].remove(card);this.scopes.get(key).orders[kind].remove(card);}}}
+    if(delta>0)this.kinds.set(card.id,kind);
+  }
+  addActivity(event){
+    if(event.kind==='historical_review'||event.kind==='scheduling_baseline'||event.kind==='card_settings'||studyDay(event.review_time_ms,this.manifest.timing)!==studyDay(this.now,this.manifest.timing))return;
+    const card=this.cards.get(event.card_id);if(!card||event.was_new&&this.introduced.has(card.id))return;
+    if(event.was_new)this.introduced.add(card.id);
+    let deck=this.manifest.scheduling.decks[card.original_deck_id||card.deck_id];
+    while(deck){const value=this.added.get(deck.id)||{new:0,review:0};if(event.was_new)value.new++;else if(event.was_review??event.state?.state===State.Review)value.review++;this.added.set(deck.id,value);deck=this.manifest.scheduling.decks[deck.parent_id];}
+  }
+  nativeTree(){
+    if(!this.native){const raw=this.scopes.get(this.key(null))?.buckets||new Map();this.native=deckTree([],this.states,this.manifest,this.now,[],{raw,added:this.added});}
+    return this.native;
+  }
+  indexNativeRoots(){
+    this.nativeById=new Map();this.nativeRootPositions=new Map();
+    const visit=n=>{this.nativeById.set(n.id,n);n.children.forEach(visit);};
+    this.native.forEach((n,i)=>{this.nativeRootPositions.set(n.id,i);visit(n);});
+  }
+  updateNativeRoots(roots){
+    if(!this.native){this.nativeTree();this.indexNativeRoots();return;}
+    if(!roots)return;
+    const raw=this.scopes.get(this.key(null))?.buckets||new Map();
+    for(const root of roots){
+      const decks=this.nativeDecksByRoot.get(root);if(!decks)continue;
+      const localRaw=new Map(Object.keys(decks).map(id=>[id,raw.get(id)||indexZeros()]));
+      const manifest={...this.manifest,scheduling:{...this.manifest.scheduling,decks}};
+      const node=deckTree([],this.states,manifest,this.now,[],{raw:localRaw,added:this.added})[0];
+      const position=this.nativeRootPositions.get(root);
+      if(position!==undefined){this.native[position]=node;const visit=n=>{this.nativeById.set(n.id,n);n.children.forEach(visit);};visit(node);}
+    }
+  }
+  selectedRoots(scope,roots){
+    if(this.manifest.study||!scope.id)return roots?[...roots].map(id=>this.nativeById.get(id)).filter(Boolean):this.nativeTree();
+    if(roots&&!roots.has(this.roots.get(scope.id)))return [];
+    const node=this.nativeById.get(scope.id);return node?[node]:[];
+  }
+  computeCounts(scope,roots){
+    const count=n=>{const b=scope.buckets.get(n.id)||indexZeros(),v={...b};for(const child of n.children){const c=count(child);for(const k of INDEX_KINDS)v[k]+=c[k];v.total+=c.total;v.errors+=c.errors;}for(const k of INDEX_KINDS)v[k]=Math.min(v[k],n[k]);return v;};
+    scope.rootCounts??=new Map();const out=scope.counts||indexZeros();
+    for(const root of this.selectedRoots(scope,roots)){
+      const value=count(root),previous=scope.rootCounts.get(root.id)||indexZeros();
+      for(const k of [...INDEX_KINDS,'total','errors'])out[k]+=value[k]-previous[k];
+      scope.rootCounts.set(root.id,value);
+    }
+    this.stats.countUpdates++;return {...out,fresh:out.new,learning:out.intraday+out.interday};
+  }
+  refreshCounts(keys,roots){this.updateNativeRoots(roots);for(const key of keys){const scope=this.scopes.get(key);if(scope)scope.counts=this.computeCounts(scope,roots);}}
+  counts(id=null,group=''){return this.scopes.get(this.key(id,group))?.counts||{...indexZeros(),fresh:0,learning:0};}
+  tree(group=''){
+    if(!this.manifest.study){const copy=nodes=>nodes.map(n=>({...n,...this.counts(n.id,group),children:copy(n.children)}));return copy(this.nativeTree());}
+    const nodes=new Map();for(const [id,deck] of this.deckOrder)nodes.set(id,{id,...deck,...this.counts(id,group),children:[]});
+    const roots=[];for(const node of nodes.values())(nodes.get(node.parent_id)?.children||roots).push(node);
+    return roots;
+  }
+  compareDue(a,b){
+    const x=this.ordering.get(a.id),y=this.ordering.get(b.id);
+    return x.priority-y.priority||x.due-y.due||a.id.localeCompare(b.id);
+  }
+  bury(id){
+    if(this.buried.has(id))return;this.buried.add(id);
+    const card=this.cards.get(id),kind=this.kinds.get(id);if(!kind)return;
+    for(const key of this.reverse.get(id)||[]){const scope=this.scopes.get(key);scope.buckets.get(card.deck_id).orders[kind].remove(card);scope.orders[kind].remove(card);}
+  }
+  queue(id=null,group=''){
+    this.stats.queueReads++;const scope=this.scopes.get(this.key(id,group));if(!scope)return {...this.counts(id,group),cards:[]};
+    let best;const take=c=>{if(c&&(!best||this.compareDue(c,best)<0))best=c;};
+    for(const kind of INDEX_KINDS){
+      // A node's allowance selects a prefix in Anki allocation order. Rank and
+      // prefix-min queries find its next card without materializing that prefix.
+      const count=(n,bound)=>{let value=bound?scope.buckets.get(n.id)?.orders[kind].rank(bound)||0:scope.buckets.get(n.id)?.orders[kind].root?.size||0;for(const child of n.children)value+=count(child,bound);return Math.min(value,n[kind]);};
+      const boundary=(n,limit)=>{let at=scope.orders[kind].root,result;while(at){if(count(n,at.card)>=limit){result=at.card;at=at.left;}else at=at.right;}return result;};
+      const visit=(n,bound)=>{
+        if(!n[kind])return;
+        let available=bound?scope.buckets.get(n.id)?.orders[kind].rank(bound)||0:scope.buckets.get(n.id)?.orders[kind].root?.size||0;
+        for(const child of n.children)available+=count(child,bound);
+        if(available>n[kind])bound=boundary(n,n[kind]);
+        take(scope.buckets.get(n.id)?.orders[kind].bestThrough(bound));
+        for(const child of n.children)visit(child,bound);
+      };
+      for(const root of this.selectedRoots(scope))visit(root,null);
+    }
+    return {...scope.counts,cards:best?[best]:[]};
+  }
+  update(card,value,event){
+    const previous=this.cards.get(card.id);this.change(previous,-1);this.cards.set(card.id,card);if(value)this.states.set(card.id,value);this.change(card,1);this.scheduleWake(card);if(event)this.addActivity(event);this.stats.cardUpdates++;
+    // Shared parent/preset allowances can change sibling counts too.
+    const roots=new Set([this.roots.get(previous.deck_id),this.roots.get(card.deck_id),this.roots.get(card.original_deck_id||card.deck_id)]);
+    const keys=new Set();for(const root of roots)for(const key of this.rootScopes.get(root)||[])keys.add(key);this.refreshCounts(keys,roots);
+  }
+  scheduleWake(card){
+    const version=(this.versions.get(card.id)||0)+1;this.versions.set(card.id,version);
+    const state=this.states.get(card.id)?.state,q=state?.queue??card.queue,due=state?.due??card.due_ms;
+    const times=q===1||q===4?[due-(this.manifest.scheduling.collection.collapseTime??1200)*1000+(q===1?1:0),due]:[2,3].includes(q)&&state?.anki_due===undefined&&card.anki_due===undefined?[due]:[];
+    for(const time of times)if(time>this.now){const entry={time,id:card.id,version};this.wakes.push(entry);let i=this.wakes.length-1;while(i){const p=(i-1)>>1;if(this.wakes[p].time<=time)break;this.wakes[i]=this.wakes[p];i=p;}this.wakes[i]=entry;}
+  }
+  advance(now){
+    if(dayNumber(now,this.manifest.timing)!==this.today)return false;
+    this.now=now;
+    while(this.wakes[0]?.time<=now){const first=this.wakes[0],last=this.wakes.pop();if(this.wakes.length){this.wakes[0]=last;let i=0;while(true){let c=i*2+1;if(c>=this.wakes.length)break;if(c+1<this.wakes.length&&this.wakes[c+1].time<this.wakes[c].time)c++;if(this.wakes[i].time<=this.wakes[c].time)break;[this.wakes[i],this.wakes[c]]=[this.wakes[c],this.wakes[i]];i=c;}}if(this.versions.get(first.id)===first.version)this.update(this.cards.get(first.id));}
+    return true;
+  }
+  get nextWake(){return this.wakes[0]?.time??Infinity;}
+}
 
   if (globalThis.__SRS_TEST__) {
-    globalThis.SRS = {readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, schedulerV2, effectiveSettings, renderV2, resolveImageEmbeds, transformField, fieldsFromNote,
+    globalThis.SRS = {SchedulingIndex, SchedulingOrder, readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, schedulerV2, effectiveSettings, renderV2, resolveImageEmbeds, transformField, fieldsFromNote,
       deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
       ReviewIndex, appendReview, validateEvent, saveSchedulerConfig, verifySchedulerConfig, parseCSV, indexRows, configuredCards, initialState};
     return;
@@ -3001,26 +3170,32 @@ function sourceBlocks(text) {
     const dirty = new Set(), cache = new Map(), skipped = new Set();
     let taxonomy;
     const contentCache=new Map(), metadataCache=new Map(), metrics=[];
-    const counters={fileReads:0,sourceReads:0,renders:0,indexSyncs:0};
+    const counters={fileReads:0,sourceReads:0,renders:0,indexSyncs:0,schedulingBuilds:0,cardPreparations:0};
     let hydrationKey, statesSnapshot, statesRevision;
     const profileCache=new Map();
     let runtimeCache, snapshotCache, runtimeDirty=true, indexDirty=true, catalogDirty=true;
-    let operation=0, checking=false, queueCache=new Map(), membershipCache=new Map(), deckCountsCache;
+    let operation=0, checking=false, membershipCache=new Map();
+    let schedulingIndex, runtimeCards, runtimeSources, runtimeSnapshot;
+    const runtimePositions=new Map(), knownErrors=new Map();
+    let runtimeLoaded, runtimeBase;
+    let knownCardIds, reviewFiles;
     const clock=()=>globalThis.performance?.now?.()??Date.now();
     async function measure(name,fn){const start=clock();try{return await fn();}finally{metrics.push({name,ms:Math.round((clock()-start)*100)/100});if(metrics.length>60)metrics.shift();}}
     const performanceButton=toolBody.createEl("button",{text:"Performance details"});
-    performanceButton.onclick=()=>{notice.textContent=JSON.stringify(counters)+" · "+metrics.map(x=>`${x.name}: ${x.ms}ms`).join(" · ");};
+    performanceButton.onclick=()=>{notice.textContent=JSON.stringify({...counters,scheduling:schedulingIndex?.stats})+" · "+metrics.map(x=>`${x.name}: ${x.ms}ms`).join(" · ");};
     const checkButton=toolBody.createEl("button",{text:"Check content"});
     const cancelCheck=toolBody.createEl("button",{text:"Cancel content check"});
     cancelCheck.onclick=()=>{operation++;checking=false;notice.textContent="Content check cancelled; completed results retained.";};
-    function resetQueues(){queueCache.clear();membershipCache.clear();profileCache.clear();deckCountsCache=null;}
+    function resetQueues(){membershipCache.clear();profileCache.clear();schedulingIndex=null;runtimeCards=null;}
     function deckMatches(card,id){return membershipCache.get(id)?.has(card.id)??studyDeckMatches(card,id,studyConfig,manifest);}
     function inScope(card,deck=selectedDeck){return !card.retired && (!select.value||card.group===select.value) && (!deck || (studyConfig?deckMatches(card,deck):manifest.scheduling.decks[card.deck_id]?.name===manifest.scheduling.decks[deck]?.name||manifest.scheduling.decks[card.deck_id]?.name.startsWith(manifest.scheduling.decks[deck]?.name+"::")));}
     async function rendered(card){
       if(contentCache.has(card.id))return {...card,...contentCache.get(card.id),card_settings:card.card_settings};
       counters.renders++;const generation=sourceGeneration,key=configKey;
       let result;try{result={...await resolveSource({...card}),validation:"valid"};}catch(e){result={...card,content_error:e.message,validation:"error"};}
-      if(generation===sourceGeneration&&key===configKey&&!disposed){contentCache.set(card.id,result);queueCache.clear();deckCountsCache=null;}
+      if(generation===sourceGeneration&&key===configKey&&!disposed){contentCache.set(card.id,result);
+        if(runtimeCards){const position=runtimePositions.get(card.id);if(position!==undefined)runtimeCards[position]=result;if(result.content_error)knownErrors.set(card.id,result);else knownErrors.delete(card.id);}
+        schedulingIndex?.update(result);}
       return result;
     }
     async function checkContent(deck=selectedDeck){
@@ -3032,7 +3207,7 @@ function sourceBlocks(text) {
           await rendered(all[i]);
           if(i%25===0){notice.textContent=`Checking content: ${i+1}/${all.length}`;await new Promise(resolve=>setTimeout(resolve,0));}
         }
-      }catch(e){message(e);}finally{if(token===operation){checking=false;queueCache.clear();await guardedDraw();}}
+      }catch(e){message(e);}finally{if(token===operation){checking=false;await guardedDraw();}}
     }
     checkButton.onclick=()=>checkContent(managing?managerDeck:selectedDeck);
 
@@ -3053,7 +3228,7 @@ function sourceBlocks(text) {
     deviceSelect.onchange=()=>{deviceId=deviceSelect.value;localStorage.setItem(`${identity}:device-name`,deviceId);};
     component.register(() => {disposed=true;operation++;clearTimeout(refreshTimer);index?.close();});
     const store = {
-      async list(directory) {return api.vault.getFiles().filter(f=>f.path.startsWith(directory+"/"));},
+      async list(directory) {return directory===`${dataRoot}/reviews`?[...reviewFileMap().values()]:api.vault.getFiles().filter(f=>f.path.startsWith(directory+"/"));},
       async read(path) {counters.fileReads++;const f=api.vault.getAbstractFileByPath(path);return f ? api.vault.read(f) : null;},
       async create(path,text) {await api.vault.create(path,text);},
       async mkdir(path) {if(!api.vault.getAbstractFileByPath(path))try{await api.vault.createFolder(path);}catch(error){if(!api.vault.getAbstractFileByPath(path))throw error;}},
@@ -3073,18 +3248,42 @@ function sourceBlocks(text) {
     }
     function message(e) {notice.textContent=String(e.message||e);}
     function clearCard() {context.empty();front.empty();back.empty();actions.empty();source.empty();homepage.empty();shown=null;}
-    function logFiles() {return api.vault.getFiles().filter(f=>
-      f.path.startsWith(`${dataRoot}/reviews/`) && LOG_PATTERN.test(f.path.split("/").at(-1)))
-      .map(f=>({path:f.path,stat:f.stat?{...f.stat}:undefined}));}
+    function reviewFileMap(){
+      if(!reviewFiles)reviewFiles=new Map(api.vault.getFiles().filter(f=>f.path.startsWith(`${dataRoot}/reviews/`)&&LOG_PATTERN.test(f.path.split("/").at(-1))).map(f=>[f.path,f]));
+      return reviewFiles;
+    }
+    function logFiles(){return [...reviewFileMap().values()].map(f=>({path:f.path,stat:f.stat?{...f.stat}:undefined}));}
     async function syncIndex() {
       counters.indexSyncs++;
       const force=new Set([...dirty].filter(p=>p.startsWith(`${dataRoot}/reviews/`)));
-      await index.sync(logFiles(),async f=>{const t=await store.read(f.path);if(t===null)throw Error(`Log disappeared: ${f.path}`);return t;},new Set(cards.map(c=>c.id)),{
+      const changes=[];
+      const result=await index.sync(logFiles(),async f=>{const t=await store.read(f.path);if(t===null)throw Error(`Log disappeared: ${f.path}`);return t;},knownCardIds,{
         force, readSchedulerConfig:id=>store.read(`${dataRoot}/scheduler-configs/${id}.json`),
+        onEvents:snapshotCache?batch=>changes.push(...batch):undefined,
         progress:n=>{if(!disposed && n>=500)notice.textContent=`Indexing reviews: ${n.toLocaleString()}…`;}
       });
       for(const path of force)dirty.delete(path);
-      indexDirty=true;queueCache.clear();
+      if(snapshotCache){
+        if(result.rebuilt||changes.some(e=>e.kind==='card_settings')){snapshotCache=null;runtimeCards=null;schedulingIndex=null;indexDirty=true;}
+        else {
+          snapshotCache.activityIds??=new Set(snapshotCache.activity.map(e=>e.id));
+          const touched=new Set();
+          for(const event of changes){
+            if(event.kind==='historical_review'||event.kind==='scheduling_baseline')continue;
+            touched.add(event.card_id);
+            if(!snapshotCache.activityIds.has(event.id)&&studyDay(event.review_time_ms,manifest.timing)===studyDay(Date.now(),manifest.timing)){
+              snapshotCache.activityIds.add(event.id);snapshotCache.activity.push(event);schedulingIndex?.addActivity(event);
+            }
+          }
+          for(const id of touched){
+            const latest=await index.get("latest",id);snapshotCache.latest.set(id,latest);
+            const card=runtimeCards?.[runtimePositions.get(id)];
+            if(card){const value=current(card,states.get(id)?.state,latest);states.set(id,value);schedulingIndex?.update(card,value);}
+          }
+          indexDirty=false;
+        }
+      }
+      return result;
     }
     async function noteAt(file) {
       let stored=cache.get(file.path);
@@ -3169,10 +3368,10 @@ function sourceBlocks(text) {
       const generation=sourceGeneration;
 
       const result=[];
+      const needsMetadata=/"(?:tags|properties)"/.test(JSON.stringify({decks:studyConfig?.decks,rules:studyConfig?.profile_rules}));
       for(const configured of configuredCards(cards,config)) {
         const rule=studyConfig?.source_rules[configured.group];
         const card=rule && configured.source ? {...configured,source:{...configured.source,fields:rule.fields,prepare:rule.prepare||null}}:configured;
-        const needsMetadata=JSON.stringify({decks:studyConfig?.decks,rules:studyConfig?.profile_rules}).match(/"(?:tags|properties)"/);
         try {
           if(needsMetadata&&!card.retired){if(!metadataCache.has(card.id))metadataCache.set(card.id,await resolveSource({...card},true));result.push(metadataCache.get(card.id));}
           else result.push({...card,validation:"unchecked"});
@@ -3205,16 +3404,18 @@ function sourceBlocks(text) {
       if(n.errors)el.createEl("span",{text:` · ${n.errors} content errors`,cls:"srs-errors"});
     }
     function contentProblems(available) {
-      return available.filter(c=>c.content_error && (!select.value || c.group===select.value) &&
+      return [...knownErrors.values()].filter(c=>c.content_error && (!select.value || c.group===select.value) &&
         (studyConfig ? !selectedDeck || deckMatches(c,selectedDeck) : !selectedDeck || manifest.scheduling.decks[c.deck_id]?.name===manifest.scheduling.decks[selectedDeck]?.name ||
           manifest.scheduling.decks[c.deck_id]?.name.startsWith(manifest.scheduling.decks[selectedDeck]?.name+"::")));
     }
     function showErrors(available) {
-      const problems=contentProblems(available);
-      if(!problems.length)return;
-      const details=homepage.createEl("details");details.createEl("summary",{text:`Inspect ${problems.length} content errors`});
+      const count=schedulingIndex?.counts(selectedDeck,select.value).errors??contentProblems(available).length;
+      if(!count)return;
+      let problems;
+      const details=homepage.createEl("details");details.createEl("summary",{text:`Inspect ${count} content errors`});
       let offset=0,more;
       const page=()=>{
+        problems??=contentProblems(available);
         if(more)more.disabled=true;
         for(const card of problems.slice(offset,offset+50)) {
           const row=details.createDiv();row.createEl("p",{text:`${card.anki_notetype||"Card"} · ${card.note_uid||card.id}: ${card.content_error}`});
@@ -3474,7 +3675,9 @@ function sourceBlocks(text) {
           await syncIndex();
           const event={format_version:2,kind:"card_settings",id:crypto.randomUUID(),device_id:deviceId,card_id:card.id,time_ms:Date.now(),changes};
           validateEvent(event,manifest.import_id);
-          dirty.add(await appendReview(store,`${dataRoot}/reviews`,event));await syncIndex();
+          const logPath=await appendReview(store,`${dataRoot}/reviews`,event);
+          reviewFileMap().set(logPath,api.vault.getAbstractFileByPath(logPath));
+          dirty.add(logPath);await syncIndex();
         });
         managerDirty=false;await draw();notice.textContent="Card settings saved.";
       }catch(e){message(e);homepage.querySelectorAll("button").forEach(button=>button.disabled=false);}
@@ -3494,75 +3697,79 @@ function sourceBlocks(text) {
       if(freshManifest.import_id!==baseManifest.import_id)throw Error("Imported baseline changed; reopen this view");
       if(freshManifest.revision!==baseManifest.revision){await loadCatalog(freshManifest);resolvedCards=null;contentCache.clear();metadataCache.clear();resetQueues();}
       const loaded=await cachedConfiguration();
-      studyConfig=loaded.study;studyParts=loaded.parts;studyKey=canonical(studyConfig);
-      manifest=studyConfig?studyRuntimeManifest(baseManifest,studyConfig):baseManifest;
-      config=loaded.templates;const nextConfigKey=canonical({templates:config,study:studyConfig});
-      if(configKey!==nextConfigKey){contentCache.clear();metadataCache.clear();resolvedCards=null;resetQueues();operation++;}
-      configKey=nextConfigKey;catalogDirty=false;
+      if(runtimeLoaded!==loaded||runtimeBase!==baseManifest){
+        studyConfig=loaded.study;studyParts=loaded.parts;studyKey=canonical(studyConfig);
+        manifest=studyConfig?studyRuntimeManifest(baseManifest,studyConfig):baseManifest;
+        config=loaded.templates;const nextConfigKey=canonical({templates:config,study:studyConfig});
+        if(configKey!==nextConfigKey){contentCache.clear();metadataCache.clear();resolvedCards=null;resetQueues();operation++;}
+        configKey=nextConfigKey;runtimeLoaded=loaded;runtimeBase=baseManifest;
+      }
+      catalogDirty=false;
       const nextHydrationKey=baseManifest.revision+":"+configKey;
       if(hydrationKey!==nextHydrationKey){cards=baseManifest.note_partition_count===undefined?rawCards:hydrateCatalog(rawCards,noteBindings,studyConfig);hydrationKey=nextHydrationKey;}
       const today=dayNumber(Date.now(),manifest.timing);
       if(!snapshotCache||indexDirty||snapshotCache.today!==today){
-        snapshotCache=await measure("Review index",()=>withStoreLock(identity,async()=>{await syncIndex();return {latest:await index.latest(),activity:await index.activityToday(Date.now()),settings:await index.cardSettings(),today};}));
-        indexDirty=false;resetQueues();
+        await measure("Review index",()=>withStoreLock(identity,async()=>{
+          if(snapshotCache?.today!==today)snapshotCache=null;
+          await syncIndex();
+          if(!snapshotCache){snapshotCache={latest:await index.latest(),activity:await index.activityToday(Date.now()),settings:await index.cardSettings(),today};resetQueues();}
+        }));
+        indexDirty=false;
       }
       const snapshot=snapshotCache;
-      const available=(await measure("Source metadata",readSources)).map(card=>{
-        if(contentCache.has(card.id))card={...card,...contentCache.get(card.id)};
-        const value={...card,card_settings:snapshot.settings.get(card.id)||{}};
-        if(studyConfig){if(!profileCache.has(card.id)){try{studyProfileId(value,studyConfig,manifest);profileCache.set(card.id,null);}catch(e){profileCache.set(card.id,e.message);}}if(profileCache.get(card.id))value.content_error=profileCache.get(card.id);}
-        return value;
-      });
+      const sources=await measure("Source metadata",readSources);
+      if(!runtimeCards||runtimeSources!==sources||runtimeSnapshot!==snapshot){
+        counters.cardPreparations++;
+        runtimePositions.clear();knownErrors.clear();
+        runtimeCards=await measure("Card index preparation",async()=>sources.map((card,i)=>{
+          if(contentCache.has(card.id))card={...card,...contentCache.get(card.id)};
+          const value={...card,card_settings:snapshot.settings.get(card.id)||{}};
+          if(studyConfig){if(!profileCache.has(card.id)){try{studyProfileId(value,studyConfig,manifest);profileCache.set(card.id,null);}catch(e){profileCache.set(card.id,e.message);}}if(profileCache.get(card.id))value.content_error=profileCache.get(card.id);}
+          runtimePositions.set(card.id,i);if(value.content_error)knownErrors.set(card.id,value);return value;
+        }));
+        runtimeSources=sources;runtimeSnapshot=snapshot;schedulingIndex=null;
+      }
+      const available=runtimeCards;
       if(statesSnapshot!==snapshot||statesRevision!==baseManifest.revision){states=new Map();
-      for(const card of available) {
-        const projection=card.baseline || {state:card.queue===0?State.New:card.card_type===3?State.Relearning:card.queue===2?State.Review:State.Learning,due:card.due_ms,queue:card.queue,anki_due:card.anki_due};
-        states.set(card.id,current(card,projection,snapshot.latest.get(card.id)));
+        for(const card of available) {
+          const projection=card.baseline || {state:card.queue===0?State.New:card.card_type===3?State.Relearning:card.queue===2?State.Review:State.Learning,due:card.due_ms,queue:card.queue,anki_due:card.anki_due};
+          states.set(card.id,current(card,projection,snapshot.latest.get(card.id)));
+        }
+        statesSnapshot=snapshot;statesRevision=baseManifest.revision;
       }
-      statesSnapshot=snapshot;statesRevision=baseManifest.revision;}
-      if(studyConfig&&!membershipCache.size)membershipCache=await measure("Deck membership",()=>studyMemberships(available,studyConfig,manifest));
-      const clockNow=Date.now();nextWake=Infinity;
-      for(const card of available){const st=states.get(card.id)?.state,q=st?.queue??card.queue,due=st?.due??card.due_ms;
-        const boundaries=q===1||q===4?[due-(manifest.scheduling?.collection.collapseTime??1200)*1000+1,due]:[2,3].includes(q)&&st?.anki_due===undefined&&card.anki_due===undefined?[due]:[];
-        for(const t of boundaries)if(t>clockNow)nextWake=Math.min(nextWake,t);
-      }
-      timeKey=String(dayNumber(clockNow,manifest.timing));
+      if(manifest.scheduling&&studyConfig&&!membershipCache.size)membershipCache=await measure("Deck membership",()=>studyMemberships(available,studyConfig,manifest));
+      const clockNow=Date.now();
+      if(schedulingIndex&&!schedulingIndex.advance(clockNow))schedulingIndex=null;
+      if(manifest.scheduling&&!schedulingIndex){counters.schedulingBuilds++;schedulingIndex=await measure("Scheduling index",()=>new SchedulingIndex(available,states,manifest,snapshot.activity,clockNow,studyConfig?membershipCache:null));for(const id of skipped)schedulingIndex.bury(id);}
+      nextWake=schedulingIndex?.nextWake??Infinity;
+      timeKey=String(schedulingIndex?.today??today);
       if(panel){showConfiguration(panel);return;}
       if(managing){showCardManager(available);return;}
-      const queueKey=JSON.stringify([selectedDeck,select.value,reviewing,[...skipped],timeKey]);
-      let queue=queueCache.get(queueKey);
-      if(!queue){queue=reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value,undefined,studyConfig?null:selectedDeck,skipped,
-        studyConfig && selectedDeck ? c=>deckMatches(c,selectedDeck):null);
-        queueCache.set(queueKey,queue);if(queueCache.size>30)queueCache.delete(queueCache.keys().next().value);
-      }
-      const errors=contentProblems(available).length;
       if(!reviewing && manifest.scheduling) {
-        if(studyConfig){
-          const key=JSON.stringify([select.value,timeKey,[...skipped],contentCache.size]);
-          if(deckCountsCache?.key!==key)deckCountsCache={key,tree:await measure("Deck counts",()=>studyDeckTree(available,states,manifest,Date.now(),snapshot.activity,skipped,select.value,membershipCache))};
-          queue.tree=deckCountsCache.tree;
-        }
-        showDecks(queue,available);notice.textContent=`${cards.length.toLocaleString()} cards · ${errors.toLocaleString()} known content errors · ${available.filter(c=>!c.retired&&!contentCache.has(c.id)).length.toLocaleString()} unchecked`;
+        const queue={tree:await measure("Deck screen",()=>schedulingIndex.tree(select.value))};
+        showDecks(queue,available);notice.textContent=`${cards.length.toLocaleString()} cards · ${knownErrors.size.toLocaleString()} known content errors · ${(schedulingIndex.counts().total-contentCache.size).toLocaleString()} unchecked`;
         return;
       }
+      const queue=await measure("Selected queue",()=>schedulingIndex?schedulingIndex.queue(selectedDeck,select.value):reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value));
       context.createEl("h2",{text:studyConfig?.decks[selectedDeck]?.name||manifest.scheduling?.decks[selectedDeck]?.name||select.value||"All decks"});
       context.createEl("button",{text:"Browse cards"}).onclick=()=>{managerDeck=selectedDeck||"";managerQuery="";managerStatus="all";editedCardId=null;managing=true;guardedDraw();};
 
       // Session skips do not change states, event logs, or the displayed counts.
       const renderGeneration=sourceGeneration;
       let card=queue.cards.find(c=>!skipped.has(c.id));
-      if(card){card=await measure("Render selected card",()=>rendered(card));const i=available.findIndex(c=>c.id===card.id);available[i]=card;}
+      if(card){card=await measure("Render selected card",()=>rendered(card));const i=runtimePositions.get(card.id);available[i]=card;}
       if(disposed||renderGeneration!==sourceGeneration){pending=true;return;}
-      showCounts(counts,{...queue,errors:contentProblems(available).length});showErrors(available);
+      showCounts(counts,{...queue,errors:schedulingIndex?.counts(selectedDeck,select.value).errors??contentProblems(available).length});showErrors(available);
       if(!card){front.textContent="No cards ready for review in this session.";return;}
       shown=card;started=Date.now();
-      const skip=()=>{skipped.add(card.id);guardedDraw();};
+      const skip=()=>{skipped.add(card.id);schedulingIndex?.bury(card.id);guardedDraw();};
       actions.createEl("button",{text:"Bury"}).onclick=skip;
       source.createEl("button",{text:"Card settings"}).onclick=()=>openCardSettings(card);
       if(card.source?.path)source.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
       if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       dv.el("div",card.frontText,{container:front});
       let options;
-      try {options=effectiveSettings(card,manifest);schedulerV2(options);if(!snapshot.latest.has(card.id))states.set(card.id,current(card,await baseline(card)));}
+      try {options=effectiveSettings(card,manifest);schedulerV2(options);if(!snapshot.latest.has(card.id)){const value=current(card,await baseline(card));states.set(card.id,value);if(!card.baseline)schedulingIndex?.update(card,value);}}
       catch(e){message(e);actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       const reveal=actions.createEl("button",{text:"Show answer",cls:"mod-cta"});
       reveal.onclick=()=>{
@@ -3587,7 +3794,7 @@ function sourceBlocks(text) {
           const latestConfig=await runtimeConfiguration();
           if(canonical({templates:latestConfig.templates,study:latestConfig.study})!==configKey)return "Configuration changed. Queue refreshed.";
           await syncIndex();
-          if(canonical((await index.cardSettings()).get(card.id)||{})!==canonical(card.card_settings))return "Card settings changed. Queue refreshed.";
+          if(canonical(await index.cardSettingsFor(card.id))!==canonical(card.card_settings))return "Card settings changed. Queue refreshed.";
           const value=current(card,states.get(card.id).state,await index.get("latest",card.id));
           if(value.parent!==states.get(card.id).parent)return "Card reviewed on another device. Queue refreshed.";
           const live=await resolveSource(card);
@@ -3600,7 +3807,9 @@ function sourceBlocks(text) {
             review_time_ms:now,duration_ms:Math.max(0,now-started),rating,was_new:value.state.state===State.New,
             was_review:value.state.state===State.Review,scheduler_config_id:schedulerConfigId,state:next};
           validateEvent(event,manifest.import_id);
-          dirty.add(await appendReview(store,`${dataRoot}/reviews`,event));await syncIndex();return null;
+          const logPath=await appendReview(store,`${dataRoot}/reviews`,event);
+          reviewFileMap().set(logPath,api.vault.getAbstractFileByPath(logPath));
+          dirty.add(logPath);await syncIndex();return null;
         });
         await draw();if(result)notice.textContent=result;
       }catch(e){clearCard();message(e);notice.textContent+=" — review paused. Refresh to retry.";}
@@ -3613,7 +3822,10 @@ function sourceBlocks(text) {
         const paths=[file.path,oldPath].filter(Boolean);
         let relevant=false;
         for(const path of paths){
-          if(path.startsWith(`${dataRoot}/reviews/`)){dirty.add(path);indexDirty=true;relevant=true;continue;}
+          if(path.startsWith(`${dataRoot}/reviews/`)){
+            if(reviewFiles){const f=api.vault.getAbstractFileByPath(path);if(f)reviewFiles.set(path,f);else reviewFiles.delete(path);}
+            dirty.add(path);indexDirty=true;relevant=true;continue;
+          }
           if(path===`${dataRoot}/manifest.json`||path===`${dataRoot}/catalog.pending.json`||path.startsWith(`${dataRoot}/cards/`)||path.startsWith(`${dataRoot}/notes/`)){catalogDirty=true;indexDirty=true;relevant=true;}
           if(path.startsWith(`${root}/config/`)||[`${root}/config.json`,`${root}/study.json`,`${dataRoot}/profiles.json`].includes(path)){runtimeDirty=true;contentCache.clear();metadataCache.clear();resolvedCards=null;relevant=true;}
           for(const card of cards){
@@ -3622,14 +3834,14 @@ function sourceBlocks(text) {
           }
         }
         if(!relevant)return;
-        sourceGeneration++;operation++;checking=false;candidateSources.clear();taxonomy=null;resetQueues();
-      }else{indexDirty=true;resetQueues();}
+        if(paths.some(path=>!path.startsWith(`${dataRoot}/reviews/`))){sourceGeneration++;operation++;checking=false;candidateSources.clear();taxonomy=null;resetQueues();}
+      }else{indexDirty=true;}
       clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);
     }
     home.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=false;managerDirty=false;reviewing=false;selectedDeck=null;guardedDraw();};
     manage.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=true;managerDirty=false;guardedDraw();};
     select.onchange=()=>{operation++;checking=false;if(!leaveEditor()){select.value=activeGroup;return;}activeGroup=select.value;panel="";managing=false;managerDirty=false;reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
-    refresh.onclick=()=>{if(managerDirty){notice.textContent="Save or discard changes before refreshing.";return;}cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;sourceGeneration++;operation++;checking=false;resetQueues();guardedDraw();};
+    refresh.onclick=()=>{if(managerDirty){notice.textContent="Save or discard changes before refreshing.";return;}reviewFiles=null;cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;sourceGeneration++;operation++;checking=false;resetQueues();guardedDraw();};
     rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     profilesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="profiles";guardedDraw();};
     sourcesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="sources";guardedDraw();};
@@ -3649,7 +3861,7 @@ function sourceBlocks(text) {
         nextNotes=await readPartitions(Array.from({length:value.note_partition_count},(_,i)=>`${dataRoot}/${catalogDirectory(value,"notes")}/notes-${String(i).padStart(5,"0")}.json`));
       }
       const hydrated=value.note_partition_count===undefined?nextCards:hydrateCatalog(nextCards,nextNotes,(await cachedConfiguration()).study);
-      baseManifest=value;rawCards=nextCards;noteBindings=nextNotes;cards=hydrated;
+      baseManifest=value;rawCards=nextCards;noteBindings=nextNotes;cards=hydrated;knownCardIds=new Set(cards.map(c=>c.id));
     }
     try {
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");
@@ -3661,8 +3873,8 @@ function sourceBlocks(text) {
       if(input?.group)select.value=input.group;
       for(const name of ["create","modify","delete","rename"])component.registerEvent(api.vault.on(name,scheduleRefresh));
       component.registerEvent(api.metadataCache.on("changed",scheduleRefresh));
-      component.registerInterval(setInterval(()=>{indexDirty=true;queueCache.clear();if(!shown)guardedDraw();},60000));
-      component.registerInterval(setInterval(()=>{if(manifest&&(Date.now()>=nextWake||timeKey!==String(dayNumber(Date.now(),manifest.timing)))){queueCache.clear();deckCountsCache=null;nextWake=Infinity;if(!shown)guardedDraw();}},1000));await guardedDraw();
+      component.registerInterval(setInterval(()=>{indexDirty=true;if(!shown)guardedDraw();},60000));
+      component.registerInterval(setInterval(()=>{if(manifest&&(Date.now()>=nextWake||timeKey!==String(dayNumber(Date.now(),manifest.timing)))){nextWake=Infinity;if(!shown)guardedDraw();}},1000));await guardedDraw();
     }catch(e){message(e);}
   })();
 

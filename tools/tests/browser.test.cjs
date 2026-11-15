@@ -362,7 +362,13 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   for(let i=0;i<100&&!button('Show answer');i++)await tick();
   button('Show answer').onclick();
   const rate=root.querySelectorAll('button').find(b=>b.textContent.startsWith('Good ('));
-  assert.ok(rate);await rate.onclick();
+  assert.ok(rate);
+  const performanceCounts=()=>{button('Performance details').onclick();const notice=root.querySelectorAll('div').find(e=>e.textContent.startsWith('{"fileReads"'));return JSON.parse(notice.textContent.split(' · ')[0]);};
+  const beforeAnswer=performanceCounts();await rate.onclick();
+  const afterAnswer=performanceCounts();
+  assert.equal(afterAnswer.schedulingBuilds,beforeAnswer.schedulingBuilds,'answer updates the existing scheduling index');
+  assert.equal(afterAnswer.cardPreparations,beforeAnswer.cardPreparations,'answer does not prepare the catalog again');
+  assert.equal(afterAnswer.scheduling.catalogCards,beforeAnswer.scheduling.catalogCards,'answer does not scan catalog cards');
   assert.deepEqual(JSON.parse(files.get(cardPath).text).map(c=>c.id),priorIds);
   const logs=[...files.values()].filter(f=>f.path.endsWith('.jsonl'));
   assert.equal(logs.length,1);const event=JSON.parse(logs[0].text);
@@ -374,10 +380,17 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   assert.deepEqual(savedConfig.settings.weights,options.weights);
   assert.equal(savedConfig.scheduler_version,'ts-fsrs@5.2.3/FSRS-6');
   assert.ok(!('preset_id' in savedConfig.settings));assert.ok(!('new_cards_per_day' in savedConfig.settings));
+  const beforeRemote=performanceCounts();
+  const remote={...event,id:'99999999-9999-4999-8999-999999999999',card_id:'card-0',review_time_ms:now+1,state:{...event.state,last_review:now+1},parent:`import:import:card-0`};
+  logs[0].text+=JSON.stringify(remote)+'\n';logs[0].stat.mtime++;logs[0].stat.size=logs[0].text.length;
+  listeners.get('modify')(logs[0]);await new Promise(resolve=>setTimeout(resolve,450));
+  const afterRemote=performanceCounts();
+  assert.equal(afterRemote.schedulingBuilds,beforeRemote.schedulingBuilds,'remote answers update the existing scheduling index');
+  assert.equal(afterRemote.cardPreparations,beforeRemote.cardPreparations,'remote answers do not prepare catalog metadata');
   button('Cards').onclick();
   for(let i=0;i<100&&!root.querySelectorAll('input').length;i++)await tick();
   const search=root.querySelectorAll('input').find(e=>e.type==='search');
-  assert.ok(search);
+  assert.ok(search,JSON.stringify(root.querySelectorAll("div").map(e=>e.textContent).filter(Boolean)));
   search.value='ready';search.oninput();
   assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='1 matching cards'));
   await button('Edited ready').onclick();
@@ -392,9 +405,9 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   assert.ok(button('Save card settings'),'navigation preserves the unsaved editor');
   await button('Save card settings').onclick();
   let events=logs[0].text.trim().split('\n').map(JSON.parse);
-  assert.equal(events.length,2);assert.equal(events[1].kind,'card_settings');
-  assert.equal(events[1].card_id,'card-1');assert.deepEqual(events[1].changes,{suspended:true,tags:['focused','hard']});
-  assert.ok(!('state' in events[1]));assert.ok(!('import_id' in events[1]));
+  assert.equal(events.length,3);assert.equal(events[2].kind,'card_settings');
+  assert.equal(events[2].card_id,'card-1');assert.deepEqual(events[2].changes,{suspended:true,tags:['focused','hard']});
+  assert.ok(!('state' in events[2]));assert.ok(!('import_id' in events[2]));
   const status=root.querySelectorAll('select').find(e=>e.attr['aria-label']==='Card status');
   status.value='suspended';status.onchange();
   assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='1 matching cards'));
@@ -403,8 +416,8 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   checkbox=root.querySelectorAll('input').find(e=>e.type==='checkbox');checkbox.checked=false;checkbox.onchange();
   await button('Save card settings').onclick();
   events=logs[0].text.trim().split('\n').map(JSON.parse);
-  assert.deepEqual(events[2].changes,{suspended:false});
-  assert.equal(events.filter(e=>e.kind==='answer').length,1,'settings do not create answers');
+  assert.deepEqual(events[3].changes,{suspended:false});
+  assert.equal(events.filter(e=>e.kind==='answer').length,2,'settings do not create answers');
   assert.deepEqual(JSON.parse(files.get(cardPath).text).map(c=>c.id),priorIds);
   const finalStatus=root.querySelectorAll('select').find(e=>e.attr['aria-label']==='Card status');
   finalStatus.value='errors';finalStatus.onchange();
@@ -593,3 +606,57 @@ test('catalog reads are limited to four, preserve partition order and reject inc
   assert.equal(SRS.resolveImageEmbeds('![[sound.mp3]] ![[note#block]]',source,()=>{throw Error('unexpected lookup');}), '![[sound.mp3]] ![[note#block]]');
   assert.throws(()=>SRS.resolveImageEmbeds('![[missing.png]]',source,()=>null),/Missing vault image: missing.png/);
  });
+
+test('maintained counts and next-card queries match the reference across filters, limits and queue states',()=>{
+  let seed=8191;const rand=n=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed%n;};
+  for(let trial=0;trial<20;trial++){
+    const m=manifest();m.scheduling.collection.applyAllParentLimits=Boolean(trial%2);
+    m.scheduling.collection.newCardsIgnoreReviewLimit=Boolean(trial%3);
+    m.scheduling.decks.parent.normal.new_limit=rand(20);m.scheduling.decks.parent.normal.review_limit=rand(35);
+    m.scheduling.decks.a.normal.new_limit_today={today:day,limit:rand(10)};
+    m.scheduling.decks.b.common={last_day_studied:day,new_studied:rand(5),review_studied:rand(5)};
+    m.scheduling.decks.other={id:'other',name:'Other',parent_id:null,normal:{config_id:'1'},common:{}};
+    const cs=Array.from({length:100},(_,i)=>{
+      const q=[0,1,2,3,-1,-2,4][rand(7)],c=cards([q])[0];c.id=`c-${i}`;c.deck_id=['a','b','other'][rand(3)];c.group=['x','y'][rand(2)];
+      c.baseline={...state(q),queue:q,anki_due:day+rand(3)-1,due:now+(rand(7)-3)*600000};c.anki_due=rand(100);c.retired=i===0;
+      if(i%17===0)c.content_error='Missing field';if(i%13===0)c.card_settings={suspended:true};return c;
+    });
+    m.study={decks:{all:{name:'All',parent_id:null,filter:{groups:[]}},x:{name:'X',parent_id:'all',filter:{groups:['x']}},subset:{name:'Subset',parent_id:null,filter:{deck_ids:['a']}},other:{name:'Other',parent_id:null,filter:{deck_ids:['other']}}}};
+    const st=states(cs),memberships=SRS.studyMemberships(cs,m.study,m),idx=new SRS.SchedulingIndex(cs,st,m,[],now,memberships);
+    const flatten=tree=>tree.flatMap(n=>[n,...flatten(n.children)]);
+    for(const group of ['', 'x','y']){
+      const reference=flatten(SRS.studyDeckTree(cs,st,m,now,[],new Set(),group,memberships));
+      const actual=new Map(flatten(idx.tree(group)).map(n=>[n.id,n]));
+      for(const n of reference){
+        assert.deepEqual(['new','learning','review','total','errors'].map(k=>actual.get(n.id)[k]),['new','learning','review','total','errors'].map(k=>n[k]),`counts ${trial}/${group}/${n.id}`);
+        const expected=SRS.reviewQueueV2(cs,st,[],m,now,group,undefined,null,new Set(),c=>memberships.get(n.id).has(c.id));
+        assert.equal(idx.queue(n.id,group).cards[0]?.id,expected.cards[0]?.id,`next ${trial}/${group}/${n.id}`);
+      }
+    }
+    // Once built, navigation and one-card changes cannot enumerate the catalog.
+    const scans=idx.stats.catalogCards;
+    idx.cards[Symbol.iterator]=()=>{throw Error('catalog iteration');};
+    const changed=cs.find(c=>!c.retired),next={state:{...changed.baseline,queue:2,anki_due:day+10,due:now+10*86400000}};
+    st.set(changed.id,next);idx.update(changed,next);
+    idx.tree();idx.queue('all');assert.equal(idx.stats.catalogCards,scans);
+    const ref=flatten(SRS.studyDeckTree(cs,st,m,now,[],new Set(),'',memberships));
+    for(const n of ref)assert.deepEqual(['new','learning','review'].map(k=>idx.counts(n.id)[k]),['new','learning','review'].map(k=>n[k]));
+  }
+});
+
+test('incremental answers, shared allowances, Bury and availability boundaries preserve counts',()=>{
+  const m=manifest(),cs=cards([0,0,1,2]);cs.forEach(c=>c.group='x');
+  cs[2].baseline.due=now+1200001;
+  m.scheduling.decks.parent.normal.new_limit=1;
+  m.study={decks:{a:{name:'A',parent_id:null,filter:{deck_ids:['a']}},b:{name:'B',parent_id:null,filter:{deck_ids:['b']}},all:{name:'All',parent_id:null,filter:{groups:['x']}}}};
+  const st=states(cs),memberships=SRS.studyMemberships(cs,m.study,m),idx=new SRS.SchedulingIndex(cs,st,m,[],now,memberships);
+  const unchanged={...idx.counts('all')};const first=idx.queue('all').cards[0];idx.bury(first.id);
+  assert.deepEqual(idx.counts('all'),unchanged);assert.notEqual(idx.queue('all').cards[0]?.id,first.id);
+  assert.ok(idx.advance(now+2));assert.equal(idx.counts('all').learning,1);
+  const next={...cs[0].baseline,state:1,queue:1,due:now+60000};
+  const event={...answer('77777777-7777-4777-8777-777777777777',now+2),card_id:cs[0].id,state:next,was_new:true};
+  idx.update(cs[0],{state:next,parent:event.id},event);
+  const reference=SRS.studyDeckTree(cs,st,m,now+2,[event],new Set(),'',memberships);
+  for(const n of reference)assert.deepEqual(['new','learning','review'].map(k=>idx.counts(n.id)[k]),['new','learning','review'].map(k=>n[k]));
+  assert.equal(idx.advance(now+86400000),false,'rollover requests a scheduling rebuild');
+});

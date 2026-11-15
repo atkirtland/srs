@@ -191,12 +191,13 @@ function queueKind(card, value, manifest, now, today = dayNumber(now, manifest.t
   }
   return null;
 }
-function deckTree(cards, states, manifest, now, activity = []) {
+function deckTree(cards, states, manifest, now, activity = [], aggregates = null) {
   const meta = manifest.scheduling;
   if (!meta) return [];
   const today = dayNumber(now, manifest.timing);
   const nodes = new Map(Object.values(meta.decks).map(deck => [deck.id, {...deck, children: [],
     new: 0, review: 0, intraday: 0, interday: 0, errors: 0, total: 0}]));
+  if(aggregates)for(const [id,raw] of aggregates.raw){const node=nodes.get(id);if(node)for(const key of ["new","review","intraday","interday","errors","total"])node[key]=raw[key]||0;}
   for (const c of cards) {
     if (c.retired) continue;
     const node = nodes.get(c.deck_id);
@@ -208,7 +209,7 @@ function deckTree(cards, states, manifest, now, activity = []) {
   }
   const roots = [];
   for (const n of nodes.values()) (nodes.get(n.parent_id)?.children || roots).push(n);
-  const added = new Map(), introduced = new Set();
+  const added = aggregates?.added || new Map(), introduced = new Set();
   const byCard = new Map(cards.map(c => [c.id, c]));
   const currentDay = studyDay(now, manifest.timing);
   for (const event of activity) {

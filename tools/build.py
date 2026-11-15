@@ -6,7 +6,7 @@ HERE = Path(__file__).resolve().parent
 from srs_tools.configuration import US_STATES_BY_SLUG
 hook = '''
   if (globalThis.__SRS_TEST__) {
-    globalThis.SRS = {readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, schedulerV2, effectiveSettings, renderV2, resolveImageEmbeds, transformField, fieldsFromNote,
+    globalThis.SRS = {SchedulingIndex, SchedulingOrder, readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, schedulerV2, effectiveSettings, renderV2, resolveImageEmbeds, transformField, fieldsFromNote,
       deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
       ReviewIndex, appendReview, validateEvent, saveSchedulerConfig, verifySchedulerConfig, parseCSV, indexRows, configuredCards, initialState};
     return;
@@ -14,5 +14,5 @@ hook = '''
 '''
 (HERE.parent / "view.js").write_text(
     (HERE / "browser/browser-base.js").read_text() + "\nconst US_STATES = " + json.dumps(US_STATES_BY_SLUG) + ";\n" +
-    (HERE / "browser/browser-v2.js").read_text() + (HERE / "browser/browser-study.js").read_text() + hook +
+    (HERE / "browser/browser-v2.js").read_text() + (HERE / "browser/browser-study.js").read_text() + (HERE / "browser/browser-scheduling-index.js").read_text() + hook +
     (HERE / "browser/browser-view.js").read_text() + "\n})();\n")

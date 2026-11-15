@@ -19,3 +19,9 @@ timed('Open selected deck queue',()=>S.reviewQueueV2(cards,states,[],manifest,no
 states.set('card-0',{state:{...cards[0].baseline,anki_due:day+5,due:now+5*86400000}});
 timed('Refresh counts after one answer',()=>S.studyDeckTree(cards,states,manifest,now,[],new Set(),'',memberships));
 console.log('Source reads: 0; template renders: 0 (scheduling-only workload). Use Performance details for actual UI and vault costs.');
+const indexed=timed('Build maintained scheduling index',()=>new S.SchedulingIndex(cards,states,manifest,[],now,memberships));
+timed('1,000 indexed deck screens',()=>{for(let i=0;i<1000;i++)indexed.tree();});
+timed('Indexed selected queue',()=>indexed.queue('deck-0'));
+const beforeScans=indexed.stats.catalogCards;
+timed('Indexed one-card answer and affected counts',()=>indexed.update(cards[0],{state:{...cards[0].baseline,anki_due:day+10,due:now+10*86400000}}));
+console.log('Catalog cards inspected after construction:',indexed.stats.catalogCards-beforeScans);

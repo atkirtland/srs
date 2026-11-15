@@ -29,26 +29,32 @@
     const dirty = new Set(), cache = new Map(), skipped = new Set();
     let taxonomy;
     const contentCache=new Map(), metadataCache=new Map(), metrics=[];
-    const counters={fileReads:0,sourceReads:0,renders:0,indexSyncs:0};
+    const counters={fileReads:0,sourceReads:0,renders:0,indexSyncs:0,schedulingBuilds:0,cardPreparations:0};
     let hydrationKey, statesSnapshot, statesRevision;
     const profileCache=new Map();
     let runtimeCache, snapshotCache, runtimeDirty=true, indexDirty=true, catalogDirty=true;
-    let operation=0, checking=false, queueCache=new Map(), membershipCache=new Map(), deckCountsCache;
+    let operation=0, checking=false, membershipCache=new Map();
+    let schedulingIndex, runtimeCards, runtimeSources, runtimeSnapshot;
+    const runtimePositions=new Map(), knownErrors=new Map();
+    let runtimeLoaded, runtimeBase;
+    let knownCardIds, reviewFiles;
     const clock=()=>globalThis.performance?.now?.()??Date.now();
     async function measure(name,fn){const start=clock();try{return await fn();}finally{metrics.push({name,ms:Math.round((clock()-start)*100)/100});if(metrics.length>60)metrics.shift();}}
     const performanceButton=toolBody.createEl("button",{text:"Performance details"});
-    performanceButton.onclick=()=>{notice.textContent=JSON.stringify(counters)+" · "+metrics.map(x=>`${x.name}: ${x.ms}ms`).join(" · ");};
+    performanceButton.onclick=()=>{notice.textContent=JSON.stringify({...counters,scheduling:schedulingIndex?.stats})+" · "+metrics.map(x=>`${x.name}: ${x.ms}ms`).join(" · ");};
     const checkButton=toolBody.createEl("button",{text:"Check content"});
     const cancelCheck=toolBody.createEl("button",{text:"Cancel content check"});
     cancelCheck.onclick=()=>{operation++;checking=false;notice.textContent="Content check cancelled; completed results retained.";};
-    function resetQueues(){queueCache.clear();membershipCache.clear();profileCache.clear();deckCountsCache=null;}
+    function resetQueues(){membershipCache.clear();profileCache.clear();schedulingIndex=null;runtimeCards=null;}
     function deckMatches(card,id){return membershipCache.get(id)?.has(card.id)??studyDeckMatches(card,id,studyConfig,manifest);}
     function inScope(card,deck=selectedDeck){return !card.retired && (!select.value||card.group===select.value) && (!deck || (studyConfig?deckMatches(card,deck):manifest.scheduling.decks[card.deck_id]?.name===manifest.scheduling.decks[deck]?.name||manifest.scheduling.decks[card.deck_id]?.name.startsWith(manifest.scheduling.decks[deck]?.name+"::")));}
     async function rendered(card){
       if(contentCache.has(card.id))return {...card,...contentCache.get(card.id),card_settings:card.card_settings};
       counters.renders++;const generation=sourceGeneration,key=configKey;
       let result;try{result={...await resolveSource({...card}),validation:"valid"};}catch(e){result={...card,content_error:e.message,validation:"error"};}
-      if(generation===sourceGeneration&&key===configKey&&!disposed){contentCache.set(card.id,result);queueCache.clear();deckCountsCache=null;}
+      if(generation===sourceGeneration&&key===configKey&&!disposed){contentCache.set(card.id,result);
+        if(runtimeCards){const position=runtimePositions.get(card.id);if(position!==undefined)runtimeCards[position]=result;if(result.content_error)knownErrors.set(card.id,result);else knownErrors.delete(card.id);}
+        schedulingIndex?.update(result);}
       return result;
     }
     async function checkContent(deck=selectedDeck){
@@ -60,7 +66,7 @@
           await rendered(all[i]);
           if(i%25===0){notice.textContent=`Checking content: ${i+1}/${all.length}`;await new Promise(resolve=>setTimeout(resolve,0));}
         }
-      }catch(e){message(e);}finally{if(token===operation){checking=false;queueCache.clear();await guardedDraw();}}
+      }catch(e){message(e);}finally{if(token===operation){checking=false;await guardedDraw();}}
     }
     checkButton.onclick=()=>checkContent(managing?managerDeck:selectedDeck);
 
@@ -81,7 +87,7 @@
     deviceSelect.onchange=()=>{deviceId=deviceSelect.value;localStorage.setItem(`${identity}:device-name`,deviceId);};
     component.register(() => {disposed=true;operation++;clearTimeout(refreshTimer);index?.close();});
     const store = {
-      async list(directory) {return api.vault.getFiles().filter(f=>f.path.startsWith(directory+"/"));},
+      async list(directory) {return directory===`${dataRoot}/reviews`?[...reviewFileMap().values()]:api.vault.getFiles().filter(f=>f.path.startsWith(directory+"/"));},
       async read(path) {counters.fileReads++;const f=api.vault.getAbstractFileByPath(path);return f ? api.vault.read(f) : null;},
       async create(path,text) {await api.vault.create(path,text);},
       async mkdir(path) {if(!api.vault.getAbstractFileByPath(path))try{await api.vault.createFolder(path);}catch(error){if(!api.vault.getAbstractFileByPath(path))throw error;}},
@@ -101,18 +107,42 @@
     }
     function message(e) {notice.textContent=String(e.message||e);}
     function clearCard() {context.empty();front.empty();back.empty();actions.empty();source.empty();homepage.empty();shown=null;}
-    function logFiles() {return api.vault.getFiles().filter(f=>
-      f.path.startsWith(`${dataRoot}/reviews/`) && LOG_PATTERN.test(f.path.split("/").at(-1)))
-      .map(f=>({path:f.path,stat:f.stat?{...f.stat}:undefined}));}
+    function reviewFileMap(){
+      if(!reviewFiles)reviewFiles=new Map(api.vault.getFiles().filter(f=>f.path.startsWith(`${dataRoot}/reviews/`)&&LOG_PATTERN.test(f.path.split("/").at(-1))).map(f=>[f.path,f]));
+      return reviewFiles;
+    }
+    function logFiles(){return [...reviewFileMap().values()].map(f=>({path:f.path,stat:f.stat?{...f.stat}:undefined}));}
     async function syncIndex() {
       counters.indexSyncs++;
       const force=new Set([...dirty].filter(p=>p.startsWith(`${dataRoot}/reviews/`)));
-      await index.sync(logFiles(),async f=>{const t=await store.read(f.path);if(t===null)throw Error(`Log disappeared: ${f.path}`);return t;},new Set(cards.map(c=>c.id)),{
+      const changes=[];
+      const result=await index.sync(logFiles(),async f=>{const t=await store.read(f.path);if(t===null)throw Error(`Log disappeared: ${f.path}`);return t;},knownCardIds,{
         force, readSchedulerConfig:id=>store.read(`${dataRoot}/scheduler-configs/${id}.json`),
+        onEvents:snapshotCache?batch=>changes.push(...batch):undefined,
         progress:n=>{if(!disposed && n>=500)notice.textContent=`Indexing reviews: ${n.toLocaleString()}…`;}
       });
       for(const path of force)dirty.delete(path);
-      indexDirty=true;queueCache.clear();
+      if(snapshotCache){
+        if(result.rebuilt||changes.some(e=>e.kind==='card_settings')){snapshotCache=null;runtimeCards=null;schedulingIndex=null;indexDirty=true;}
+        else {
+          snapshotCache.activityIds??=new Set(snapshotCache.activity.map(e=>e.id));
+          const touched=new Set();
+          for(const event of changes){
+            if(event.kind==='historical_review'||event.kind==='scheduling_baseline')continue;
+            touched.add(event.card_id);
+            if(!snapshotCache.activityIds.has(event.id)&&studyDay(event.review_time_ms,manifest.timing)===studyDay(Date.now(),manifest.timing)){
+              snapshotCache.activityIds.add(event.id);snapshotCache.activity.push(event);schedulingIndex?.addActivity(event);
+            }
+          }
+          for(const id of touched){
+            const latest=await index.get("latest",id);snapshotCache.latest.set(id,latest);
+            const card=runtimeCards?.[runtimePositions.get(id)];
+            if(card){const value=current(card,states.get(id)?.state,latest);states.set(id,value);schedulingIndex?.update(card,value);}
+          }
+          indexDirty=false;
+        }
+      }
+      return result;
     }
     async function noteAt(file) {
       let stored=cache.get(file.path);
@@ -197,10 +227,10 @@
       const generation=sourceGeneration;
 
       const result=[];
+      const needsMetadata=/"(?:tags|properties)"/.test(JSON.stringify({decks:studyConfig?.decks,rules:studyConfig?.profile_rules}));
       for(const configured of configuredCards(cards,config)) {
         const rule=studyConfig?.source_rules[configured.group];
         const card=rule && configured.source ? {...configured,source:{...configured.source,fields:rule.fields,prepare:rule.prepare||null}}:configured;
-        const needsMetadata=JSON.stringify({decks:studyConfig?.decks,rules:studyConfig?.profile_rules}).match(/"(?:tags|properties)"/);
         try {
           if(needsMetadata&&!card.retired){if(!metadataCache.has(card.id))metadataCache.set(card.id,await resolveSource({...card},true));result.push(metadataCache.get(card.id));}
           else result.push({...card,validation:"unchecked"});
@@ -233,16 +263,18 @@
       if(n.errors)el.createEl("span",{text:` · ${n.errors} content errors`,cls:"srs-errors"});
     }
     function contentProblems(available) {
-      return available.filter(c=>c.content_error && (!select.value || c.group===select.value) &&
+      return [...knownErrors.values()].filter(c=>c.content_error && (!select.value || c.group===select.value) &&
         (studyConfig ? !selectedDeck || deckMatches(c,selectedDeck) : !selectedDeck || manifest.scheduling.decks[c.deck_id]?.name===manifest.scheduling.decks[selectedDeck]?.name ||
           manifest.scheduling.decks[c.deck_id]?.name.startsWith(manifest.scheduling.decks[selectedDeck]?.name+"::")));
     }
     function showErrors(available) {
-      const problems=contentProblems(available);
-      if(!problems.length)return;
-      const details=homepage.createEl("details");details.createEl("summary",{text:`Inspect ${problems.length} content errors`});
+      const count=schedulingIndex?.counts(selectedDeck,select.value).errors??contentProblems(available).length;
+      if(!count)return;
+      let problems;
+      const details=homepage.createEl("details");details.createEl("summary",{text:`Inspect ${count} content errors`});
       let offset=0,more;
       const page=()=>{
+        problems??=contentProblems(available);
         if(more)more.disabled=true;
         for(const card of problems.slice(offset,offset+50)) {
           const row=details.createDiv();row.createEl("p",{text:`${card.anki_notetype||"Card"} · ${card.note_uid||card.id}: ${card.content_error}`});
@@ -502,7 +534,9 @@
           await syncIndex();
           const event={format_version:2,kind:"card_settings",id:crypto.randomUUID(),device_id:deviceId,card_id:card.id,time_ms:Date.now(),changes};
           validateEvent(event,manifest.import_id);
-          dirty.add(await appendReview(store,`${dataRoot}/reviews`,event));await syncIndex();
+          const logPath=await appendReview(store,`${dataRoot}/reviews`,event);
+          reviewFileMap().set(logPath,api.vault.getAbstractFileByPath(logPath));
+          dirty.add(logPath);await syncIndex();
         });
         managerDirty=false;await draw();notice.textContent="Card settings saved.";
       }catch(e){message(e);homepage.querySelectorAll("button").forEach(button=>button.disabled=false);}
@@ -522,75 +556,79 @@
       if(freshManifest.import_id!==baseManifest.import_id)throw Error("Imported baseline changed; reopen this view");
       if(freshManifest.revision!==baseManifest.revision){await loadCatalog(freshManifest);resolvedCards=null;contentCache.clear();metadataCache.clear();resetQueues();}
       const loaded=await cachedConfiguration();
-      studyConfig=loaded.study;studyParts=loaded.parts;studyKey=canonical(studyConfig);
-      manifest=studyConfig?studyRuntimeManifest(baseManifest,studyConfig):baseManifest;
-      config=loaded.templates;const nextConfigKey=canonical({templates:config,study:studyConfig});
-      if(configKey!==nextConfigKey){contentCache.clear();metadataCache.clear();resolvedCards=null;resetQueues();operation++;}
-      configKey=nextConfigKey;catalogDirty=false;
+      if(runtimeLoaded!==loaded||runtimeBase!==baseManifest){
+        studyConfig=loaded.study;studyParts=loaded.parts;studyKey=canonical(studyConfig);
+        manifest=studyConfig?studyRuntimeManifest(baseManifest,studyConfig):baseManifest;
+        config=loaded.templates;const nextConfigKey=canonical({templates:config,study:studyConfig});
+        if(configKey!==nextConfigKey){contentCache.clear();metadataCache.clear();resolvedCards=null;resetQueues();operation++;}
+        configKey=nextConfigKey;runtimeLoaded=loaded;runtimeBase=baseManifest;
+      }
+      catalogDirty=false;
       const nextHydrationKey=baseManifest.revision+":"+configKey;
       if(hydrationKey!==nextHydrationKey){cards=baseManifest.note_partition_count===undefined?rawCards:hydrateCatalog(rawCards,noteBindings,studyConfig);hydrationKey=nextHydrationKey;}
       const today=dayNumber(Date.now(),manifest.timing);
       if(!snapshotCache||indexDirty||snapshotCache.today!==today){
-        snapshotCache=await measure("Review index",()=>withStoreLock(identity,async()=>{await syncIndex();return {latest:await index.latest(),activity:await index.activityToday(Date.now()),settings:await index.cardSettings(),today};}));
-        indexDirty=false;resetQueues();
+        await measure("Review index",()=>withStoreLock(identity,async()=>{
+          if(snapshotCache?.today!==today)snapshotCache=null;
+          await syncIndex();
+          if(!snapshotCache){snapshotCache={latest:await index.latest(),activity:await index.activityToday(Date.now()),settings:await index.cardSettings(),today};resetQueues();}
+        }));
+        indexDirty=false;
       }
       const snapshot=snapshotCache;
-      const available=(await measure("Source metadata",readSources)).map(card=>{
-        if(contentCache.has(card.id))card={...card,...contentCache.get(card.id)};
-        const value={...card,card_settings:snapshot.settings.get(card.id)||{}};
-        if(studyConfig){if(!profileCache.has(card.id)){try{studyProfileId(value,studyConfig,manifest);profileCache.set(card.id,null);}catch(e){profileCache.set(card.id,e.message);}}if(profileCache.get(card.id))value.content_error=profileCache.get(card.id);}
-        return value;
-      });
+      const sources=await measure("Source metadata",readSources);
+      if(!runtimeCards||runtimeSources!==sources||runtimeSnapshot!==snapshot){
+        counters.cardPreparations++;
+        runtimePositions.clear();knownErrors.clear();
+        runtimeCards=await measure("Card index preparation",async()=>sources.map((card,i)=>{
+          if(contentCache.has(card.id))card={...card,...contentCache.get(card.id)};
+          const value={...card,card_settings:snapshot.settings.get(card.id)||{}};
+          if(studyConfig){if(!profileCache.has(card.id)){try{studyProfileId(value,studyConfig,manifest);profileCache.set(card.id,null);}catch(e){profileCache.set(card.id,e.message);}}if(profileCache.get(card.id))value.content_error=profileCache.get(card.id);}
+          runtimePositions.set(card.id,i);if(value.content_error)knownErrors.set(card.id,value);return value;
+        }));
+        runtimeSources=sources;runtimeSnapshot=snapshot;schedulingIndex=null;
+      }
+      const available=runtimeCards;
       if(statesSnapshot!==snapshot||statesRevision!==baseManifest.revision){states=new Map();
-      for(const card of available) {
-        const projection=card.baseline || {state:card.queue===0?State.New:card.card_type===3?State.Relearning:card.queue===2?State.Review:State.Learning,due:card.due_ms,queue:card.queue,anki_due:card.anki_due};
-        states.set(card.id,current(card,projection,snapshot.latest.get(card.id)));
+        for(const card of available) {
+          const projection=card.baseline || {state:card.queue===0?State.New:card.card_type===3?State.Relearning:card.queue===2?State.Review:State.Learning,due:card.due_ms,queue:card.queue,anki_due:card.anki_due};
+          states.set(card.id,current(card,projection,snapshot.latest.get(card.id)));
+        }
+        statesSnapshot=snapshot;statesRevision=baseManifest.revision;
       }
-      statesSnapshot=snapshot;statesRevision=baseManifest.revision;}
-      if(studyConfig&&!membershipCache.size)membershipCache=await measure("Deck membership",()=>studyMemberships(available,studyConfig,manifest));
-      const clockNow=Date.now();nextWake=Infinity;
-      for(const card of available){const st=states.get(card.id)?.state,q=st?.queue??card.queue,due=st?.due??card.due_ms;
-        const boundaries=q===1||q===4?[due-(manifest.scheduling?.collection.collapseTime??1200)*1000+1,due]:[2,3].includes(q)&&st?.anki_due===undefined&&card.anki_due===undefined?[due]:[];
-        for(const t of boundaries)if(t>clockNow)nextWake=Math.min(nextWake,t);
-      }
-      timeKey=String(dayNumber(clockNow,manifest.timing));
+      if(manifest.scheduling&&studyConfig&&!membershipCache.size)membershipCache=await measure("Deck membership",()=>studyMemberships(available,studyConfig,manifest));
+      const clockNow=Date.now();
+      if(schedulingIndex&&!schedulingIndex.advance(clockNow))schedulingIndex=null;
+      if(manifest.scheduling&&!schedulingIndex){counters.schedulingBuilds++;schedulingIndex=await measure("Scheduling index",()=>new SchedulingIndex(available,states,manifest,snapshot.activity,clockNow,studyConfig?membershipCache:null));for(const id of skipped)schedulingIndex.bury(id);}
+      nextWake=schedulingIndex?.nextWake??Infinity;
+      timeKey=String(schedulingIndex?.today??today);
       if(panel){showConfiguration(panel);return;}
       if(managing){showCardManager(available);return;}
-      const queueKey=JSON.stringify([selectedDeck,select.value,reviewing,[...skipped],timeKey]);
-      let queue=queueCache.get(queueKey);
-      if(!queue){queue=reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value,undefined,studyConfig?null:selectedDeck,skipped,
-        studyConfig && selectedDeck ? c=>deckMatches(c,selectedDeck):null);
-        queueCache.set(queueKey,queue);if(queueCache.size>30)queueCache.delete(queueCache.keys().next().value);
-      }
-      const errors=contentProblems(available).length;
       if(!reviewing && manifest.scheduling) {
-        if(studyConfig){
-          const key=JSON.stringify([select.value,timeKey,[...skipped],contentCache.size]);
-          if(deckCountsCache?.key!==key)deckCountsCache={key,tree:await measure("Deck counts",()=>studyDeckTree(available,states,manifest,Date.now(),snapshot.activity,skipped,select.value,membershipCache))};
-          queue.tree=deckCountsCache.tree;
-        }
-        showDecks(queue,available);notice.textContent=`${cards.length.toLocaleString()} cards · ${errors.toLocaleString()} known content errors · ${available.filter(c=>!c.retired&&!contentCache.has(c.id)).length.toLocaleString()} unchecked`;
+        const queue={tree:await measure("Deck screen",()=>schedulingIndex.tree(select.value))};
+        showDecks(queue,available);notice.textContent=`${cards.length.toLocaleString()} cards · ${knownErrors.size.toLocaleString()} known content errors · ${(schedulingIndex.counts().total-contentCache.size).toLocaleString()} unchecked`;
         return;
       }
+      const queue=await measure("Selected queue",()=>schedulingIndex?schedulingIndex.queue(selectedDeck,select.value):reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value));
       context.createEl("h2",{text:studyConfig?.decks[selectedDeck]?.name||manifest.scheduling?.decks[selectedDeck]?.name||select.value||"All decks"});
       context.createEl("button",{text:"Browse cards"}).onclick=()=>{managerDeck=selectedDeck||"";managerQuery="";managerStatus="all";editedCardId=null;managing=true;guardedDraw();};
 
       // Session skips do not change states, event logs, or the displayed counts.
       const renderGeneration=sourceGeneration;
       let card=queue.cards.find(c=>!skipped.has(c.id));
-      if(card){card=await measure("Render selected card",()=>rendered(card));const i=available.findIndex(c=>c.id===card.id);available[i]=card;}
+      if(card){card=await measure("Render selected card",()=>rendered(card));const i=runtimePositions.get(card.id);available[i]=card;}
       if(disposed||renderGeneration!==sourceGeneration){pending=true;return;}
-      showCounts(counts,{...queue,errors:contentProblems(available).length});showErrors(available);
+      showCounts(counts,{...queue,errors:schedulingIndex?.counts(selectedDeck,select.value).errors??contentProblems(available).length});showErrors(available);
       if(!card){front.textContent="No cards ready for review in this session.";return;}
       shown=card;started=Date.now();
-      const skip=()=>{skipped.add(card.id);guardedDraw();};
+      const skip=()=>{skipped.add(card.id);schedulingIndex?.bury(card.id);guardedDraw();};
       actions.createEl("button",{text:"Bury"}).onclick=skip;
       source.createEl("button",{text:"Card settings"}).onclick=()=>openCardSettings(card);
       if(card.source?.path)source.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
       if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       dv.el("div",card.frontText,{container:front});
       let options;
-      try {options=effectiveSettings(card,manifest);schedulerV2(options);if(!snapshot.latest.has(card.id))states.set(card.id,current(card,await baseline(card)));}
+      try {options=effectiveSettings(card,manifest);schedulerV2(options);if(!snapshot.latest.has(card.id)){const value=current(card,await baseline(card));states.set(card.id,value);if(!card.baseline)schedulingIndex?.update(card,value);}}
       catch(e){message(e);actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       const reveal=actions.createEl("button",{text:"Show answer",cls:"mod-cta"});
       reveal.onclick=()=>{
@@ -615,7 +653,7 @@
           const latestConfig=await runtimeConfiguration();
           if(canonical({templates:latestConfig.templates,study:latestConfig.study})!==configKey)return "Configuration changed. Queue refreshed.";
           await syncIndex();
-          if(canonical((await index.cardSettings()).get(card.id)||{})!==canonical(card.card_settings))return "Card settings changed. Queue refreshed.";
+          if(canonical(await index.cardSettingsFor(card.id))!==canonical(card.card_settings))return "Card settings changed. Queue refreshed.";
           const value=current(card,states.get(card.id).state,await index.get("latest",card.id));
           if(value.parent!==states.get(card.id).parent)return "Card reviewed on another device. Queue refreshed.";
           const live=await resolveSource(card);
@@ -628,7 +666,9 @@
             review_time_ms:now,duration_ms:Math.max(0,now-started),rating,was_new:value.state.state===State.New,
             was_review:value.state.state===State.Review,scheduler_config_id:schedulerConfigId,state:next};
           validateEvent(event,manifest.import_id);
-          dirty.add(await appendReview(store,`${dataRoot}/reviews`,event));await syncIndex();return null;
+          const logPath=await appendReview(store,`${dataRoot}/reviews`,event);
+          reviewFileMap().set(logPath,api.vault.getAbstractFileByPath(logPath));
+          dirty.add(logPath);await syncIndex();return null;
         });
         await draw();if(result)notice.textContent=result;
       }catch(e){clearCard();message(e);notice.textContent+=" — review paused. Refresh to retry.";}
@@ -641,7 +681,10 @@
         const paths=[file.path,oldPath].filter(Boolean);
         let relevant=false;
         for(const path of paths){
-          if(path.startsWith(`${dataRoot}/reviews/`)){dirty.add(path);indexDirty=true;relevant=true;continue;}
+          if(path.startsWith(`${dataRoot}/reviews/`)){
+            if(reviewFiles){const f=api.vault.getAbstractFileByPath(path);if(f)reviewFiles.set(path,f);else reviewFiles.delete(path);}
+            dirty.add(path);indexDirty=true;relevant=true;continue;
+          }
           if(path===`${dataRoot}/manifest.json`||path===`${dataRoot}/catalog.pending.json`||path.startsWith(`${dataRoot}/cards/`)||path.startsWith(`${dataRoot}/notes/`)){catalogDirty=true;indexDirty=true;relevant=true;}
           if(path.startsWith(`${root}/config/`)||[`${root}/config.json`,`${root}/study.json`,`${dataRoot}/profiles.json`].includes(path)){runtimeDirty=true;contentCache.clear();metadataCache.clear();resolvedCards=null;relevant=true;}
           for(const card of cards){
@@ -650,14 +693,14 @@
           }
         }
         if(!relevant)return;
-        sourceGeneration++;operation++;checking=false;candidateSources.clear();taxonomy=null;resetQueues();
-      }else{indexDirty=true;resetQueues();}
+        if(paths.some(path=>!path.startsWith(`${dataRoot}/reviews/`))){sourceGeneration++;operation++;checking=false;candidateSources.clear();taxonomy=null;resetQueues();}
+      }else{indexDirty=true;}
       clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);
     }
     home.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=false;managerDirty=false;reviewing=false;selectedDeck=null;guardedDraw();};
     manage.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=true;managerDirty=false;guardedDraw();};
     select.onchange=()=>{operation++;checking=false;if(!leaveEditor()){select.value=activeGroup;return;}activeGroup=select.value;panel="";managing=false;managerDirty=false;reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
-    refresh.onclick=()=>{if(managerDirty){notice.textContent="Save or discard changes before refreshing.";return;}cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;sourceGeneration++;operation++;checking=false;resetQueues();guardedDraw();};
+    refresh.onclick=()=>{if(managerDirty){notice.textContent="Save or discard changes before refreshing.";return;}reviewFiles=null;cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;sourceGeneration++;operation++;checking=false;resetQueues();guardedDraw();};
     rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     profilesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="profiles";guardedDraw();};
     sourcesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="sources";guardedDraw();};
@@ -677,7 +720,7 @@
         nextNotes=await readPartitions(Array.from({length:value.note_partition_count},(_,i)=>`${dataRoot}/${catalogDirectory(value,"notes")}/notes-${String(i).padStart(5,"0")}.json`));
       }
       const hydrated=value.note_partition_count===undefined?nextCards:hydrateCatalog(nextCards,nextNotes,(await cachedConfiguration()).study);
-      baseManifest=value;rawCards=nextCards;noteBindings=nextNotes;cards=hydrated;
+      baseManifest=value;rawCards=nextCards;noteBindings=nextNotes;cards=hydrated;knownCardIds=new Set(cards.map(c=>c.id));
     }
     try {
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");
@@ -689,7 +732,7 @@
       if(input?.group)select.value=input.group;
       for(const name of ["create","modify","delete","rename"])component.registerEvent(api.vault.on(name,scheduleRefresh));
       component.registerEvent(api.metadataCache.on("changed",scheduleRefresh));
-      component.registerInterval(setInterval(()=>{indexDirty=true;queueCache.clear();if(!shown)guardedDraw();},60000));
-      component.registerInterval(setInterval(()=>{if(manifest&&(Date.now()>=nextWake||timeKey!==String(dayNumber(Date.now(),manifest.timing)))){queueCache.clear();deckCountsCache=null;nextWake=Infinity;if(!shown)guardedDraw();}},1000));await guardedDraw();
+      component.registerInterval(setInterval(()=>{indexDirty=true;if(!shown)guardedDraw();},60000));
+      component.registerInterval(setInterval(()=>{if(manifest&&(Date.now()>=nextWake||timeKey!==String(dayNumber(Date.now(),manifest.timing)))){nextWake=Infinity;if(!shown)guardedDraw();}},1000));await guardedDraw();
     }catch(e){message(e);}
   })();
