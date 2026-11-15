@@ -137,7 +137,8 @@ Study filters never create additional daily allowances.
 
 Filters support `paths` (exact paths or directory prefixes), `groups`,
 `templates`, source/card `tags`, `properties`, `card_ids`, and legacy `deck_ids`.
-Values in a list are alternatives, except `tags`, which requires all listed tags.
+Values in a list are alternatives, except `tags` and `tag_prefixes`, which require all listed tags.
+`tags` matches exactly; `tag_prefixes` matches a tag and its descendants (e.g. `oa/math` includes `oa/math/categories`). Prefix matching treats Anki `::` and Obsidian `/` as equivalent separators.
 Different fields are combined with AND. Compose filters with `all`, `any`, and
 `not`. Properties use exact values or `{"exists": true}` / `{"exists": false}`.
 For example, replace an imported deck filter in `config/decks.json` with:

@@ -251,7 +251,7 @@
       const generation=sourceGeneration;
 
       const result=[];
-      const needsMetadata=/"(?:tags|properties)"/.test(JSON.stringify({decks:studyConfig?.decks,rules:studyConfig?.profile_rules}));
+      const needsMetadata=/"(?:tags|tag_prefixes|properties)"/.test(JSON.stringify({decks:studyConfig?.decks,rules:studyConfig?.profile_rules}));
       for(const configured of configuredCards(cards,config)) {
         const rule=studyConfig?.source_rules[configured.group];
         const card=rule && configured.source ? {...configured,source:{...configured.source,fields:rule.fields,prepare:rule.prepare||null}}:configured;

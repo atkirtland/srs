@@ -672,3 +672,17 @@ test('incremental answers, shared allowances, Bury and availability boundaries p
   for(const n of reference)assert.deepEqual(['new','learning','review'].map(k=>idx.counts(n.id)[k]),['new','learning','review'].map(k=>n[k]));
   assert.equal(idx.advance(now+86400000),false,'rollover requests a scheduling rebuild');
 });
+
+
+test('block topic filters partition nested Obsidian and Anki tags',()=>{
+  const math={any:[{tag_prefixes:['oa/math']},{tag_prefixes:['oa/cs']}]};
+  const proof={tag_prefixes:['proof']};
+  const filters=[{all:[math,{not:proof}]},proof,{all:[{not:math},{not:proof}]}];
+  for(const [tags,expected] of [
+    [['oa/math/categories'],0],[['oa::cs::algorithms'],0],[['oa/math','proof'],1],
+    [['proof/subtype'],1],[['oa/example-topic'],2],[['oa/mathematics'],2],[[],2]]){
+    const card={source_tags:tags};
+    assert.deepEqual(filters.map(f=>SRS.matchesStudyFilter(card,f,{})),[0,1,2].map(i=>i===expected));
+    filters.forEach(f=>SRS.validateStudyFilter(f));
+  }
+});

@@ -37,7 +37,7 @@ def audit_decks(vault, data, configuration):
     from .training import events_from_logs, merge_card_settings
     cards = merge_card_settings(cards, events_from_logs(data))
     def needs_metadata(query):
-        return ('tags' in query or 'properties' in query or
+        return ('tags' in query or 'tag_prefixes' in query or 'properties' in query or
                 any(needs_metadata(q) for k in ('all', 'any') for q in query.get(k, [])) or
                 ('not' in query and needs_metadata(query['not'])))
     if any(needs_metadata(d['filter']) for d in config['decks'].values()):

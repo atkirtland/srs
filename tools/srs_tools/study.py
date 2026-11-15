@@ -32,7 +32,7 @@ def load_cards(data, configuration=None):
 def validate_filter(value):
     if not isinstance(value, dict):
         raise ValueError('Filter must be an object')
-    allowed = {'all', 'any', 'not', 'paths', 'deck_ids', 'include_children', 'groups', 'templates', 'tags', 'properties', 'card_ids'}
+    allowed = {'all', 'any', 'not', 'paths', 'deck_ids', 'include_children', 'groups', 'templates', 'tags', 'tag_prefixes', 'properties', 'card_ids'}
     if set(value) - allowed:
         raise ValueError(f"Unknown filter fields: {set(value) - allowed}")
     for name in ('all', 'any'):
@@ -43,7 +43,7 @@ def validate_filter(value):
                 validate_filter(item)
     if 'not' in value:
         validate_filter(value['not'])
-    for name in ('paths', 'deck_ids', 'groups', 'templates', 'tags', 'card_ids'):
+    for name in ('paths', 'deck_ids', 'groups', 'templates', 'tags', 'tag_prefixes', 'card_ids'):
         if name in value and (not isinstance(value[name], list) or any(not isinstance(v, str) or not v for v in value[name])):
             raise ValueError(f'Invalid filter {name}')
     if 'include_children' in value and not isinstance(value['include_children'], bool):
@@ -154,6 +154,11 @@ def matches(card, query, manifest):
             return False
     tags = set(card.get('source_tags', [])) | set(card.get('card_settings', {}).get('tags', []))
     if 'tags' in query and not set(query['tags']) <= tags:
+        return False
+    normalized_tags = {tag.replace('::', '/') for tag in tags}
+    if 'tag_prefixes' in query and not all(
+            any(tag == prefix.replace('::', '/') or tag.startswith(prefix.replace('::', '/') + '/')
+                for tag in normalized_tags) for prefix in query['tag_prefixes']):
         return False
     properties = card.get('properties', {})
     for name, expected in query.get('properties', {}).items():

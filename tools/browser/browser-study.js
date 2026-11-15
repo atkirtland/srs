@@ -28,11 +28,11 @@ function hydrateCatalog(cards,notes,study) {
 }
 function validateStudyFilter(query) {
   if(!query || typeof query!=="object" || Array.isArray(query))throw Error("Filter must be an object");
-  const allowed=["all","any","not","paths","deck_ids","include_children","groups","templates","tags","properties","card_ids"];
+  const allowed=["all","any","not","paths","deck_ids","include_children","groups","templates","tags","tag_prefixes","properties","card_ids"];
   for(const key of Object.keys(query))if(!allowed.includes(key))throw Error(`Unknown filter field: ${key}`);
   for(const key of ["all","any"])if(key in query){if(!Array.isArray(query[key])||!query[key].length)throw Error(`Invalid ${key} filter`);query[key].forEach(validateStudyFilter);}
   if("not" in query)validateStudyFilter(query.not);
-  for(const key of ["paths","deck_ids","groups","templates","tags","card_ids"])if(key in query && (!Array.isArray(query[key])||query[key].some(x=>typeof x!=="string"||!x)))throw Error(`Invalid ${key} filter`);
+  for(const key of ["paths","deck_ids","groups","templates","tags","tag_prefixes","card_ids"])if(key in query && (!Array.isArray(query[key])||query[key].some(x=>typeof x!=="string"||!x)))throw Error(`Invalid ${key} filter`);
   if("include_children" in query && typeof query.include_children!=="boolean")throw Error("Invalid include_children filter");
   if("properties" in query){
     if(!query.properties || typeof query.properties!=="object" || Array.isArray(query.properties))throw Error("Invalid properties filter");
@@ -53,6 +53,8 @@ function matchesStudyFilter(card,query,manifest) {
   }
   const tags=new Set([...(card.source_tags||[]),...(card.card_settings?.tags||[])]);
   if(query.tags && !query.tags.every(tag=>tags.has(tag)))return false;
+  const normalizedTags=[...tags].map(tag=>tag.replaceAll("::","/"));
+  if(query.tag_prefixes && !query.tag_prefixes.every(prefix=>{const p=prefix.replaceAll("::","/");return normalizedTags.some(tag=>tag===p||tag.startsWith(p+"/"));}))return false;
   for(const [key,expected] of Object.entries(query.properties||{})) {
     if(expected && typeof expected==="object" && !Array.isArray(expected)){
       if(Object.hasOwn(card.properties||{},key)!==expected.exists)return false;

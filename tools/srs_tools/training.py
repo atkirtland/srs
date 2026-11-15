@@ -118,7 +118,7 @@ def prepare(data, study_path, profile, vault=None):
     cards = merge_card_settings(cards, events)
     if vault:
         study.attach_properties(vault, cards)
-    elif any('properties' in srs.canonical(r['filter']) or 'tags' in srs.canonical(r['filter']) for r in config.get('profile_rules', [])):
+    elif any('properties' in srs.canonical(r['filter']) or 'tags' in srs.canonical(r['filter']) or 'tag_prefixes' in srs.canonical(r['filter']) for r in config.get('profile_rules', [])):
         raise ValueError('--vault is required for property/tag profile rules')
     selected = {c['id'] for c in cards if study.profile_id(c, config, manifest) == profile}
     history, branches = histories(events, {c['id'] for c in cards}, manifest['import_id'])
