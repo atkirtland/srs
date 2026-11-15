@@ -2095,6 +2095,7 @@
       }
     }
     return cards.map((card) => {
+      if (card.retired) return {...card, active:false};
       const template = templates.get(`${card.group}/${card.template_key}`);
       if (template && (template.anki_notetype !== card.anki_notetype || template.anki_ordinal !== card.anki_ordinal && !(card.cloze===true && template.front.includes("{{cloze:")))) throw Error(`Card binding changed for ${card.group}/${card.template_key}; re-run migration`);
       return { ...card, template, active: true };

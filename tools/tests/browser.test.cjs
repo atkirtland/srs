@@ -529,3 +529,20 @@ test('blocks prefer existing Anki IDs across blank lines and inserted SRS IDs',(
   assert.equal(blocks[0].front,'Question');
   assert.equal(blocks[0].back,'');
 });
+
+
+test('retired conversion cards stay out of queues, counts and template validation',()=>{
+  const cs=cards([0,1,2]),m=manifest(),config=studyConfiguration(m);
+  config.decks.all={name:'All',parent_id:null,filter:{}};
+  cs.forEach(c=>Object.assign(c,{retired:true,group:'old',template_key:'front',anki_notetype:'Old',anki_ordinal:0,content_error:'Retired template'}));
+  const template={key:'front',enabled:true,required_fields:[],front:'front',back:'back',anki_notetype:'New',anki_ordinal:1};
+  assert.doesNotThrow(()=>SRS.configuredCards(cs,{format_version:1,groups:{old:{templates:[template]}}}));
+  assert.ok(SRS.configuredCards(cs,{format_version:1,groups:{}}).every(c=>!c.active));
+  const runtime=SRS.studyRuntimeManifest(m,config);
+  const tree=SRS.studyDeckTree(cs,states(cs),runtime,now,[],new Set(),'');
+  for(const id of ['parent','all']){
+    const node=tree.find(n=>n.id===id);
+    assert.deepEqual([node.new,node.learning,node.review,node.total,node.errors],[0,0,0,0,0]);
+  }
+  assert.equal(SRS.reviewQueueV2(cs,states(cs),[],runtime,now).cards.length,0);
+});

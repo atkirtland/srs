@@ -1,6 +1,7 @@
 data/
 /migration/config/
 anki-inventory.json
+verification-counts.json
 __pycache__/
 .venv/
 node_modules/

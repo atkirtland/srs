@@ -50,6 +50,100 @@ class StudyTests(unittest.TestCase):
         (self.data/'reviews'/name).write_text(''.join(json.dumps(e)+'\n' for e in events))
     def refresh(self):return study.refresh_cards(self.root,self.data,self.study,self.config)
 
+    def prepare_type_move(self):
+        (self.root/'words.csv').write_text('anki_note_id,word,definition\n1,one,first\n2,two,second\n')
+        self.refresh()
+        config=configuration()
+        config['source_rules']['other']=copy.deepcopy(config['source_rules']['words'])
+        config['source_rules']['other'].update(sources=['other.csv'], templates=['read','speak'])
+        self.templates['groups']['other']={'templates':[
+            dict(key=key,enabled=True,anki_notetype='Other',anki_ordinal=index,front='{{Front}}',back='{{Back}}')
+            for index,key in enumerate(['read','speak'])]}
+        study.write(self.study,config);study.write(self.config,self.templates)
+        (self.root/'words.csv').rename(self.root/'other.csv')
+        (self.root/'words.csv').write_text('anki_note_id,word,definition\n')
+
+    def test_type_conversion_batches_preserves_state_and_is_idempotent(self):
+        self.prepare_type_move()
+        before_manifest,before=study.load_cards(self.data)
+        from srs_tools import layout, store
+        notes,stored=layout.separate_cards(before)
+        store.publish(self.data,before_manifest,before_manifest,stored,notes)
+        _,before=study.load_cards(self.data,study.read(self.study))
+        calls=[]
+        def choose(plan):
+            calls.append(plan)
+            return {'recognition':'read'}
+        self.write_events([dict(kind='answer',id='preserved',card_id=before[0]['id'])])
+        log=(self.data/'reviews/computer-2026-11.jsonl').read_bytes()
+        result=study.refresh_cards(self.root,self.data,self.study,self.config,choose)
+        self.assertEqual(result['added'],2)
+        self.assertEqual(len(calls),1);self.assertEqual(calls[0]['notes'],2)
+        _,after=study.load_cards(self.data,study.read(self.study))
+        by_id={card['id']:card for card in after}
+        for card in before:
+            updated=by_id[card['id']]
+            self.assertEqual(updated['template_key'],'read')
+            self.assertEqual(updated['note_id'],card['note_id'])
+            self.assertEqual(updated['baseline'],card['baseline'])
+            self.assertEqual(updated['added_at'],card['added_at'])
+        self.assertEqual((self.data/'reviews/computer-2026-11.jsonl').read_bytes(),log)
+        self.assertEqual(self.refresh()['added'],0)
+
+    def test_type_conversion_prompt_and_noninteractive_refusal(self):
+        from srs_tools.conversion import prompt_mapping
+        plan=dict(old_type='old',new_type='new',notes=3,cards=6,
+                  old_templates=['read','speak'],new_templates=['recognition','production'])
+        with patch('sys.stdin.isatty',return_value=True), patch('builtins.input',side_effect=['1','0','y']), patch('sys.stderr'):
+            self.assertEqual(prompt_mapping(plan),{'read':'recognition','speak':None})
+        with patch('sys.stdin.isatty',return_value=False):
+            with self.assertRaisesRegex(ValueError,'interactive'):
+                prompt_mapping(plan)
+
+    def test_type_conversion_without_destination_cards_can_retire(self):
+        self.prepare_type_move()
+        config=study.read(self.study);config['source_rules']['other']['templates']=[]
+        study.write(self.study,config)
+        plans=[]
+        def choose(plan):
+            plans.append(plan)
+            return {'recognition':None}
+        result=study.refresh_cards(self.root,self.data,self.study,self.config,choose)
+        self.assertEqual(result['added'],0)
+        self.assertEqual(plans[0]['new_templates'],[])
+        self.assertTrue(all(card['retired'] for card in study.load_cards(self.data)[1]))
+        self.assertEqual(self.refresh()['added'],0)
+
+    def test_type_conversion_retirement(self):
+        self.prepare_type_move()
+        _,before=study.load_cards(self.data)
+        result=study.refresh_cards(self.root,self.data,self.study,self.config,lambda plan:{'recognition':None})
+        self.assertEqual(result['added'],4)
+        _,after=study.load_cards(self.data)
+        by_id={card['id']:card for card in after}
+        self.assertTrue(all(by_id[card['id']]['retired'] for card in before))
+        self.assertEqual(self.refresh()['added'],0)
+
+    def test_type_conversion_cancel_and_invalid_mapping_do_not_publish(self):
+        self.prepare_type_move()
+        before=study.load_cards(self.data)
+        def cancel(plan):raise ValueError('cancelled')
+        for choose in [cancel,lambda plan:{'recognition':'unknown'}]:
+            with self.assertRaises(ValueError):
+                study.refresh_cards(self.root,self.data,self.study,self.config,choose)
+            self.assertEqual(study.load_cards(self.data),before)
+
+    def test_type_conversion_when_whole_source_file_moves(self):
+        self.prepare_type_move();(self.root/'words.csv').unlink()
+        result=study.refresh_cards(self.root,self.data,self.study,self.config,lambda plan:{'recognition':'read'})
+        self.assertEqual(result['type_conversions'],1)
+
+    def test_type_conversion_refuses_duplicate_source_note(self):
+        self.prepare_type_move()
+        (self.root/'words.csv').write_text((self.root/'other.csv').read_text())
+        with self.assertRaisesRegex(ValueError,'Ambiguous'):
+            study.refresh_cards(self.root,self.data,self.study,self.config,lambda plan:{'recognition':'read'})
+
     def test_conditional_geography_generation(self):
         (self.root/'words.csv').write_text('anki_note_id,word,definition,capital,flag,map\n1,Sea,sea,,,sea.png\n2,Country,country,City,flag.png,country.png\n')
         config=configuration()

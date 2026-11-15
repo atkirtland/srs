@@ -80,6 +80,7 @@ function studyProfileId(card,config,manifest) {
   return id;
 }
 function studyDeckMatches(card,id,config,manifest) {
+  if(card.retired)return false;
   const deck=config.decks[id];if(!deck)throw Error(`Unknown study deck: ${id}`);
   if(matchesStudyFilter(card,deck.filter,manifest))return true;
   return Object.entries(config.decks).some(([child,d])=>d.parent_id===id && studyDeckMatches(card,child,config,manifest));

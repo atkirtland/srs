@@ -2095,6 +2095,7 @@
       }
     }
     return cards.map((card) => {
+      if (card.retired) return {...card, active:false};
       const template = templates.get(`${card.group}/${card.template_key}`);
       if (template && (template.anki_notetype !== card.anki_notetype || template.anki_ordinal !== card.anki_ordinal && !(card.cloze===true && template.front.includes("{{cloze:")))) throw Error(`Card binding changed for ${card.group}/${card.template_key}; re-run migration`);
       return { ...card, template, active: true };
@@ -2609,6 +2610,7 @@ function deckTree(cards, states, manifest, now, activity = []) {
   const nodes = new Map(Object.values(meta.decks).map(deck => [deck.id, {...deck, children: [],
     new: 0, review: 0, intraday: 0, interday: 0, errors: 0, total: 0}]));
   for (const c of cards) {
+    if (c.retired) continue;
     const node = nodes.get(c.deck_id);
     if (!node) continue;
     node.total++;
@@ -2876,6 +2878,7 @@ function studyProfileId(card,config,manifest) {
   return id;
 }
 function studyDeckMatches(card,id,config,manifest) {
+  if(card.retired)return false;
   const deck=config.decks[id];if(!deck)throw Error(`Unknown study deck: ${id}`);
   if(matchesStudyFilter(card,deck.filter,manifest))return true;
   return Object.entries(config.decks).some(([child,d])=>d.parent_id===id && studyDeckMatches(card,child,config,manifest));

@@ -48,6 +48,21 @@ Editable configuration lives in `config/`. Scheduling profiles and generated
 bindings live in `data/`. Vault note content is read on demand; an SRS note is a
 stable identity plus a runtime set of fields, without a second content archive.
 
+| Layer | Defined in |
+| --- | --- |
+| Source → SRS notes | `config/sources.json` |
+| Notes → cards | `config/cards.json` |
+| Cards → study decks | `config/decks.json` |
+| Scheduling profiles and assignment | `data/profiles.json`, `config/profile-rules.json` |
+| Generated identities and source bindings | `data/notes/`, `data/cards/` |
+| Answers and card-specific settings | `data/reviews/` |
+
+These configuration layers are separate, and study deck membership uses filters.
+Stored card records also retain scheduling baselines and imported Anki metadata,
+including original deck IDs; those IDs do not define study deck membership.
+The manifest retains imported scheduling settings and daily counters. The store
+therefore includes scheduling and compatibility metadata alongside identities.
+
 For an existing installation using `study.json` and `config.json`, run once from
 `tools/`:
 
@@ -61,6 +76,22 @@ It does not require Anki or Node. Reopen the reviewer or click **Refresh**.
 For a fresh Anki import, `migration/migrate.py init-study` creates the same layout
 from the imported metadata and compatibility source registry. It refuses to
 replace existing source rules.
+
+### Changing a note type
+
+Move the source row or Markdown note into its new source rule and edit its fields,
+keeping its existing note ID. Run `uv run python srs.py refresh-cards` from
+`tools/` in an interactive terminal. Refresh prompts once for each old source rule
+→ new source rule pair, showing the affected note and card counts. Map each old
+template to a destination template, or choose **Retire**, then confirm the batch.
+Mappings apply to this refresh only.
+
+Mapped cards keep their card IDs, scheduling state, profile assignments, settings,
+review history, and creation timestamps. New destination templates create new
+cards. Retired cards retain their history and leave the study queue. Note IDs
+in `data/notes/` also remain stable. Study deck membership follows the new source
+bindings and filters. Ambiguous mappings and cancellation stop catalog publication;
+source discovery can still seed IDs for unrelated new notes before prompting.
 
 ### Configuration and storage locations
 

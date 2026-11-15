@@ -185,6 +185,7 @@ function deckTree(cards, states, manifest, now, activity = []) {
   const nodes = new Map(Object.values(meta.decks).map(deck => [deck.id, {...deck, children: [],
     new: 0, review: 0, intraday: 0, interday: 0, errors: 0, total: 0}]));
   for (const c of cards) {
+    if (c.retired) continue;
     const node = nodes.get(c.deck_id);
     if (!node) continue;
     node.total++;

@@ -301,7 +301,7 @@ def template_conditions_allow_question(template, note, rule):
     return bool(re.sub(r'<[^>]*>', '', question).strip())
 
 
-def discover(vault, config, templates, manifest, issues=None):
+def discover(vault, config, templates, manifest, issues=None, note_bindings=None):
     """Return metadata only; content is transient and always re-read by the view."""
     found = []
     if issues is None:
@@ -370,6 +370,8 @@ def discover(vault, config, templates, manifest, issues=None):
             candidate = dict(group=group, note_uid=identity, source=source, properties=note.metadata, source_tags=tags if isinstance(tags,list) else str(tags).split())
             if not matches(candidate, rule.get('filter', {}), manifest):
                 continue
+            if note_bindings is not None:
+                note_bindings.append(dict(candidate))
             for template in selected_templates:
                 candidate['template_key']=template['key']
                 if not matches(candidate, template.get('when', {}), manifest):
@@ -389,7 +391,7 @@ def discover(vault, config, templates, manifest, issues=None):
     return found
 
 
-def refresh_cards(vault, data, study_path, config_path):
+def refresh_cards(vault, data, study_path, config_path, choose_mapping=None):
     config = validate(layout.load_study(study_path, data)); templates = layout.load_templates(config_path)
     for group,rule in config['source_rules'].items():
         if group not in templates.get('groups', {}):
@@ -399,12 +401,15 @@ def refresh_cards(vault, data, study_path, config_path):
             raise ValueError(f'Unknown templates in source rule {group}: {set(rule["templates"])-keys}')
     manifest, cards = load_cards(data, config)
     issues=[]
-    found = discover(vault, config, templates, manifest, issues)
+    note_bindings = []
+    found = discover(vault, config, templates, manifest, issues, note_bindings)
+    from .conversion import convert, prompt_mapping
+    converted, conversions = convert(cards, found, note_bindings, choose_mapping or prompt_mapping)
     # Match imported cloze ordinals separately, retaining their existing template keys/UIDs.
-    known = {(c.get('group'), c.get('note_uid'), c.get('template_key'), c.get('anki_ordinal')): c for c in cards}
+    known = {(c.get('group'), c.get('note_uid'), c.get('template_key'), c.get('anki_ordinal')): c for c in cards if not c.get('retired')}
     unbound = {}
     for card in cards:
-        if not card.get('group') or not card.get('template_key'):
+        if not card.get('retired') and (not card.get('group') or not card.get('template_key')):
             key=(card.get('note_uid'),card.get('anki_notetype'),card.get('anki_ordinal'))
             unbound.setdefault(key,[]).append(card)
     proposals={}
@@ -414,10 +419,10 @@ def refresh_cards(vault, data, study_path, config_path):
             proposals.setdefault(key,set()).add((item['group'],item['template_key']))
     if any(len(values)>1 for values in proposals.values()):
         raise ValueError('Multiple source rules would bind the same unmapped imported card')
-    variants = {(c.get('group'),c.get('note_uid'),c.get('anki_ordinal'),c.get('anki_notetype')) for c in cards}
+    variants = {(c.get('group'),c.get('note_uid'),c.get('anki_ordinal'),c.get('anki_notetype')) for c in cards if not c.get('retired')}
     uids = {c['id'] for c in cards}
     now = int(datetime.now(timezone.utc).timestamp() * 1000)
-    added = updated = 0
+    added, updated = 0, converted
     for item in found:
         key = (item['group'], item['note_uid'], item['template_key'], item['anki_ordinal'])
         previous = known.get(key)
@@ -463,7 +468,7 @@ def refresh_cards(vault, data, study_path, config_path):
     catalog.publish(data, manifest, replacement, stored_cards, notes,
                     added_at=datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z'))
     # The imported baseline identity, all logs, and immutable scheduler archives stay intact.
-    return {'added':added, 'updated':updated, 'cards':len(cards), 'revision':revision,'issues':issues}
+    return {'added':added, 'updated':updated, 'cards':len(cards), 'revision':revision,'issues':issues, 'type_conversions':conversions}
 
 
 def attach_properties(vault, cards):

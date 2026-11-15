@@ -83,8 +83,16 @@ def save_study(path, config, data=None, expected=None):
 def separate_cards(cards):
     """One note binding per (source rule, persistent note UID); no field recipes."""
     notes, result = {}, []
+    existing = {}
     for card in cards:
-        note_id = digest([card.get('group'), card.get('note_uid')])
+        key = (card.get('group'), card.get('note_uid'))
+        if card.get('note_id'):
+            if key in existing and existing[key] != card['note_id']:
+                raise ValueError('Conflicting persistent note identities')
+            existing[key] = card['note_id']
+    for card in cards:
+        key = (card.get('group'), card.get('note_uid'))
+        note_id = existing.get(key, digest(list(key)))
         source = card.get('source')
         locator = {k: v for k, v in (source or {}).items() if k in ('path', 'kind', 'candidates', 'error')}
         if str(locator.get('error', '')).startswith('Missing source rule: '):
