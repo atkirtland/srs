@@ -13,6 +13,8 @@
     const actions = host.createDiv(), source = host.createDiv();
     const dirty = new Set(), cache = new Map(), skipped = new Set();
     let taxonomy;
+    let resolvedCards, resolvedConfig, sourceGeneration = 0, resolvedGeneration = -1;
+    const candidateSources = new Map();
     let manifest, cards = [], config, index, states, shown, configKey, started = 0;
     let busy = false, disposed = false, refreshTimer, pending = false, selectedDeck = null;
     let reviewing = Boolean(input?.group);
@@ -63,11 +65,20 @@
       if(card.source.error)throw Error(card.source.error);
       let path=card.source.path;
       if(!path && card.source.candidates) {
-        const matches=[];
-        for(const file of api.vault.getFiles().filter(f=>card.source.candidates.some(p=>f.path===p||f.path.startsWith(p+"/")))) {
-          const note=await noteAt(file);
-          if(note.rows?.has(card.note_uid) || `anki:${note.metadata?.anki_note_id}`===card.note_uid || `local:${note.metadata?.srs_uid}`===card.note_uid)matches.push(file.path);
+        const key=canonical(card.source.candidates);
+        if(!candidateSources.has(key)) {
+          const identities=new Map();
+          for(const file of api.vault.getFiles().filter(f=>card.source.candidates.some(p=>f.path===p||f.path.startsWith(p+"/")))) {
+            const note=await noteAt(file);
+            const uids=note.rows ? note.rows.keys() : [note.metadata?.anki_note_id ? `anki:${note.metadata.anki_note_id}` : `local:${note.metadata?.srs_uid}`];
+            for(const uid of uids) {
+              if(!identities.has(uid))identities.set(uid,[]);
+              identities.get(uid).push(file.path);
+            }
+          }
+          candidateSources.set(key,identities);
         }
+        const matches=candidateSources.get(key).get(card.note_uid)||[];
         if(matches.length!==1)throw Error(matches.length?"Duplicate vault source identity":"Unresolved vault source");
         path=matches[0];
       }
@@ -105,12 +116,16 @@
       return {...card,source:{...card.source,path},fields,frontText,backText};
     }
     async function readSources() {
+      if(resolvedCards && resolvedConfig===configKey && resolvedGeneration===sourceGeneration)return resolvedCards;
+      const generation=sourceGeneration;
       taxonomy=null;
+      candidateSources.clear();
       const result=[];
       for(const card of configuredCards(cards,config)) {
         try {result.push(await resolveSource(card));}
         catch(e) {result.push({...card,content_error:e.message});}
       }
+      resolvedCards=result;resolvedConfig=configKey;resolvedGeneration=generation;
       return result;
     }
     function current(card,baseline,latest) {return latest?{state:latest.state,parent:latest.id}:{state:baseline,parent:`import:${manifest.import_id}:${card.id}`};}
@@ -135,10 +150,13 @@
       el.createEl("span",{text:` · ${n.review||0} review`,cls:"srs-review"});
       if(n.errors)el.createEl("span",{text:` · ${n.errors} content errors`,cls:"srs-errors"});
     }
-    function showErrors(available) {
-      const problems=available.filter(c=>c.content_error && (!select.value || c.group===select.value) &&
+    function contentProblems(available) {
+      return available.filter(c=>c.content_error && (!select.value || c.group===select.value) &&
         (!selectedDeck || manifest.scheduling.decks[c.deck_id]?.name===manifest.scheduling.decks[selectedDeck]?.name ||
           manifest.scheduling.decks[c.deck_id]?.name.startsWith(manifest.scheduling.decks[selectedDeck]?.name+"::")));
+    }
+    function showErrors(available) {
+      const problems=contentProblems(available);
       if(!problems.length)return;
       const details=homepage.createEl("details");details.createEl("summary",{text:`Inspect ${problems.length} content errors`});
       let offset=0,more;
@@ -164,7 +182,7 @@
         states.set(card.id,current(card,projection,snapshot.latest.get(card.id)));
       }
       const queue=reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value,undefined,selectedDeck,skipped);
-      const errors=available.filter(c=>c.content_error).length;
+      const errors=contentProblems(available).length;
       if(!reviewing && manifest.scheduling) {
         const build=(nodes,container)=>{for(const n of nodes) {
           const details=container.createEl("details"),summary=details.createEl("summary");
@@ -182,7 +200,7 @@
       if(!card){front.textContent="No cards ready for review in this session.";return;}
       shown=card;started=Date.now();
       const skip=()=>{skipped.add(card.id);guardedDraw();};
-      actions.createEl("button",{text:"Skip for this session"}).onclick=skip;
+      actions.createEl("button",{text:"Bury"}).onclick=skip;
       if(card.source?.path)source.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
       if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       dv.el("div",card.frontText,{container:front});
@@ -194,13 +212,13 @@
         if(busy||shown!==card)return;
         try {
           dv.el("div",card.backText,{container:back});actions.empty();
-          actions.createEl("button",{text:"Skip for this session"}).onclick=skip;
+          actions.createEl("button",{text:"Bury"}).onclick=skip;
           for(const [i,label]of["Again","Hard","Good","Easy"].entries()) {
             const preview=nextStateV2(card,states.get(card.id).state,options,manifest,Date.now(),i+1);
             const minutes=Math.max(0,Math.round((preview.due-Date.now())/60000));
             actions.createEl("button",{text:`${label} (${minutes<1440?minutes+"m":Math.round(minutes/1440)+"d"})`}).onclick=()=>answer(card,i+1);
           }
-        }catch(e){message(e);actions.empty();actions.createEl("button",{text:"Skip for this session"}).onclick=skip;}
+        }catch(e){message(e);actions.empty();actions.createEl("button",{text:"Bury"}).onclick=skip;}
       };
     }
     async function answer(card,rating) {
@@ -229,10 +247,10 @@
       finally{busy=false;if(pending){pending=false;scheduleRefresh();}}
     }
     async function guardedDraw(){if(busy){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
-    function scheduleRefresh(file,oldPath){if(disposed)return;if(file){dirty.add(file.path);if(oldPath)dirty.add(oldPath);}clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);}
+    function scheduleRefresh(file,oldPath){if(disposed)return;if(file){dirty.add(file.path);if(oldPath)dirty.add(oldPath);if(!file.path.startsWith(`${dataRoot}/reviews/`) || (oldPath && !oldPath.startsWith(`${dataRoot}/reviews/`)))sourceGeneration++;}clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);}
     home.onclick=()=>{reviewing=false;selectedDeck=null;guardedDraw();};
     select.onchange=()=>{reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
-    refresh.onclick=()=>{cache.clear();guardedDraw();};
+    refresh.onclick=()=>{cache.clear();sourceGeneration++;guardedDraw();};
     rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     try {
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");

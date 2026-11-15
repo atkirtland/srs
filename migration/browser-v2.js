@@ -149,11 +149,10 @@ function prepareTaxonomy(notes) {
 function dayNumber(now, timing) {
   return Math.round((Date.parse(studyDay(now, timing)) - Date.parse(timing.day_zero)) / 86400000);
 }
-function queueKind(card, value, manifest, now) {
+function queueKind(card, value, manifest, now, today = dayNumber(now, manifest.timing)) {
   if (card.retired) return null;
   const state = value?.state;
   let q = state?.queue ?? card.queue;
-  const today = dayNumber(now, manifest.timing);
   const lastUnburied = manifest.scheduling?.collection.lastUnburied ?? 0;
   if ((q === -2 || q === -3) && (today > lastUnburied || today + 7 < lastUnburied))
     q = card.card_type === 0 ? 0 : card.card_type === 2 ? 2 : card.scheduling?.due > 1e9 ? 1 : 3;
@@ -179,15 +178,16 @@ function deckTree(cards, states, manifest, now, activity = []) {
     if (!node) continue;
     node.total++;
     if (c.content_error) node.errors++;
-    const kind = queueKind(c, states.get(c.id), manifest, now);
+    const kind = queueKind(c, states.get(c.id), manifest, now, today);
     if (kind) node[kind]++;
   }
   const roots = [];
   for (const n of nodes.values()) (nodes.get(n.parent_id)?.children || roots).push(n);
   const added = new Map(), introduced = new Set();
   const byCard = new Map(cards.map(c => [c.id, c]));
+  const currentDay = studyDay(now, manifest.timing);
   for (const event of activity) {
-    if (event.kind === "historical_review" || event.kind === "scheduling_baseline" || studyDay(event.review_time_ms, manifest.timing) !== studyDay(now, manifest.timing)) continue;
+    if (event.kind === "historical_review" || event.kind === "scheduling_baseline" || studyDay(event.review_time_ms, manifest.timing) !== currentDay) continue;
     const card = byCard.get(event.card_id);
     if (!card) continue;
     if (event.was_new && introduced.has(card.id)) continue;
@@ -238,9 +238,14 @@ function deckTree(cards, states, manifest, now, activity = []) {
 function reviewQueueV2(cards, states, events, manifest, now, group, introducedCount, deckId = null, skipped = new Set()) {
   if (!manifest.scheduling) return reviewQueue(cards, states, events, manifest, now, group, introducedCount);
   const tree = deckTree(cards, states, manifest, now, events);
-  let node;
-  const find = nodes => {for (const n of nodes) {if (n.id === deckId) node = n; find(n.children);}};
+  const nodesById = new Map(), kinds = new Map(), today = dayNumber(now, manifest.timing);
+  const kindOf = c => {
+    if (!kinds.has(c.id)) kinds.set(c.id, queueKind(c, states.get(c.id), manifest, now, today));
+    return kinds.get(c.id);
+  };
+  const find = nodes => {for (const n of nodes) {nodesById.set(n.id,n); find(n.children);}};
   find(tree);
+  const node = nodesById.get(deckId);
   const selected = node ? [node] : tree;
   const allowed = new Map();
   const allocate = n => {
@@ -251,13 +256,13 @@ function reviewQueueV2(cards, states, events, manifest, now, group, introducedCo
     eligible.sort((a,b) => Number(skipped.has(a.id))-Number(skipped.has(b.id)) || (a.anki_due ?? 0) - (b.anki_due ?? 0) || a.id.localeCompare(b.id));
     const used = new Map();
     for (const kind of ["intraday", "interday", "review", "new"]) for (const c of eligible) {
-      if (queueKind(c, states.get(c.id), manifest, now) !== kind || budget[kind] <= 0) continue;
+      if (budget[kind] <= 0 || kindOf(c) !== kind) continue;
       let path = manifest.scheduling.decks[c.deck_id], ok = true;
       const ancestors = [];
       while (path) {
         ancestors.push(path.id);
         const entry = used.get(path.id) || {new:0,review:0,interday:0,intraday:0};
-        let target; const locate = ns => {for (const v of ns) {if (v.id === path.id) target = v; locate(v.children);}}; locate(tree);
+        const target = nodesById.get(path.id);
         if (target && entry[kind] >= target[kind]) ok = false;
         if (path.id === n.id) break;
         path = manifest.scheduling.decks[path.parent_id];
@@ -270,13 +275,13 @@ function reviewQueueV2(cards, states, events, manifest, now, group, introducedCo
   selected.forEach(allocate);
   const chosen = [...allowed.values()];
   const priority = c => {
-    const kind=queueKind(c,states.get(c.id),manifest,now);
+    const kind=kindOf(c);
     return kind==="intraday" ? (states.get(c.id).state.due>now?4:0) : kind==="interday"?1:kind==="review"?2:3;
   };
   chosen.sort((a,b)=>priority(a)-priority(b) || (states.get(a.id).state.due||0)-(states.get(b.id).state.due||0) || a.id.localeCompare(b.id));
-  return {cards: chosen, fresh: chosen.filter(c => queueKind(c,states.get(c.id),manifest,now) === "new").length,
-    learning:chosen.filter(c => ["intraday","interday"].includes(queueKind(c,states.get(c.id),manifest,now))).length,
-    review:chosen.filter(c => queueKind(c,states.get(c.id),manifest,now) === "review").length, tree};
+  return {cards: chosen, fresh: chosen.filter(c => kindOf(c) === "new").length,
+    learning:chosen.filter(c => ["intraday","interday"].includes(kindOf(c))).length,
+    review:chosen.filter(c => kindOf(c) === "review").length, tree};
 }
 function nextStateV2(card, current, options, manifest, now, rating) {
   if (![1,2,3,4].includes(rating)) throw Error("Invalid rating");

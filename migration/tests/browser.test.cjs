@@ -139,7 +139,7 @@ test('named devices write readable logs while UUID device records remain valid',
   SRS.validateEvent(answer(),'import');
   assert.throws(()=>SRS.validateEvent({...answer(),device_id:'../other'},'import'),/Invalid/);
 });
-test('reviewer opens deck homepage; broken content stays accessible; Skip writes nothing; live edits preserve identity',async()=>{
+test('reviewer scopes content errors, reuses resolved content, and Bury writes nothing; live edits preserve identity',async()=>{
   class Element {
     constructor(tag='div',options={}) {this.tag=tag;this.children=[];this.textContent=options.text||'';this.value=options.value||'';}
     createEl(tag,options){const e=new Element(tag,options);this.children.push(e);return e;}
@@ -148,15 +148,18 @@ test('reviewer opens deck homepage; broken content stays accessible; Skip writes
     querySelectorAll(tag){return this.children.flatMap(e=>[...(e.tag===tag?[e]:[]),...e.querySelectorAll(tag)]);}
   }
   const root=new Element(), files=new Map(), cleanups=[];
-  const m=manifest(), cs=cards([0,0]);m.partition_count=1;m.revision='r';
+  const m=manifest(), cs=cards([0,0,0]);m.partition_count=1;m.revision='r';
+  m.scheduling.decks.other={id:'other',name:'Other',parent_id:null,normal:{config_id:'1'},common:{}};
+  cs[2].deck_id='other';
   const config={format_version:1,scheduler:options,groups:{test:{templates:[{key:'recognition',enabled:true,anki_notetype:'vocab',anki_ordinal:0,required_fields:['word','definition'],front:'{{word}}',back:'{{definition}}'}]}}};
   cs.forEach((c,i)=>Object.assign(c,{group:'test',note_uid:`anki:${i+1}`,template_key:'recognition',anki_notetype:'vocab',anki_ordinal:0,
-    source:{path:'vocab.csv',kind:'csv',fields:[{anki:'word',source:'word',transform:'text'},{anki:'definition',source:'definition',transform:'text'}]}}));
+    source:{candidates:['vocab.csv'],kind:'csv',fields:[{anki:'word',source:'word',transform:'text'},{anki:'definition',source:'definition',transform:'text'}]}}));
   const put=(path,text)=>files.set(path,{path,extension:path.split('.').at(-1),text,stat:{mtime:Date.now()+files.size,size:text.length}});
   const cardPath='srs/data/imports/r/cards-00000.json';
   put('srs/data/manifest.json',JSON.stringify(m));put(cardPath,JSON.stringify(cs));put('srs/config.json',JSON.stringify(config));
   put('vocab.csv','anki_note_id,word,definition\n1,broken,\n2,ready,answer\n');
-  const vault={getName:()=>`test-ui-${crypto.randomUUID()}`,getFiles:()=>[...files.values()],getAbstractFileByPath:p=>files.get(p),read:async f=>f.text,
+  let scans=0;
+  const vault={getName:()=>`test-ui-${crypto.randomUUID()}`,getFiles:()=>{scans++;return [...files.values()];},getAbstractFileByPath:p=>files.get(p),read:async f=>f.text,
     create:async(p,t)=>put(p,t),append:async(f,t)=>{f.text+=t;f.stat.mtime++;f.stat.size=f.text.length;},on:()=>()=>{}};
   const component={register:f=>cleanups.push(f),registerEvent:()=>{},registerInterval:()=>{}};
   class FixedDate extends Date {constructor(...args){super(...(args.length?args:[now]));}static now(){return now;}}
@@ -168,12 +171,20 @@ test('reviewer opens deck homepage; broken content stays accessible; Skip writes
   const button=text=>root.querySelectorAll('button').find(b=>b.textContent===text);
   for(let i=0;i<100&&!button('Review');i++)await tick();
   assert.ok(button('Review'),'default deck homepage appears');
-  button('Review').onclick({preventDefault(){}});
+  const scansAtHome=scans;
+  // Other sorts before Parent, so open the Parent root explicitly.
+  root.querySelectorAll('button').filter(b=>b.textContent==='Review')[1].onclick({preventDefault(){}});
   for(let i=0;i<100&&!button('Rating unavailable');i++)await tick();
   assert.ok(button('Rating unavailable'),'missing fields remain accessible');
-  button('Skip for this session').onclick();
+  assert.equal(scans-scansAtHome,1,'opening a deck only scans for log changes, without resolving sources again');
+  assert.ok(root.querySelectorAll('span').some(e=>e.textContent===' · 1 content errors'));
+  assert.ok(root.querySelectorAll('summary').some(e=>e.textContent==='Inspect 1 content errors'));
+  assert.ok(!root.querySelectorAll('span').some(e=>e.textContent===' · 2 content errors'));
+  const scansBeforeBury=scans;
+  button('Bury').onclick();
   for(let i=0;i<100&&!button('Show answer');i++)await tick();
   assert.ok(button('Show answer'));
+  assert.equal(scans-scansBeforeBury,1,'burying reuses the resolved source catalog');
   assert.equal([...files.keys()].filter(p=>p.endsWith('.jsonl')).length,0);
   const priorIds=JSON.parse(files.get(cardPath).text).map(c=>c.id);
   config.groups.test.templates[0].front='Edited {{word}}';put('srs/config.json',JSON.stringify(config));

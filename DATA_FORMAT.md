@@ -319,7 +319,7 @@ not that separate verification report.
 IndexedDB holds the device-local incremental index: file checkpoints, event
 deduplication, current answers, imported observations, activity, and reconstructed
 baseline caches. Those are not synced `data/` JSON files. They can be rebuilt
-from the store. Session Skip choices are also not written as review events.
+from the store. Session Bury choices are also not written as review events.
 
 The publisher writes a complete generation, switches the root manifest, and
 removes superseded generated import directories. `manifest.pending` is a

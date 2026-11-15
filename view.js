@@ -2501,11 +2501,10 @@ function prepareTaxonomy(notes) {
 function dayNumber(now, timing) {
   return Math.round((Date.parse(studyDay(now, timing)) - Date.parse(timing.day_zero)) / 86400000);
 }
-function queueKind(card, value, manifest, now) {
+function queueKind(card, value, manifest, now, today = dayNumber(now, manifest.timing)) {
   if (card.retired) return null;
   const state = value?.state;
   let q = state?.queue ?? card.queue;
-  const today = dayNumber(now, manifest.timing);
   const lastUnburied = manifest.scheduling?.collection.lastUnburied ?? 0;
   if ((q === -2 || q === -3) && (today > lastUnburied || today + 7 < lastUnburied))
     q = card.card_type === 0 ? 0 : card.card_type === 2 ? 2 : card.scheduling?.due > 1e9 ? 1 : 3;
@@ -2531,15 +2530,16 @@ function deckTree(cards, states, manifest, now, activity = []) {
     if (!node) continue;
     node.total++;
     if (c.content_error) node.errors++;
-    const kind = queueKind(c, states.get(c.id), manifest, now);
+    const kind = queueKind(c, states.get(c.id), manifest, now, today);
     if (kind) node[kind]++;
   }
   const roots = [];
   for (const n of nodes.values()) (nodes.get(n.parent_id)?.children || roots).push(n);
   const added = new Map(), introduced = new Set();
   const byCard = new Map(cards.map(c => [c.id, c]));
+  const currentDay = studyDay(now, manifest.timing);
   for (const event of activity) {
-    if (event.kind === "historical_review" || event.kind === "scheduling_baseline" || studyDay(event.review_time_ms, manifest.timing) !== studyDay(now, manifest.timing)) continue;
+    if (event.kind === "historical_review" || event.kind === "scheduling_baseline" || studyDay(event.review_time_ms, manifest.timing) !== currentDay) continue;
     const card = byCard.get(event.card_id);
     if (!card) continue;
     if (event.was_new && introduced.has(card.id)) continue;
@@ -2590,9 +2590,14 @@ function deckTree(cards, states, manifest, now, activity = []) {
 function reviewQueueV2(cards, states, events, manifest, now, group, introducedCount, deckId = null, skipped = new Set()) {
   if (!manifest.scheduling) return reviewQueue(cards, states, events, manifest, now, group, introducedCount);
   const tree = deckTree(cards, states, manifest, now, events);
-  let node;
-  const find = nodes => {for (const n of nodes) {if (n.id === deckId) node = n; find(n.children);}};
+  const nodesById = new Map(), kinds = new Map(), today = dayNumber(now, manifest.timing);
+  const kindOf = c => {
+    if (!kinds.has(c.id)) kinds.set(c.id, queueKind(c, states.get(c.id), manifest, now, today));
+    return kinds.get(c.id);
+  };
+  const find = nodes => {for (const n of nodes) {nodesById.set(n.id,n); find(n.children);}};
   find(tree);
+  const node = nodesById.get(deckId);
   const selected = node ? [node] : tree;
   const allowed = new Map();
   const allocate = n => {
@@ -2603,13 +2608,13 @@ function reviewQueueV2(cards, states, events, manifest, now, group, introducedCo
     eligible.sort((a,b) => Number(skipped.has(a.id))-Number(skipped.has(b.id)) || (a.anki_due ?? 0) - (b.anki_due ?? 0) || a.id.localeCompare(b.id));
     const used = new Map();
     for (const kind of ["intraday", "interday", "review", "new"]) for (const c of eligible) {
-      if (queueKind(c, states.get(c.id), manifest, now) !== kind || budget[kind] <= 0) continue;
+      if (budget[kind] <= 0 || kindOf(c) !== kind) continue;
       let path = manifest.scheduling.decks[c.deck_id], ok = true;
       const ancestors = [];
       while (path) {
         ancestors.push(path.id);
         const entry = used.get(path.id) || {new:0,review:0,interday:0,intraday:0};
-        let target; const locate = ns => {for (const v of ns) {if (v.id === path.id) target = v; locate(v.children);}}; locate(tree);
+        const target = nodesById.get(path.id);
         if (target && entry[kind] >= target[kind]) ok = false;
         if (path.id === n.id) break;
         path = manifest.scheduling.decks[path.parent_id];
@@ -2622,13 +2627,13 @@ function reviewQueueV2(cards, states, events, manifest, now, group, introducedCo
   selected.forEach(allocate);
   const chosen = [...allowed.values()];
   const priority = c => {
-    const kind=queueKind(c,states.get(c.id),manifest,now);
+    const kind=kindOf(c);
     return kind==="intraday" ? (states.get(c.id).state.due>now?4:0) : kind==="interday"?1:kind==="review"?2:3;
   };
   chosen.sort((a,b)=>priority(a)-priority(b) || (states.get(a.id).state.due||0)-(states.get(b.id).state.due||0) || a.id.localeCompare(b.id));
-  return {cards: chosen, fresh: chosen.filter(c => queueKind(c,states.get(c.id),manifest,now) === "new").length,
-    learning:chosen.filter(c => ["intraday","interday"].includes(queueKind(c,states.get(c.id),manifest,now))).length,
-    review:chosen.filter(c => queueKind(c,states.get(c.id),manifest,now) === "review").length, tree};
+  return {cards: chosen, fresh: chosen.filter(c => kindOf(c) === "new").length,
+    learning:chosen.filter(c => ["intraday","interday"].includes(kindOf(c))).length,
+    review:chosen.filter(c => kindOf(c) === "review").length, tree};
 }
 function nextStateV2(card, current, options, manifest, now, rating) {
   if (![1,2,3,4].includes(rating)) throw Error("Invalid rating");
@@ -2728,6 +2733,8 @@ function studyDayStart(day, timing) {
     const actions = host.createDiv(), source = host.createDiv();
     const dirty = new Set(), cache = new Map(), skipped = new Set();
     let taxonomy;
+    let resolvedCards, resolvedConfig, sourceGeneration = 0, resolvedGeneration = -1;
+    const candidateSources = new Map();
     let manifest, cards = [], config, index, states, shown, configKey, started = 0;
     let busy = false, disposed = false, refreshTimer, pending = false, selectedDeck = null;
     let reviewing = Boolean(input?.group);
@@ -2778,11 +2785,20 @@ function studyDayStart(day, timing) {
       if(card.source.error)throw Error(card.source.error);
       let path=card.source.path;
       if(!path && card.source.candidates) {
-        const matches=[];
-        for(const file of api.vault.getFiles().filter(f=>card.source.candidates.some(p=>f.path===p||f.path.startsWith(p+"/")))) {
-          const note=await noteAt(file);
-          if(note.rows?.has(card.note_uid) || `anki:${note.metadata?.anki_note_id}`===card.note_uid || `local:${note.metadata?.srs_uid}`===card.note_uid)matches.push(file.path);
+        const key=canonical(card.source.candidates);
+        if(!candidateSources.has(key)) {
+          const identities=new Map();
+          for(const file of api.vault.getFiles().filter(f=>card.source.candidates.some(p=>f.path===p||f.path.startsWith(p+"/")))) {
+            const note=await noteAt(file);
+            const uids=note.rows ? note.rows.keys() : [note.metadata?.anki_note_id ? `anki:${note.metadata.anki_note_id}` : `local:${note.metadata?.srs_uid}`];
+            for(const uid of uids) {
+              if(!identities.has(uid))identities.set(uid,[]);
+              identities.get(uid).push(file.path);
+            }
+          }
+          candidateSources.set(key,identities);
         }
+        const matches=candidateSources.get(key).get(card.note_uid)||[];
         if(matches.length!==1)throw Error(matches.length?"Duplicate vault source identity":"Unresolved vault source");
         path=matches[0];
       }
@@ -2820,12 +2836,16 @@ function studyDayStart(day, timing) {
       return {...card,source:{...card.source,path},fields,frontText,backText};
     }
     async function readSources() {
+      if(resolvedCards && resolvedConfig===configKey && resolvedGeneration===sourceGeneration)return resolvedCards;
+      const generation=sourceGeneration;
       taxonomy=null;
+      candidateSources.clear();
       const result=[];
       for(const card of configuredCards(cards,config)) {
         try {result.push(await resolveSource(card));}
         catch(e) {result.push({...card,content_error:e.message});}
       }
+      resolvedCards=result;resolvedConfig=configKey;resolvedGeneration=generation;
       return result;
     }
     function current(card,baseline,latest) {return latest?{state:latest.state,parent:latest.id}:{state:baseline,parent:`import:${manifest.import_id}:${card.id}`};}
@@ -2850,10 +2870,13 @@ function studyDayStart(day, timing) {
       el.createEl("span",{text:` · ${n.review||0} review`,cls:"srs-review"});
       if(n.errors)el.createEl("span",{text:` · ${n.errors} content errors`,cls:"srs-errors"});
     }
-    function showErrors(available) {
-      const problems=available.filter(c=>c.content_error && (!select.value || c.group===select.value) &&
+    function contentProblems(available) {
+      return available.filter(c=>c.content_error && (!select.value || c.group===select.value) &&
         (!selectedDeck || manifest.scheduling.decks[c.deck_id]?.name===manifest.scheduling.decks[selectedDeck]?.name ||
           manifest.scheduling.decks[c.deck_id]?.name.startsWith(manifest.scheduling.decks[selectedDeck]?.name+"::")));
+    }
+    function showErrors(available) {
+      const problems=contentProblems(available);
       if(!problems.length)return;
       const details=homepage.createEl("details");details.createEl("summary",{text:`Inspect ${problems.length} content errors`});
       let offset=0,more;
@@ -2879,7 +2902,7 @@ function studyDayStart(day, timing) {
         states.set(card.id,current(card,projection,snapshot.latest.get(card.id)));
       }
       const queue=reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value,undefined,selectedDeck,skipped);
-      const errors=available.filter(c=>c.content_error).length;
+      const errors=contentProblems(available).length;
       if(!reviewing && manifest.scheduling) {
         const build=(nodes,container)=>{for(const n of nodes) {
           const details=container.createEl("details"),summary=details.createEl("summary");
@@ -2897,7 +2920,7 @@ function studyDayStart(day, timing) {
       if(!card){front.textContent="No cards ready for review in this session.";return;}
       shown=card;started=Date.now();
       const skip=()=>{skipped.add(card.id);guardedDraw();};
-      actions.createEl("button",{text:"Skip for this session"}).onclick=skip;
+      actions.createEl("button",{text:"Bury"}).onclick=skip;
       if(card.source?.path)source.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
       if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       dv.el("div",card.frontText,{container:front});
@@ -2909,13 +2932,13 @@ function studyDayStart(day, timing) {
         if(busy||shown!==card)return;
         try {
           dv.el("div",card.backText,{container:back});actions.empty();
-          actions.createEl("button",{text:"Skip for this session"}).onclick=skip;
+          actions.createEl("button",{text:"Bury"}).onclick=skip;
           for(const [i,label]of["Again","Hard","Good","Easy"].entries()) {
             const preview=nextStateV2(card,states.get(card.id).state,options,manifest,Date.now(),i+1);
             const minutes=Math.max(0,Math.round((preview.due-Date.now())/60000));
             actions.createEl("button",{text:`${label} (${minutes<1440?minutes+"m":Math.round(minutes/1440)+"d"})`}).onclick=()=>answer(card,i+1);
           }
-        }catch(e){message(e);actions.empty();actions.createEl("button",{text:"Skip for this session"}).onclick=skip;}
+        }catch(e){message(e);actions.empty();actions.createEl("button",{text:"Bury"}).onclick=skip;}
       };
     }
     async function answer(card,rating) {
@@ -2944,10 +2967,10 @@ function studyDayStart(day, timing) {
       finally{busy=false;if(pending){pending=false;scheduleRefresh();}}
     }
     async function guardedDraw(){if(busy){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
-    function scheduleRefresh(file,oldPath){if(disposed)return;if(file){dirty.add(file.path);if(oldPath)dirty.add(oldPath);}clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);}
+    function scheduleRefresh(file,oldPath){if(disposed)return;if(file){dirty.add(file.path);if(oldPath)dirty.add(oldPath);if(!file.path.startsWith(`${dataRoot}/reviews/`) || (oldPath && !oldPath.startsWith(`${dataRoot}/reviews/`)))sourceGeneration++;}clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);}
     home.onclick=()=>{reviewing=false;selectedDeck=null;guardedDraw();};
     select.onchange=()=>{reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
-    refresh.onclick=()=>{cache.clear();guardedDraw();};
+    refresh.onclick=()=>{cache.clear();sourceGeneration++;guardedDraw();};
     rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     try {
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");

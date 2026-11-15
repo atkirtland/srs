@@ -19,8 +19,12 @@ The homepage has an expandable deck hierarchy with blue new, red learning/
 relearning, and green review counts. Content-error totals are separate. Opening
 a deck includes its children. Missing sources, required fields, disabled templates,
 and unsupported operations stay visible without reducing scheduling counts.
-**Skip for this session** changes no schedule, history, or daily counter. Refresh
+**Bury** hides a card for this session and changes no schedule, history, or daily counter. Refresh
 rereads the vault and configuration; reopening clears the session's skips.
+
+The first opening indexes review logs in persistent local IndexedDB. Later openings
+process only changed logs. Vault content is resolved once per open view and reused
+while reviewing; source or template changes, or Refresh, invalidate that cache.
 
 ## Take a desktop snapshot
 
