@@ -520,3 +520,12 @@ test('separate configuration and note bindings reproduce scheduling and render m
   assert.match(broken[0].source.error,/Missing source rule/);
   assert.equal(SRS.deckTree(broken,states(broken),m,now)[0].review,1);
 });
+
+test('blocks prefer existing Anki IDs across blank lines and inserted SRS IDs',()=>{
+  const text=' > [!anki]- Question\n > #oa/example-topic\n<!-- SRS-ID: 33333333-3333-4333-8333-333333333333 -->\n \n<!--ID: 1002-->\n';
+  const blocks=SRS.sourceBlocks(text);
+  assert.equal(blocks.length,1);
+  assert.equal(blocks[0].identity,'anki:1002');
+  assert.equal(blocks[0].front,'Question');
+  assert.equal(blocks[0].back,'');
+});

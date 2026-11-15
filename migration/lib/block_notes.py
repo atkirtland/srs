@@ -10,11 +10,12 @@ from urllib.parse import quote
 # A callout is contiguous quoted text followed immediately by its Anki ID.
 # The first line supplies Front; subsequent quoted lines supply Back and tags.
 ANKI_CALLOUT_RE = re.compile(
-    r"(?m)^>[ \t]*\[!anki\](?:-[ \t]*|[ \t]+)(?P<front>[^\r\n]*)\r?\n"
-    r"(?P<quoted>(?:^>[ \t]?(?!\[!anki\](?:-|[ \t]))[^\r\n]*(?:\r?\n|\Z))+?)"
-    r"^[ \t]*<!--[ \t]*ID[ \t]*:[ \t]*(?P<note_id>[0-9]+)[ \t]*-->[ \t]*$",
+    r"(?m)^[ \t]{0,3}>[ \t]*\[!anki\](?:-[ \t]*|[ \t]+)(?P<front>[^\r\n]*)\r?\n"
+    r"(?P<quoted>(?:^[ \t]{0,3}>[ \t]?(?!\[!anki\](?:-|[ \t]))[^\r\n]*(?:\r?\n|\Z))+)"
+    r"(?P<markers>(?:^[ \t]*(?:<!--[ \t]*(?:ID|SRS-ID)[ \t]*:[ \t]*[^\r\n]+?[ \t]*-->[ \t]*)?(?:\r?\n|$))*)",
     re.IGNORECASE,
 )
+ANKI_ID_RE = re.compile(r"<!--[ \t]*ID[ \t]*:[ \t]*([0-9]+)[ \t]*-->", re.I)
 HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
 TAG_RE = re.compile(r"(?<![\w/])#(?P<tag>oa(?:/[\w-]+)+)", re.UNICODE)
 TAG_ONLY_RE = re.compile(r"^[ \t]*(?:#[^\s#]+[ \t]*)+$", re.UNICODE)
@@ -45,7 +46,7 @@ def _headings_before(content: str, offset: int) -> list[str]:
 
 
 def _unquote(quoted: str) -> list[str]:
-    return [re.sub(r"^>[ \t]?", "", line) for line in quoted.splitlines()]
+    return [re.sub(r"^[ \t]{0,3}>[ \t]?", "", line) for line in quoted.splitlines()]
 
 
 def parse_file(path: Path, vault: Path) -> list[BlockNote]:
@@ -53,6 +54,11 @@ def parse_file(path: Path, vault: Path) -> list[BlockNote]:
     relative = path.resolve().relative_to(vault.resolve()).as_posix()
     notes: list[BlockNote] = []
     for match in ANKI_CALLOUT_RE.finditer(content):
+        ids = {int(value) for value in ANKI_ID_RE.findall(match.group("markers"))}
+        if not ids:
+            continue
+        if len(ids) > 1:
+            raise ValueError(f"Conflicting block identities in {path}")
         lines = _unquote(match.group("quoted"))
         tags: list[str] = []
         back_lines: list[str] = []
@@ -75,7 +81,7 @@ def parse_file(path: Path, vault: Path) -> list[BlockNote]:
         notes.append(BlockNote(
             path=path.resolve(),
             line=content.count("\n", 0, match.start()) + 1,
-            note_id=int(match.group("note_id")),
+            note_id=next(iter(ids)),
             front=match.group("front").strip(),
             back=back,
             tags=tuple(dict.fromkeys(tags)),

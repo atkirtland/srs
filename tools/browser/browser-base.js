@@ -2066,7 +2066,7 @@
   function sourceFields(card, rows) {
     const matches = rows instanceof Map ? rows.has(card.note_uid) ? [rows.get(card.note_uid)] : [] : rows.filter((row) => {
       const nid = (row.anki_note_id || "").trim();
-      return card.note_uid === (nid ? `anki:${BigInt(nid)}` : `local:${(row.srs_uid || "").trim().toLowerCase()}`);
+      return card.note_uid === (nid ? `anki:${BigInt(nid)}` : `local:${(row.srs_note_id || row.srs_uid || "").trim().toLowerCase()}`);
     });
     if (!matches.length) return null;
     if (matches.length !== 1) throw Error(`Duplicate source identity ${card.note_uid}`);
@@ -2076,7 +2076,7 @@
     const result = /* @__PURE__ */ new Map();
     for (const row of rows) {
       const nid = (row.anki_note_id || "").trim();
-      const uid = nid ? `anki:${BigInt(nid)}` : `local:${(row.srs_uid || "").trim().toLowerCase()}`;
+      const uid = nid ? `anki:${BigInt(nid)}` : `local:${(row.srs_note_id || row.srs_uid || "").trim().toLowerCase()}`;
       if (uid === "local:") continue;
       if (result.has(uid)) throw Error(`Duplicate source identity ${uid}`);
       result.set(uid, row);

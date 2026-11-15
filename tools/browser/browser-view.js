@@ -92,7 +92,7 @@
           const identities=new Map();
           for(const file of api.vault.getFiles().filter(f=>card.source.candidates.some(p=>f.path===p||f.path.startsWith(p+"/")))) {
             const note=await noteAt(file);
-            const uids=note.rows ? note.rows.keys() : [note.metadata?.anki_note_id ? `anki:${note.metadata.anki_note_id}` : `local:${note.metadata?.srs_uid}`];
+            const uids=note.rows ? note.rows.keys() : [note.metadata?.anki_note_id ? `anki:${note.metadata.anki_note_id}` : `local:${(note.metadata?.srs_note_id || note.metadata?.srs_uid)}`];
             for(const uid of uids) {
               if(!identities.has(uid))identities.set(uid,[]);
               identities.get(uid).push(file.path);
@@ -125,8 +125,8 @@
         metadata={...metadata,$front:matches[0].front,$back:matches[0].back,tags:[...new Set([...(Array.isArray(metadata.tags)?metadata.tags:String(metadata.tags||"").split(/\s+/).filter(Boolean)),...matches[0].tags])]};
       }
       if(!metadata)throw Error(`Missing source identity: ${card.note_uid}`);
-      if(card.source.kind!=="block" && !data.rows && (metadata.anki_note_id || metadata.srs_uid)) {
-        const uid=metadata.anki_note_id?`anki:${metadata.anki_note_id}`:`local:${metadata.srs_uid}`;
+      if(card.source.kind!=="block" && !data.rows && (metadata.anki_note_id || metadata.srs_note_id || metadata.srs_uid)) {
+        const uid=metadata.anki_note_id?`anki:${metadata.anki_note_id}`:`local:${metadata.srs_note_id || metadata.srs_uid}`;
         if(uid!==card.note_uid)throw Error("Source identity changed");
       }
       const note={metadata,body:data.body,filename:file.basename||file.path.split("/").at(-1).replace(/\.md$/,""),path,lookups:{us_states:US_STATES}};

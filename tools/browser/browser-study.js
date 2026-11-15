@@ -116,7 +116,14 @@ function studyDeckTree(cards,states,manifest,now,activity,skipped,group) {
   const sort=nodes=>{nodes.sort((a,b)=>a.name.localeCompare(b.name));nodes.forEach(n=>sort(n.children));};sort(roots);return roots;
 }
 function sourceBlocks(text) {
-  const pattern=/^>[ \t]*\[!(?:anki|srs)\](?:-[ \t]*|[ \t]+)([^\r\n]*)\r?\n((?:^>[ \t]?(?!\[!(?:anki|srs)\](?:-|[ \t]))[^\r\n]*(?:\r?\n|$))+?)^[ \t]*<!--[ \t]*(ID|SRS-ID)[ \t]*:[ \t]*([^\r\n]+?)[ \t]*-->[ \t]*$/gmi;
-  return [...text.matchAll(pattern)].map(m=>({identity:m[3].toUpperCase()==="ID"?`anki:${BigInt(m[4].trim())}`:`local:${m[4].trim().toLowerCase()}`,
-    front:m[1].trim(),tags:[...new Set([...m[2].matchAll(/(?<![\w/])#([\p{L}\p{N}_/-]+)/gu)].map(t=>t[1]))],back:m[2].split(/\r?\n/).map(l=>l.replace(/^>[ \t]?/,"")).filter(l=>!/^\s*(?:#[^\s#]+\s*)+$/.test(l)).join("\n").trim()}));
+  const pattern=/^[ \t]{0,3}>[ \t]*\[!(?:anki|srs)\](?:-[ \t]*|[ \t]+)([^\r\n]*)\r?\n((?:^[ \t]{0,3}>[ \t]?(?!\[!(?:anki|srs)\](?:-|[ \t]))[^\r\n]*(?:\r?\n|$))+)((?:^[ \t]*(?:<!--[ \t]*(?:ID|SRS-ID)[ \t]*:[ \t]*[^\r\n]+?[ \t]*-->[ \t]*)?(?:\r?\n|$))*)/gmi;
+  return [...text.matchAll(pattern)].flatMap(m=>{
+    const markers=[...m[3].matchAll(/<!--[ \t]*(ID|SRS-ID)[ \t]*:[ \t]*([^\r\n]+?)[ \t]*-->/gi)];
+    const anki=[...new Set(markers.filter(x=>x[1].toUpperCase()==="ID").map(x=>String(BigInt(x[2].trim()))))];
+    const local=[...new Set(markers.filter(x=>x[1].toUpperCase()==="SRS-ID").map(x=>x[2].trim().toLowerCase()))];
+    if(anki.length>1 || (!anki.length && local.length>1))throw Error("Conflicting block identities");
+    if(!anki.length && !local.length)return [];
+    return [{identity:anki.length?`anki:${anki[0]}`:`local:${local[0]}`,
+      front:m[1].trim(),tags:[...new Set([...m[2].matchAll(/(?<![\w/])#([\p{L}\p{N}_/-]+)/gu)].map(t=>t[1]))],back:m[2].split(/\r?\n/).map(l=>l.replace(/^[ \t]{0,3}>[ \t]?/,"")).filter(l=>!/^\s*(?:#[^\s#]+\s*)+$/.test(l)).join("\n").trim()}];
+  });
 }

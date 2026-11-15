@@ -20,12 +20,12 @@ def digest(value: Any) -> str:
 
 
 def note_uid(metadata: dict[str, Any]) -> str | None:
-    value = str(metadata.get("anki_note_id", "")).strip()
+    value = str(metadata.get("anki_note_id", "") or "").strip()
     if value:
         if not value.isascii() or not value.isdecimal() or int(value) <= 0:
             raise SRSError(f"invalid anki_note_id: {value}")
         return f"anki:{int(value)}"
-    value = str(metadata.get("srs_uid", "")).strip()
+    value = str(metadata.get("srs_note_id") or metadata.get("srs_uid") or "").strip()
     return f"local:{uuid.UUID(value)}" if value else None
 
 
@@ -44,11 +44,11 @@ def seed_csv_uids(path: Path) -> int:
     count = 0
     for row in rows:
         if not note_uid(row):
-            row["srs_uid"] = str(uuid.uuid4())
+            row["srs_note_id"] = str(uuid.uuid4())
             count += 1
     if count:
-        if "srs_uid" not in columns:
-            columns.append("srs_uid")
+        if "srs_note_id" not in columns:
+            columns.append("srs_note_id")
         temporary = path.with_name(path.name + ".srs-tmp")
         with temporary.open("x", encoding="utf-8", newline="") as stream:
             writer = csv.DictWriter(stream, fieldnames=columns)

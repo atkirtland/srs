@@ -2066,7 +2066,7 @@
   function sourceFields(card, rows) {
     const matches = rows instanceof Map ? rows.has(card.note_uid) ? [rows.get(card.note_uid)] : [] : rows.filter((row) => {
       const nid = (row.anki_note_id || "").trim();
-      return card.note_uid === (nid ? `anki:${BigInt(nid)}` : `local:${(row.srs_uid || "").trim().toLowerCase()}`);
+      return card.note_uid === (nid ? `anki:${BigInt(nid)}` : `local:${(row.srs_note_id || row.srs_uid || "").trim().toLowerCase()}`);
     });
     if (!matches.length) return null;
     if (matches.length !== 1) throw Error(`Duplicate source identity ${card.note_uid}`);
@@ -2076,7 +2076,7 @@
     const result = /* @__PURE__ */ new Map();
     for (const row of rows) {
       const nid = (row.anki_note_id || "").trim();
-      const uid = nid ? `anki:${BigInt(nid)}` : `local:${(row.srs_uid || "").trim().toLowerCase()}`;
+      const uid = nid ? `anki:${BigInt(nid)}` : `local:${(row.srs_note_id || row.srs_uid || "").trim().toLowerCase()}`;
       if (uid === "local:") continue;
       if (result.has(uid)) throw Error(`Duplicate source identity ${uid}`);
       result.set(uid, row);
@@ -2912,9 +2912,16 @@ function studyDeckTree(cards,states,manifest,now,activity,skipped,group) {
   const sort=nodes=>{nodes.sort((a,b)=>a.name.localeCompare(b.name));nodes.forEach(n=>sort(n.children));};sort(roots);return roots;
 }
 function sourceBlocks(text) {
-  const pattern=/^>[ \t]*\[!(?:anki|srs)\](?:-[ \t]*|[ \t]+)([^\r\n]*)\r?\n((?:^>[ \t]?(?!\[!(?:anki|srs)\](?:-|[ \t]))[^\r\n]*(?:\r?\n|$))+?)^[ \t]*<!--[ \t]*(ID|SRS-ID)[ \t]*:[ \t]*([^\r\n]+?)[ \t]*-->[ \t]*$/gmi;
-  return [...text.matchAll(pattern)].map(m=>({identity:m[3].toUpperCase()==="ID"?`anki:${BigInt(m[4].trim())}`:`local:${m[4].trim().toLowerCase()}`,
-    front:m[1].trim(),tags:[...new Set([...m[2].matchAll(/(?<![\w/])#([\p{L}\p{N}_/-]+)/gu)].map(t=>t[1]))],back:m[2].split(/\r?\n/).map(l=>l.replace(/^>[ \t]?/,"")).filter(l=>!/^\s*(?:#[^\s#]+\s*)+$/.test(l)).join("\n").trim()}));
+  const pattern=/^[ \t]{0,3}>[ \t]*\[!(?:anki|srs)\](?:-[ \t]*|[ \t]+)([^\r\n]*)\r?\n((?:^[ \t]{0,3}>[ \t]?(?!\[!(?:anki|srs)\](?:-|[ \t]))[^\r\n]*(?:\r?\n|$))+)((?:^[ \t]*(?:<!--[ \t]*(?:ID|SRS-ID)[ \t]*:[ \t]*[^\r\n]+?[ \t]*-->[ \t]*)?(?:\r?\n|$))*)/gmi;
+  return [...text.matchAll(pattern)].flatMap(m=>{
+    const markers=[...m[3].matchAll(/<!--[ \t]*(ID|SRS-ID)[ \t]*:[ \t]*([^\r\n]+?)[ \t]*-->/gi)];
+    const anki=[...new Set(markers.filter(x=>x[1].toUpperCase()==="ID").map(x=>String(BigInt(x[2].trim()))))];
+    const local=[...new Set(markers.filter(x=>x[1].toUpperCase()==="SRS-ID").map(x=>x[2].trim().toLowerCase()))];
+    if(anki.length>1 || (!anki.length && local.length>1))throw Error("Conflicting block identities");
+    if(!anki.length && !local.length)return [];
+    return [{identity:anki.length?`anki:${anki[0]}`:`local:${local[0]}`,
+      front:m[1].trim(),tags:[...new Set([...m[2].matchAll(/(?<![\w/])#([\p{L}\p{N}_/-]+)/gu)].map(t=>t[1]))],back:m[2].split(/\r?\n/).map(l=>l.replace(/^[ \t]{0,3}>[ \t]?/,"")).filter(l=>!/^\s*(?:#[^\s#]+\s*)+$/.test(l)).join("\n").trim()}];
+  });
 }
 
   if (globalThis.__SRS_TEST__) {
@@ -3017,7 +3024,7 @@ function sourceBlocks(text) {
           const identities=new Map();
           for(const file of api.vault.getFiles().filter(f=>card.source.candidates.some(p=>f.path===p||f.path.startsWith(p+"/")))) {
             const note=await noteAt(file);
-            const uids=note.rows ? note.rows.keys() : [note.metadata?.anki_note_id ? `anki:${note.metadata.anki_note_id}` : `local:${note.metadata?.srs_uid}`];
+            const uids=note.rows ? note.rows.keys() : [note.metadata?.anki_note_id ? `anki:${note.metadata.anki_note_id}` : `local:${(note.metadata?.srs_note_id || note.metadata?.srs_uid)}`];
             for(const uid of uids) {
               if(!identities.has(uid))identities.set(uid,[]);
               identities.get(uid).push(file.path);
@@ -3050,8 +3057,8 @@ function sourceBlocks(text) {
         metadata={...metadata,$front:matches[0].front,$back:matches[0].back,tags:[...new Set([...(Array.isArray(metadata.tags)?metadata.tags:String(metadata.tags||"").split(/\s+/).filter(Boolean)),...matches[0].tags])]};
       }
       if(!metadata)throw Error(`Missing source identity: ${card.note_uid}`);
-      if(card.source.kind!=="block" && !data.rows && (metadata.anki_note_id || metadata.srs_uid)) {
-        const uid=metadata.anki_note_id?`anki:${metadata.anki_note_id}`:`local:${metadata.srs_uid}`;
+      if(card.source.kind!=="block" && !data.rows && (metadata.anki_note_id || metadata.srs_note_id || metadata.srs_uid)) {
+        const uid=metadata.anki_note_id?`anki:${metadata.anki_note_id}`:`local:${metadata.srs_note_id || metadata.srs_uid}`;
         if(uid!==card.note_uid)throw Error("Source identity changed");
       }
       const note={metadata,body:data.body,filename:file.basename||file.path.split("/").at(-1).replace(/\.md$/,""),path,lookups:{us_states:US_STATES}};

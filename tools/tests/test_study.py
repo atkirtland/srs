@@ -50,12 +50,57 @@ class StudyTests(unittest.TestCase):
         (self.data/'reviews'/name).write_text(''.join(json.dumps(e)+'\n' for e in events))
     def refresh(self):return study.refresh_cards(self.root,self.data,self.study,self.config)
 
+    def test_conditional_geography_generation(self):
+        (self.root/'words.csv').write_text('anki_note_id,word,definition,capital,flag,map\n1,Sea,sea,,,sea.png\n2,Country,country,City,flag.png,country.png\n')
+        config=configuration()
+        config['source_rules']['words']['fields'] += [dict(anki=name,source=name.lower(),transform='text') for name in ('Capital','Flag','Map')]
+        templates=[]
+        for index,field in enumerate(('Capital','Capital','Flag','Map')):
+            key=f'geo-{index}'
+            templates.append(dict(key=key,enabled=True,anki_notetype='Geography',anki_ordinal=index,
+                                  front='{{#'+field+'}}<div>{{'+field+'}}</div>{{/'+field+'}}',back='answer'))
+        config['source_rules']['words']['templates']=[t['key'] for t in templates]
+        study.write(self.study,config)
+        self.templates['groups']['words']['templates']=templates
+        study.write(self.config,self.templates)
+        result=self.refresh()
+        self.assertEqual(result['added'],5)
+        self.assertEqual(self.refresh()['added'],0)
+
+    def test_conditional_generation_preserves_content_errors_and_nested_sections(self):
+        note=study.sources.Note(self.root/'note.md',{'gate':'yes','inner':''},'')
+        rule={'fields':[dict(anki='Gate',source='gate'),dict(anki='Inner',source='inner')]}
+        allows=lambda front: study.template_conditions_allow_question({'front':front},note,rule)
+        self.assertFalse(allows('{{#Gate}}{{#Inner}}question{{/Inner}}{{/Gate}}'))
+        self.assertFalse(allows('{{#Inner}}question{{#Unknown}}hint{{/Unknown}}{{/Inner}}'))
+        self.assertTrue(allows('{{^Inner}}{{Missing}}{{/Inner}}'))
+        self.assertTrue(allows('{{Missing}}'))
+        self.assertTrue(allows('{{#Unknown}}question{{/Unknown}}'))
+        self.assertTrue(allows('{{#Gate}}<img src="map.png">{{/Gate}}'))
+
+    def test_structural_enrollment_requires_an_explicit_identity_field(self):
+        directory=self.root/'notes';directory.mkdir()
+        unselected='---\nword: ignored\ndefinition: ignored\n---\n'
+        (directory/'ignored.md').write_text(unselected)
+        (directory/'legacy.md').write_text('---\nsrs_uid: 33333333-3333-4333-8333-333333333333\nword: ignored\ndefinition: ignored\n---\n')
+        opted='---\nsrs_note_id:\nword: chosen\ndefinition: chosen\n---\n'
+        (directory/'chosen.md').write_text(opted)
+        imported='---\nanki_note_id: 123\nword: imported\ndefinition: imported\n---\n'
+        (directory/'imported.md').write_text(imported)
+        config=configuration();config['source_rules']['words']['sources']=['notes'];study.write(self.study,config)
+        self.assertEqual(self.refresh()['added'],2)
+        self.assertEqual((directory/'ignored.md').read_text(),unselected)
+        self.assertEqual((directory/'imported.md').read_text(),imported)
+        text=(directory/'chosen.md').read_text();self.assertNotIn('srs_note_id:\n',text)
+        self.assertEqual(self.refresh()['added'],0)
+        self.assertEqual((directory/'chosen.md').read_text(),text)
+
     def test_discovery_seeds_csv_and_preserves_answers_baseline_and_identity_on_move(self):
         (self.root/'words.csv').write_text('anki_note_id,word,definition\n12,spume,foam\n,new word,new definition\n')
         result=self.refresh();self.assertEqual(result['added'],2)
         m,cards=study.load_cards(self.data);self.assertEqual(m['import_id'],'original')
         self.assertEqual(cards[0]['id'],srs.card_uid('words','anki:12','recognition'))
-        self.assertIn('srs_uid', (self.root/'words.csv').read_text())
+        self.assertIn('srs_note_id', (self.root/'words.csv').read_text())
         self.write_events([dict(id='existing answer must survive',kind='answer')])
         previous=(self.data/'reviews/computer-2026-11.jsonl').read_bytes()
         self.assertEqual(self.refresh()['added'],0)
@@ -89,9 +134,9 @@ class StudyTests(unittest.TestCase):
         self.assertEqual(cards[0]['template_key'],'recognition')
 
     def test_markdown_block_and_cloze_card_generation_are_stable(self):
-        (self.root/'notes').mkdir();(self.root/'notes/a.md').write_text('---\nword: alpha\ndefinition: first\n---\n')
+        (self.root/'notes').mkdir();(self.root/'notes/a.md').write_text('---\nsrs_note_id:\nword: alpha\ndefinition: first\n---\n')
         c=configuration();c['source_rules']['words']['sources']=['notes'];study.write(self.study,c)
-        self.assertEqual(self.refresh()['added'],1);text=(self.root/'notes/a.md').read_text();self.assertIn('srs_uid:',text)
+        self.assertEqual(self.refresh()['added'],1);text=(self.root/'notes/a.md').read_text();self.assertIn('srs_note_id:',text)
         self.assertEqual(self.refresh()['added'],0)
         c['source_rules']['words']['sources']=['notes/a.md'];study.write(self.study,c)
         self.assertEqual(self.refresh()['added'],0)

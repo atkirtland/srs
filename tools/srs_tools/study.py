@@ -181,38 +181,59 @@ def profile_id(card, config, manifest):
 
 def _seed_markdown(path):
     text = path.read_text(encoding='utf-8')
+    metadata, _ = sources.split_frontmatter(path)
+    existing = srs.note_uid(metadata)
+    if existing:
+        return existing
+    if 'srs_note_id' not in metadata:
+        raise ValueError(f'Missing srs_note_id opt-in: {path}')
     identity = str(uuid.uuid4())
+    # Only fill the opted-in frontmatter field, preserving the rest of the file.
     opening = re.match(r'\A---[ \t]*\r?\n', text)
-    if opening:
-        text = text[:opening.end()] + f'srs_uid: {identity}\n' + text[opening.end():]
-    else:
-        text = f'---\nsrs_uid: {identity}\n---\n' + text
-    path.write_text(text, encoding='utf-8')
+    closing = re.search(r'(?m)^---[ \t]*\r?$', text[opening.end():])
+    end = opening.end() + closing.start()
+    header = text[opening.end():end]
+    header, count = re.subn(r'(?m)^srs_note_id:[^\r\n]*', f'srs_note_id: {identity}', header)
+    if count != 1:
+        raise ValueError(f'Expected one srs_note_id field: {path}')
+    path.write_text(text[:opening.end()] + header + text[end:], encoding='utf-8')
     return f'local:{identity}'
 
 
 # Local blocks need their own persistent identity, independent of file position.
-BLOCK = re.compile(r'(?m)^>[ \t]*\[!(?:anki|srs)\](?:-[ \t]*|[ \t]+)([^\r\n]*)\r?\n'
-                   r'((?:^>[ \t]?(?!\[!(?:anki|srs)\](?:-|[ \t]))[^\r\n]*(?:\r?\n|\Z))+?)'
-                   r'(?:^[ \t]*<!--[ \t]*(ID|SRS-ID)[ \t]*:[ \t]*([^\r\n]+?)[ \t]*-->[ \t]*(?:\r?\n|\Z)|(?=^[^>]|\Z))', re.I)
+BLOCK = re.compile(r'(?m)^[ \t]{0,3}>[ \t]*\[!(?:anki|srs)\](?:-[ \t]*|[ \t]+)([^\r\n]*)\r?\n'
+                   r'((?:^[ \t]{0,3}>[ \t]?(?!\[!(?:anki|srs)\](?:-|[ \t]))[^\r\n]*(?:\r?\n|\Z))+)'
+                   r'((?:^[ \t]*(?:<!--[ \t]*(?:ID|SRS-ID)[ \t]*:[ \t]*[^\r\n]+?[ \t]*-->[ \t]*)?(?:\r?\n|$))*)', re.I)
+BLOCK_ID = re.compile(r'<!--[ \t]*(ID|SRS-ID)[ \t]*:[ \t]*([^\r\n]+?)[ \t]*-->', re.I)
 
 
 def block_notes(path, seed=True):
     text = path.read_text(encoding='utf-8')
+    original = text
+    if seed:
+        # Move an existing local marker above intervening blank lines as well.
+        text = re.sub(r'(?m)(^[ \t]{0,3}>[^\r\n]*\r?\n)((?:[ \t]*\r?\n)+)([ \t]*<!--[ \t]*SRS-ID[ \t]*:[^\r\n]*-->[ \t]*(?:\r?\n|$))',
+                      lambda m: m[1] + m[3] + ('\n' if not m[3].endswith('\n') else '') + m[2], text, flags=re.I)
     replacements, notes = [], []
     try:
         file_metadata,_=sources.split_frontmatter(path)
     except sources.NoFrontmatterError:
         file_metadata={}
     for m in BLOCK.finditer(text):
-        identity = f'anki:{int(m[4])}' if m[3] and m[3].upper() == 'ID' else f'local:{uuid.UUID(m[4])}' if m[3] else None
+        markers = BLOCK_ID.findall(m[3])
+        anki_ids = {int(value.strip()) for kind, value in markers if kind.upper() == 'ID'}
+        local_ids = {str(uuid.UUID(value.strip())) for kind, value in markers if kind.upper() == 'SRS-ID'}
+        if len(anki_ids) > 1 or (not anki_ids and len(local_ids) > 1):
+            raise ValueError(f'Conflicting block identities in {path}')
+        identity = f'anki:{next(iter(anki_ids))}' if anki_ids else f'local:{next(iter(local_ids))}' if local_ids else None
         if identity is None:
             if not seed:
                 continue
             value = str(uuid.uuid4()); identity = f'local:{value}'
-            prefix='' if text[:m.end()].endswith('\n') else '\n'
-            replacements.append((m.end(), prefix + f'<!-- SRS-ID: {value} -->\n'))
-        back = '\n'.join(re.sub(r'^>[ \t]?', '', line) for line in m[2].splitlines())
+            offset = m.end(2)  # Immediately after quoted lines, before trailing blank lines.
+            prefix='' if text[:offset].endswith('\n') else '\n'
+            replacements.append((offset, prefix + f'<!-- SRS-ID: {value} -->\n'))
+        back = '\n'.join(re.sub(r'^[ \t]{0,3}>[ \t]?', '', line) for line in m[2].splitlines())
         back = '\n'.join(line for line in back.splitlines() if not re.fullmatch(r'\s*(?:#[^\s#]+\s*)+', line)).strip()
         tags=file_metadata.get('tags', [])
         tags=list(tags) if isinstance(tags,list) else str(tags).split()
@@ -220,9 +241,64 @@ def block_notes(path, seed=True):
         notes.append((identity, sources.Note(path, {**file_metadata,'$front':m[1].strip(),'$back':back,'tags':tags}, '')))
     for offset, value in reversed(replacements):
         text = text[:offset] + value + text[offset:]
-    if replacements:
+    if replacements or text != original:
         path.write_text(text, encoding='utf-8')
     return notes
+
+
+def template_conditions_allow_question(template, note, rule):
+    """Suppress empty conditional questions, without hiding ordinary content errors.
+
+    Field placeholders remain potentially visible: missing non-conditional fields
+    must still produce accessible error cards. Only false sections remove them.
+    Unknown conditions/failed transformations conservatively retain the card.
+    """
+    front = template['front']
+    if not re.search(r'{{[#^]', front):
+        return True
+    fields = {f['anki']: f for f in rule['fields']}
+
+    def truth(name):
+        field = fields.get(name)
+        if field is None:
+            return None
+        source = field['source']
+        value = (note.body if source == '$body' else note.filename if source == '$filename'
+                 else note.metadata.get(source))
+        try:
+            return bool(sources.TRANSFORMS[field.get('transform', 'text')](value, note).strip())
+        except Exception:
+            return None
+
+    stack = []
+    visible = []
+    offset = 0
+    for match in re.finditer(r'{{([#^/])([^{}]+)}}', front):
+        if all(active for _, active in stack):
+            visible.append(front[offset:match.start()])
+        op, name = match[1], match[2].strip()
+        if op == '/':
+            if not stack or stack[-1][0] != name:
+                return True
+            stack.pop()
+        else:
+            if not all(active for _, active in stack):
+                stack.append((name, False))
+            else:
+                value = truth(name)
+                if value is None:
+                    return True
+                stack.append((name, value if op == '#' else not value))
+        offset = match.end()
+    if stack:
+        return True
+    visible.append(front[offset:])
+    question = ''.join(visible)
+    question = re.sub(r'<!--.*?-->|<(script|style)\b[^>]*>.*?</\1>', '', question, flags=re.S | re.I)
+    # Images/audio are meaningful even without text.
+    if re.search(r'<(?:img|audio|video|svg)\b|\[sound:', question, re.I):
+        return True
+    return bool(re.sub(r'<[^>]*>', '', question).strip())
 
 
 def discover(vault, config, templates, manifest, issues=None):
@@ -274,6 +350,9 @@ def discover(vault, config, templates, manifest, issues=None):
                     continue
                 if rule.get('required_any_property') and not any(p in note.metadata for p in rule['required_any_property']):
                     continue
+                is_csv = '#row-' in str(note.path) or str(note.path).lower().endswith('.csv')
+                if not is_csv and not (str(note.metadata.get('anki_note_id', '') or '').strip() or 'srs_note_id' in note.metadata):
+                    continue
                 identity = srs.note_uid(note.metadata)
                 if not identity:
                     identity = _seed_markdown(note.path)
@@ -294,6 +373,8 @@ def discover(vault, config, templates, manifest, issues=None):
             for template in selected_templates:
                 candidate['template_key']=template['key']
                 if not matches(candidate, template.get('when', {}), manifest):
+                    continue
+                if not template_conditions_allow_question(template, note, rule):
                     continue
                 ordinals = [template['anki_ordinal']]
                 if '{{cloze:' in template['front']:

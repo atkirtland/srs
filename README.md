@@ -69,7 +69,7 @@ All paths below are relative to this reviewer directory.
 | Layer | Location | What it defines or stores |
 | --- | --- | --- |
 | Anki → vault conversion | Your external converter; compatibility adapter: `migration/config/exports.json` | Legacy import only. Ongoing tools and reviewer do not load this registry. |
-| Vault source identity | Frontmatter / CSV: `anki_note_id`, `srs_uid`; block comments: `ID`, `SRS-ID` | Persistent identity independent of the source file's position. |
+| Vault source identity | Frontmatter / CSV: `anki_note_id`, `srs_note_id` (legacy `srs_uid` readable); block comments: `ID`, `SRS-ID` | Persistent identity independent of the source file's position. |
 | Obsidian → SRS note | `config/sources.json` → `rules[rule-id]` | Source paths, field names, property mappings, transformations and selection filters. Field `name` names the SRS note field; `source` names the vault property. |
 | SRS note → cards | `config/cards.json` → `rules[rule-id]`, `groups[rule-id].templates` | Selected templates, initial scheduling profile, front/back presentation and optional `when` filters. |
 | SRS note bindings | `data/notes/notes-*.json` | `id`, source `uid`, `rule_id`, and a vault `locator`. One binding per source-rule/note-UID pair, shared by its cards. No export definitions or field recipes. |
@@ -123,10 +123,16 @@ For example, replace an imported deck filter in `config/decks.json` with:
 {"paths": ["examples/notes.csv"], "templates": ["recognition"]}
 ```
 
-This includes existing and future recognition cards from that CSV. The initial
-imported filters use legacy deck IDs; new cards are always available in **All
-cards**, and appear in those decks after you replace their filters with source
-rules such as the example above. Use **New deck** or a deck’s **Edit** button for path/template/tag filters;
+This includes existing and future recognition cards from that CSV. A filter such
+as `{"groups": ["example-notes"]}` instead selects cards by their SRS note’s
+source-rule ID, including unresolved sources. Add `templates` to select particular
+cards generated from those notes. Parent decks include the union of their children.
+
+Imported filters initially use legacy deck IDs. They can be replaced with source-rule
+and template filters when those describe the intended membership. Splits of the same
+source/template need an explicit property or tag; legacy filters can preserve those
+splits until that distinction is defined. New cards always appear in **All cards**.
+Use **New deck** or a deck’s **Edit** button for path/template/tag filters;
 advanced compositions are editable in `config/decks.json`; source rules in `config/sources.json`. **Sources** summarizes the configured paths, templates and initial profiles.
 See [schemas/config.schema.json](schemas/config.schema.json).
 
@@ -145,12 +151,39 @@ at most 250 cards. It needs neither Anki, an Anki snapshot, nor Node. Click
 review index or imported baseline. Reviewing remains standalone on Android and
 desktop; discovery and training currently run on desktop.
 
-Existing `anki_note_id` identities are preserved. New CSV rows receive an
-`srs_uid` column value, and new Markdown source notes receive `srs_uid` in
-frontmatter. Local `[!srs]` and existing `[!anki]` callouts receive a persistent
-`<!-- SRS-ID: <uuid> -->` after the quoted block if they lack an ID. Stable
-identities survive content changes, CSV reordering and file moves; after moving
-sources, update the source rule paths and run discovery again.
+Structural Markdown notes are eligible only when they have an existing
+`anki_note_id` or a `srs_note_id` field. To opt a new note in, add a blank field:
+
+```yaml
+srs_note_id:
+```
+
+Discovery fills that field with a stable UUID. Notes without either marker are
+skipped and left untouched, even when their directory matches a source rule.
+Existing Anki IDs take precedence and receive no extra ID.
+
+All CSV rows and explicit `[!srs]` / `[!anki]` blocks are eligible. CSV rows
+without an identity receive `srs_note_id`; blocks without an ID receive
+`<!-- SRS-ID: <uuid> -->`. Legacy `srs_uid` identities remain readable, but that
+field alone does not enroll a structural note. Identities survive content changes,
+CSV reordering and file moves. After moving sources, update the source rule paths
+and run discovery again. Discovery preserves existing catalog entries and reviews;
+changing eligibility does not automatically delete previously generated cards.
+
+To inspect accidental additions whose source identities no longer exist:
+
+```sh
+uv run python srs.py prune-missing-sources
+uv run python srs.py prune-missing-sources --apply
+```
+
+The first command previews; the second removes the listed local cards and any
+notes left unreferenced. Imported cards, reviewed cards, and cards with settings
+log entries are preserved. Review logs remain unchanged. All configured source
+locations must be available; cleanup refuses an incomplete mount. Source identity
+is checked across the configured locations, so a moved note with the same ID is
+preserved. Content errors alone do not make a card removable. A source ID that
+still exists keeps the card; cleanup does not infer unwanted enrollment from age.
 
 Each enabled template listed in a source rule generates a card. Optional
 `when` filters on templates select variants using source properties, e.g.
@@ -251,7 +284,7 @@ source/notetype/card-ordinal combinations in `config/cards.json` in one pass. Ex
 template keys, edits, card UIDs, and answer logs are preserved. Source mappings
 remain in `migration/config/exports.json`.
 
-CSV rows resolve through `anki_note_id` or `srs_uid`. Markdown frontmatter uses
+CSV rows resolve through `anki_note_id`, `srs_note_id`, or legacy `srs_uid`. Markdown frontmatter uses
 the same identities; ID-linked `[!anki]` callouts are supported too. Mapped text,
 media, vocabulary, taxonomy, and structured source transformations run against
 live vault properties. Note bindings retain source locators; configuration retains transformations.

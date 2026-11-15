@@ -56,7 +56,7 @@ def recover(data):
     pending.unlink()
 
 
-def publish(data, previous, replacement, cards, notes=None, added_at=None):
+def publish(data, previous, replacement, cards, notes=None, added_at=None, remove_cards=(), remove_notes=()):
     """Keep existing partition positions; replace only changed arrays and append new IDs.
 
     A small roll-forward journal contains only changed partitions, never note
@@ -75,6 +75,9 @@ def publish(data, previous, replacement, cards, notes=None, added_at=None):
             continue
         paths = (note_paths(previous) if kind == 'notes' and 'note_partition_count' in (previous or {})
                  else partition_paths(previous) if kind == 'cards' and previous else [])
+        removed = set(remove_notes if kind == 'notes' else remove_cards)
+        if any(record['id'] in removed for record in incoming):
+            raise ValueError('Removed identity is still present in replacement')
         old_parts = [read(data / path) for path in paths]
         by_id = {record['id']: record for record in incoming}
         if len(by_id) != len(incoming):
@@ -83,6 +86,8 @@ def publish(data, previous, replacement, cards, notes=None, added_at=None):
         for part in old_parts:
             updated = []
             for old in part:
+                if old['id'] in removed:
+                    continue
                 record = dict(by_id.pop(old['id'], old))
                 if 'added_at' in old:
                     record['added_at'] = old['added_at']
