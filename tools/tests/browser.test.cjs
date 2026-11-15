@@ -414,9 +414,9 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   put('srs/data/profiles.json',JSON.stringify({format_version:1,profiles:liveStudy.profiles,default_profile:'main'}));
   const bindings=cs.map((c,i)=>({id:`note-${i}`,uid:c.note_uid,rule_id:c.group,locator:{kind:'csv',path:'vocab.csv'}}));
   const separated=cs.map(({source,group,note_uid,...c},i)=>({...c,note_id:`note-${i}`}));
-  cardPath='srs/data/imports/r2/cards-00000.json';
-  put(cardPath,JSON.stringify(separated));put('srs/data/imports/r2/notes-00000.json',JSON.stringify(bindings));
-  put('srs/data/manifest.json',JSON.stringify({...m,revision:'r2',note_partition_count:1}));
+  cardPath='srs/data/cards/r2/cards-00000.json';
+  put(cardPath,JSON.stringify(separated));put('srs/data/notes/r2/notes-00000.json',JSON.stringify(bindings));
+  put('srs/data/manifest.json',JSON.stringify({...m,revision:'r2',catalog_layout:'split',note_partition_count:1}));
   files.delete('srs/config.json');files.delete('srs/study.json');
   button('Refresh').onclick();
   for(let i=0;i<100&&!button('Profiles');i++)await tick();

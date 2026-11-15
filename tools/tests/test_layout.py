@@ -36,10 +36,10 @@ class LayoutTests(unittest.TestCase):
         self.assertEqual(result['notes'], 1)
         self.assertFalse((self.root / 'study.json').exists())
         self.assertFalse((self.root / 'config.json').exists())
-        raw = study.read(self.data / 'imports' / after['revision'] / 'cards-00000.json')[0]
+        raw = study.read(self.data / 'cards' / after['revision'] / 'cards-00000.json')[0]
         self.assertTrue('note_id' in raw)
         self.assertFalse({'source', 'group', 'note_uid', 'fields'} & raw.keys())
-        notes = study.read(self.data / 'imports' / after['revision'] / 'notes-00000.json')
+        notes = study.read(self.data / 'notes' / after['revision'] / 'notes-00000.json')
         self.assertEqual(notes[0]['locator'], {'path':'words.csv', 'kind':'csv'})
         self.assertEqual(notes[0]['uid'], 'anki:12')
         self.assertFalse(layout.upgrade(self.root)['converted'])
@@ -70,7 +70,7 @@ class LayoutTests(unittest.TestCase):
         manifest, cards = study.load_cards(self.data)
         self.assertEqual(len({c['note_id'] for c in cards}), 1)
         self.assertEqual(len({c['id'] for c in cards}), 2)
-        raw = study.read(self.data / 'imports' / manifest['revision'] / 'cards-00000.json')
+        raw = study.read(self.data / 'cards' / manifest['revision'] / 'cards-00000.json')
         self.assertTrue(all('source' not in c for c in raw))
 
     def test_profile_save_changes_only_profiles_and_checks_concurrent_edits(self):
@@ -120,3 +120,26 @@ class LayoutTests(unittest.TestCase):
     def test_dangling_note_reference_is_diagnosed(self):
         with self.assertRaisesRegex(ValueError, 'Missing SRS note binding'):
             layout.hydrate_cards([dict(id='card', note_id='absent')], [], {})
+
+    def test_relocate_previous_normalized_layout_preserves_all_bytes_and_is_idempotent(self):
+        self.upgrade()
+        manifest, cards = study.load_cards(self.data)
+        revision = manifest['revision']
+        original = {}
+        (self.data / 'imports' / revision).mkdir(parents=True, exist_ok=True)
+        for kind in ('notes', 'cards'):
+            for path in (self.data / kind / revision).glob('*.json'):
+                original[path.relative_to(self.data)] = path.read_bytes()
+                path.rename(self.data / 'imports' / revision / path.name)
+            (self.data / kind / revision).rmdir()
+        manifest.pop('catalog_layout')
+        study.write(self.data / 'manifest.json', manifest)
+        self.assertTrue(layout.upgrade(self.root)['converted'])
+        after, hydrated = study.load_cards(self.data)
+        self.assertEqual(hydrated, cards)
+        self.assertEqual(after, {**manifest, 'catalog_layout':'split'})
+        for path, contents in original.items():
+            self.assertEqual((self.data / path).read_bytes(), contents)
+        self.assertFalse(list((self.data / 'imports').glob('*/cards-*.json')))
+        self.assertFalse(list((self.data / 'imports').glob('*/notes-*.json')))
+        self.assertFalse(layout.upgrade(self.root)['converted'])

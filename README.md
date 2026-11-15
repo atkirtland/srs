@@ -72,8 +72,8 @@ All paths below are relative to this reviewer directory.
 | Vault source identity | Frontmatter / CSV: `anki_note_id`, `srs_uid`; block comments: `ID`, `SRS-ID` | Persistent identity independent of the source file's position. |
 | Obsidian → SRS note | `config/sources.json` → `rules[rule-id]` | Source paths, field names, property mappings, transformations and selection filters. Field `name` names the SRS note field; `source` names the vault property. |
 | SRS note → cards | `config/cards.json` → `rules[rule-id]`, `groups[rule-id].templates` | Selected templates, initial scheduling profile, front/back presentation and optional `when` filters. |
-| SRS note bindings | `data/imports/<revision>/notes-*.json` | `id`, source `uid`, `rule_id`, and a vault `locator`. One binding per source-rule/note-UID pair, shared by its cards. No export definitions or field recipes. |
-| Note → card ID mapping | `data/imports/<revision>/cards-*.json` → `note_id`, `id`, `template_key`, ordinal | Each card points to its SRS note binding. Several card IDs may share one `note_id`. Existing imported IDs are preserved. |
+| SRS note bindings | `data/notes/<revision>/notes-*.json` | `id`, source `uid`, `rule_id`, and a vault `locator`. One binding per source-rule/note-UID pair, shared by its cards. No export definitions or field recipes. |
+| Note → card ID mapping | `data/cards/<revision>/cards-*.json` → `note_id`, `id`, `template_key`, ordinal | Each card points to its SRS note binding. Several card IDs may share one `note_id`; no separate mapping file is needed. Existing imported IDs are preserved. |
 | New card ID generation | [tools/srs_tools/core.py](tools/srs_tools/core.py) → `card_uid()` | UUIDv5 from rule/group, persistent source UID and template key; cloze variants also distinguish ordinal. |
 | Card-specific settings | `data/reviews/<device>-YYYY-MM.jsonl` → `kind: "card_settings"` | Suspension, tags and optional profile override. |
 | Profile assignment rules | `config/profile-rules.json` → `rules` | First matching filter assigns a profile. Precedence: explicit card override → matching rule → initial card profile → default profile. |
@@ -338,7 +338,9 @@ srs/
     manifest.json
     imports/<revision>/
       report.json
+    notes/<revision>/
       notes-00000.json       source bindings shared by cards
+    cards/<revision>/
       cards-00000.json       note/card ID mapping and metadata; at most 250 cards
     reviews/
       anki-2026-11.jsonl

@@ -6,6 +6,7 @@ store. Legacy study.json/config.json are accepted only for compatibility.
 from pathlib import Path
 import json
 from .core import digest, parse_json
+from . import store
 
 
 def read(path):
@@ -131,7 +132,7 @@ def upgrade(root, data=None, configuration=None, templates=None):
     manifest, cards = study.load_cards(data)
     if 'note_partition_count' in manifest:
         study.validate(load_study(destination, data))
-        return dict(cards=len(cards), converted=False, revision=manifest['revision'])
+        return split_partitions(data, manifest, len(cards))
     original = study.validate(configuration if configuration is not None else read(root / 'study.json'))
     templates = templates if templates is not None else read(root / 'config.json')
     docs = documents(original, templates)
@@ -152,9 +153,9 @@ def upgrade(root, data=None, configuration=None, templates=None):
     revision = digest(dict(previous=manifest['revision'], layout=1, notes=notes, cards=stored))
     target = data / 'imports' / revision
     for i in range(0, len(stored), 250):
-        write(target / f'cards-{i//250:05d}.json', stored[i:i+250])
+        write(data / 'cards' / revision / f'cards-{i//250:05d}.json', stored[i:i+250])
     for i in range(0, len(notes), 250):
-        write(target / f'notes-{i//250:05d}.json', notes[i:i+250])
+        write(data / 'notes' / revision / f'notes-{i//250:05d}.json', notes[i:i+250])
     report = data / 'imports' / manifest['revision'] / 'report.json'
     if report.exists():
         write(target / 'report.json', read(report))
@@ -168,7 +169,7 @@ def upgrade(root, data=None, configuration=None, templates=None):
         raise ValueError('Card identity/state round-trip failed')
     if read(data / 'manifest.json') != manifest or configuration is None and (read(root / 'study.json') != original or read(root / 'config.json') != templates):
         raise ValueError('Store/configuration changed during conversion; retry')
-    replacement = {**manifest, 'revision': revision, 'partition_count': (len(stored)+249)//250,
+    replacement = {**manifest, 'catalog_layout':'split', 'revision': revision, 'partition_count': (len(stored)+249)//250,
                    'note_partition_count': (len(notes)+249)//250}
     replacement.pop('partitions', None)
     write(data / 'manifest.json', replacement)
@@ -179,7 +180,35 @@ def upgrade(root, data=None, configuration=None, templates=None):
     for old in (data / 'imports').iterdir():
         if old.is_dir() and old != target:
             shutil.rmtree(old)
+    store.clean_partitions(data, revision)
     if configuration is None:
         (root / 'study.json').unlink()
         (root / 'config.json').unlink()
     return dict(cards=len(stored), notes=len(notes), converted=True, revision=revision)
+
+
+def split_partitions(data, manifest, card_count):
+    """Relocate existing normalized partitions; preserve their bytes and revision."""
+    if manifest.get('catalog_layout') == 'split':
+        return dict(cards=card_count, converted=False, revision=manifest['revision'])
+    import shutil
+    replacement = {**manifest, 'catalog_layout':'split'}
+    replacement.pop('partitions', None)
+    replacement.setdefault('partition_count', len(store.partition_paths(manifest)))
+    pairs = list(zip(store.partition_paths(manifest), store.partition_paths(replacement)))
+    pairs += list(zip(store.note_paths(manifest), store.note_paths(replacement)))
+    for old, new in pairs:
+        source, target = data / old, data / new
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and target.read_bytes() != source.read_bytes():
+            raise ValueError(f'Refusing to overwrite different partition: {target}')
+        shutil.copyfile(source, target)
+        if target.read_bytes() != source.read_bytes():
+            raise ValueError(f'Partition copy verification failed: {target}')
+    if read(data / 'manifest.json') != manifest:
+        raise ValueError('Store changed during conversion; retry')
+    write(data / 'manifest.json', replacement)
+    from .study import load_cards
+    load_cards(data)
+    store.clean_partitions(data, manifest['revision'])
+    return dict(cards=card_count, converted=True, revision=manifest['revision'])

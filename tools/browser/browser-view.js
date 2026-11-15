@@ -556,22 +556,24 @@
     rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
     profilesButton.onclick=()=>{if(!leaveEditor())return;managing=false;panel="profiles";guardedDraw();};
     sourcesButton.onclick=()=>{if(!leaveEditor())return;managing=false;panel="sources";guardedDraw();};
+    function catalogDirectory(value,kind){
+      if(value.catalog_layout!==undefined && value.catalog_layout!=="split")throw Error("Unsupported catalog layout");
+      return `${value.catalog_layout==="split"?kind:"imports"}/${value.revision}`;
+    }
     async function loadCatalog(value){
       baseManifest=value;
-      const paths=value.partition_count===undefined?value.partitions:Array.from({length:value.partition_count},(_,i)=>`imports/${value.revision}/cards-${String(i).padStart(5,"0")}.json`);
+      const paths=value.partition_count===undefined?value.partitions:Array.from({length:value.partition_count},(_,i)=>`${catalogDirectory(value,"cards")}/cards-${String(i).padStart(5,"0")}.json`);
       rawCards=[];for(const path of paths)rawCards.push(...await json(`${dataRoot}/${path}`));
       noteBindings=[];
       if(value.note_partition_count!==undefined){
         if(!Number.isSafeInteger(value.note_partition_count)||value.note_partition_count<0)throw Error("Invalid note partition count");
-        for(let i=0;i<value.note_partition_count;i++)noteBindings.push(...await json(`${dataRoot}/imports/${value.revision}/notes-${String(i).padStart(5,"0")}.json`));
+        for(let i=0;i<value.note_partition_count;i++)noteBindings.push(...await json(`${dataRoot}/${catalogDirectory(value,"notes")}/notes-${String(i).padStart(5,"0")}.json`));
       }
       cards=value.note_partition_count===undefined?rawCards:hydrateCatalog(rawCards,noteBindings,(await runtimeConfiguration()).study);
     }
     try {
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");
       if(manifest.partition_count!==undefined && (!Number.isSafeInteger(manifest.partition_count)||manifest.partition_count<0))throw Error("Invalid card partition count");
-      const partitions=manifest.partition_count===undefined?manifest.partitions:
-        Array.from({length:manifest.partition_count},(_,i)=>`imports/${manifest.revision}/cards-${String(i).padStart(5,"0")}.json`);
       await loadCatalog(manifest);
       index=await ReviewIndex.open(identity,manifest.import_id,manifest.timing);if(disposed){index.close();return;}
       select.createEl("option",{text:"All template groups",value:""});

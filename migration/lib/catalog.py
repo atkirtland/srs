@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 import scheduling
 import _shared
-from srs_tools.store import partition_paths
+from srs_tools.store import partition_paths, clean_partitions
 
 LOG_LIMIT = 32 * 1024 * 1024
 
@@ -277,15 +277,15 @@ def publish(data, destination):
     notes, stored_cards = layout.separate_cards(data['cards']) if normalized else ([], data['cards'])
     if normalized:
         for start in range(0, len(notes), 250):
-            write_immutable(root / f'notes-{start//250:05d}.json', notes[start:start+250])
+            write_immutable(destination / 'notes' / revision / f'notes-{start//250:05d}.json', notes[start:start+250])
     partitions = []
     events = list(data["observations"])
     for index in range(0, len(data["cards"]), 250):
         selected = data["cards"][index:index + 250]
         name = f"cards-{index // 250:05d}.json"
         runtime = [{k: v for k, v in c.items() if k != "history"} for c in stored_cards[index:index+250]]
-        write_immutable(root / name, runtime)
-        partitions.append(f"imports/{revision}/{name}")
+        write_immutable(destination / 'cards' / revision / name, runtime)
+        partitions.append(f"cards/{revision}/{name}")
         for card in selected:
             events.append({"format_version": 2, "kind": "scheduling_baseline",
                            "id": f"baseline:{import_id}:{card['id']}", "card_id": card["id"],
@@ -335,7 +335,7 @@ def publish(data, destination):
             import os
             os.fsync(stream.fileno())
     manifest = {"format_version": 2, "import_id": import_id,
-                "revision": revision, "collection_key": data["collection_key"], "scheduling": data["scheduling"],
+                "revision": revision, "catalog_layout": "split", "collection_key": data["collection_key"], "scheduling": data["scheduling"],
                 "timing": data["timing"], "partition_count": len(partitions)}
     if normalized:
         manifest['note_partition_count'] = (len(notes)+249)//250
@@ -351,4 +351,5 @@ def publish(data, destination):
     for old in old_roots:
         if old != root and old.is_dir():
             shutil.rmtree(old)
+    clean_partitions(destination, revision)
     return root

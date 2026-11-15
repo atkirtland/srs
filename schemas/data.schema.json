@@ -108,6 +108,7 @@
         "timing": {"$ref": "#/$defs/Timing"},
         "partitions": {"type": "array", "items": {"type": "string"}},
         "partition_count": {"type": "integer", "minimum": 0},
+        "catalog_layout": {"const": "split"},
         "note_partition_count": {"type": "integer", "minimum": 0}
       },
       "required": ["format_version", "import_id", "revision", "collection_key", "scheduling", "timing"],

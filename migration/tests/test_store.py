@@ -206,7 +206,7 @@ class StoreTests(unittest.TestCase):
         destination = self.root / "store"
         srs.publish(data, destination)
         manifest = json.loads((destination / "manifest.json").read_text())
-        self.assertEqual(set(manifest), {"format_version", "import_id", "revision", "collection_key", "scheduling", "timing", "partition_count"})
+        self.assertEqual(set(manifest), {"format_version", "import_id", "revision", "collection_key", "scheduling", "timing", "partition_count", "catalog_layout"})
         for preset in manifest["scheduling"]["presets"].values():
             self.assertEqual(set(preset), {"id", "settings"})
             self.assertEqual(len([k for k in preset["settings"] if k.startswith("fsrs_params_")]), 1)

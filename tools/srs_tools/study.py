@@ -20,11 +20,7 @@ def load_cards(data, configuration=None):
     manifest = read(data / "manifest.json")
     cards = [card for part in catalog.partition_paths(manifest) for card in read(data / part)]
     if 'note_partition_count' in manifest:
-        count = manifest['note_partition_count']
-        if type(count) is not int or count < 0:
-            raise ValueError('Invalid note partition count')
-        notes = [note for i in range(count)
-                 for note in read(data / 'imports' / manifest['revision'] / f'notes-{i:05d}.json')]
+        notes = [note for part in catalog.note_paths(manifest) for note in read(data / part)]
         source_path = data.parent / 'config' / 'sources.json'
         rules = read(source_path)['rules'] if source_path.exists() else {}
         cards = layout.hydrate_cards(cards, notes, configuration or {'source_rules':rules})
@@ -385,15 +381,15 @@ def refresh_cards(vault, data, study_path, config_path):
     normalized = 'note_partition_count' in manifest or Path(study_path).suffix != '.json'
     notes, stored_cards = layout.separate_cards(cards) if normalized else ([], cards)
     for number, start in enumerate(range(0, len(cards), 250)):
-        write(target / f'cards-{number:05d}.json', stored_cards[start:start+250])
+        write(data / 'cards' / revision / f'cards-{number:05d}.json', stored_cards[start:start+250])
     for number, start in enumerate(range(0, len(notes), 250)):
-        write(target / f'notes-{number:05d}.json', notes[start:start+250])
+        write(data / 'notes' / revision / f'notes-{number:05d}.json', notes[start:start+250])
     report = data / 'imports' / manifest['revision'] / 'report.json'
     if report.exists():
         shutil.copyfile(report, target / 'report.json')
     if read(data / 'manifest.json') != manifest:
         raise ValueError('Catalog changed during discovery; retry')
-    replacement = {**manifest, 'revision':revision, 'partition_count':(len(cards)+249)//250}
+    replacement = {**manifest, 'catalog_layout':'split', 'revision':revision, 'partition_count':(len(cards)+249)//250}
     if normalized:
         replacement['note_partition_count'] = (len(notes)+249)//250
     replacement.pop('partitions', None)
@@ -401,6 +397,7 @@ def refresh_cards(vault, data, study_path, config_path):
     for old in (data / 'imports').iterdir():
         if old.is_dir() and old != target:
             shutil.rmtree(old)
+    catalog.clean_partitions(data, revision)
     # The imported baseline identity, all logs, and immutable scheduler archives stay intact.
     return {'added':added, 'updated':updated, 'cards':len(cards), 'revision':revision,'issues':issues}
 

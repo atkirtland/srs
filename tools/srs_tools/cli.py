@@ -45,7 +45,7 @@ def main(argv=None):
         command.add_argument('--study', type=Path, help='legacy study.json or configuration directory (default: --config)')
         command.add_argument('--config', type=Path, default=REVIEWER / 'config', help='configuration directory')
         command.add_argument('--vault', type=Path, default=REVIEWER.parent)
-    upgrade = commands.add_parser('upgrade-layout', help='separate legacy rules, profiles, and note/card bindings in place')
+    upgrade = commands.add_parser('upgrade-layout', help='separate configuration and move note/card partitions into their own directories')
     upgrade.add_argument('--root', type=Path, default=REVIEWER)
     upgrade.add_argument('--data', type=Path)
     train.add_argument('--profile', required=True)

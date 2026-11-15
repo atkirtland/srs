@@ -22,7 +22,9 @@ data/
     <sha256>.json
   imports/<revision>/
     report.json
+  notes/<revision>/
     notes-00000.json
+  cards/<revision>/
     cards-00000.json
     cards-00001.json
     ...
@@ -77,13 +79,18 @@ fields, rather than retaining the full native Anki protobuf objects.
   can have IDs such as `anki:<collection-key>:card:<anki-card-id>`.
 - `note_uid` identifies the vault note or CSV row, usually `anki:<note-id>` or
   `local:<uid>`. Several cards can share it.
-- Card partitions use `data/imports/<revision>/cards-<index>.json` with zero-based,
+- Card partitions use `data/cards/<revision>/cards-<index>.json` with zero-based,
   five-digit indices. Source paths are relative to the **vault root**, not to `data/`.
+
+Reviews link to cards through `card_id`; cards link to SRS notes through `note_id`.
+Each SRS note links to its vault source through `rule_id` and `locator`. The
+note → card mapping is therefore the set of `(note_id, id)` pairs in the card
+partitions, rather than a second mapping file.
 
 ## Manifests
 
 `data/manifest.json` is the active entry point. The reviewer follows it and reads
-the partitions under its revision; it does not select the latest-looking directory name.
+the partitions under its revision in `cards/` and `notes/`; it does not select the latest-looking directory name.
 This file is required: it also supplies the scheduling settings and timing.
 New imports do not write a duplicate manifest under `imports/<revision>/`.
 Older imports may still have an unused copy there.
@@ -109,7 +116,9 @@ A partition count replaces the old repetitive path list.
 | `collection_key` | String form of the imported collection's creation timestamp; the importer uses this as collection identity. |
 | `import_id` | Scheduling-baseline identity referenced by new answers. |
 | `revision` | SHA-256 digest identifying the generated catalog, including source references and a digest of the scheduling baseline. |
-| `partition_count` | Number of card arrays under `imports/<revision>/`, named `cards-00000.json` onwards, with at most 250 cards per file. Older manifests with an explicit `partitions` list remain readable. |
+| `catalog_layout` | `"split"` selects separate `cards/<revision>/` and `notes/<revision>/` directories. Older stores without it read partitions from `imports/<revision>/`. |
+| `note_partition_count` | Number of note arrays, with at most 250 notes per file. |
+| `partition_count` | Number of card arrays under `cards/<revision>/`, named `cards-00000.json` onwards, with at most 250 cards per file. Older manifests with an explicit `partitions` list remain readable. |
 | `timing` | `day_zero` (`YYYY-MM-DD`), IANA `timezone`, and local `rollover_hour` (0–23). Import timing is supplied at runtime; the timezone defaults to the system timezone. |
 | `scheduling` | Native deck hierarchy, presets, selected collection settings, source Anki version, and parameter policy. |
 
