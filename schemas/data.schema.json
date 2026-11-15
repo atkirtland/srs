@@ -165,6 +165,8 @@
         "active": {"type": "boolean"},
         "supported": {"type": "boolean"},
         "retired": {"type": "boolean"},
+        "profile_id": {"type": "string"},
+        "cloze": {"type": "boolean"},
         "queue": {"type": "integer"},
         "card_type": {"type": "integer"},
         "due_ms": {"anyOf": [{"type": "number"}, {"type": "null"}]},
@@ -283,6 +285,7 @@
     "Answer": {
       "type": "object",
       "properties": {
+        "profile_id": {"type": "string"},
         "format_version": {"const": 2},
         "id": {"type": "string", "format": "uuid"},
         "device_id": {"$ref": "#/$defs/Device"},
@@ -429,6 +432,7 @@
       "minProperties": 1,
       "additionalProperties": false,
       "properties": {
+        "profile": {"type": ["string", "null"], "minLength": 1},
         "suspended": {
           "type": [
             "boolean",

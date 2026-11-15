@@ -41,6 +41,125 @@ changed settings create a new one. Existing inline review configurations remain
 readable. These archive files are retained across reimports and should sync with
 the review logs.
 
+## Source rules, study decks, and profiles
+
+Run these commands from `migration/` after restoring your `data/` directory:
+
+```sh
+uv sync --locked
+uv run python migrate.py init-study
+```
+
+`init-study` writes `../study.json` once; it refuses to overwrite an existing
+file. It uses your imported hierarchy, template mappings and trained parameters,
+without modifying card UIDs, baselines, review logs or the manifest. Reopen the
+reviewer or click **Refresh** to enable it. An **All cards** study deck also
+includes future additions. Without `study.json`, the previous reviewer behavior
+remains available.
+
+The editable configuration separates:
+
+- **Source rules:** vault paths, field transformations and template keys that
+  generate cards. Their keys correspond to template groups in `config.json`.
+- **Study decks:** named filters over cards, with optional parent decks. A card
+  may appear in several decks and still has one schedule and history. Opening
+  a parent selects the union of its own filter and its descendants.
+- **Scheduling profiles:** interval settings and trained FSRS parameters.
+  **Profiles** edits retention, steps and daily settings. **Card settings** can
+  explicitly assign an individual card to a profile.
+
+Profile assignment uses a card-specific override, then the first matching
+`profile_rules` entry, then its source-assigned `profile_id`, then
+`default_profile`. Imported deck retention overrides remain effective while a
+card uses that deck's original preset profile. Imported daily counters, deck
+limits and parent limits are preserved. Updating an imported profile's daily
+settings changes its preset defaults; explicit deck overrides still win.
+New cards have a profile-specific scheduling ledger and share its daily budget.
+A per-card profile override changes interval settings, not its existing ledger.
+Study filters never create additional daily allowances.
+
+Filters support `paths` (exact paths or directory prefixes), `groups`,
+`templates`, source/card `tags`, `properties`, `card_ids`, and legacy `deck_ids`.
+Values in a list are alternatives, except `tags`, which requires all listed tags.
+Different fields are combined with AND. Compose filters with `all`, `any`, and
+`not`. Properties use exact values or `{"exists": true}` / `{"exists": false}`.
+For example, replace an imported deck filter in `study.json` with:
+
+```json
+{"paths": ["examples/notes.csv"], "templates": ["recognition"]}
+```
+
+This includes existing and future recognition cards from that CSV. The initial
+imported filters use legacy deck IDs; new cards are always available in **All
+cards**, and appear in those decks after you replace their filters with source
+rules such as the example above. Use **New deck** or a deck’s **Edit** button for path/template/tag filters;
+advanced compositions and source rules are editable in `study.json`. **Sources** summarizes the configured paths, templates and initial profiles.
+See [schemas/study.schema.json](schemas/study.schema.json).
+
+## Add cards without Anki
+
+Keep adding your normal Obsidian notes, CSV rows, or callouts, then run:
+
+```sh
+uv run python migrate.py refresh-cards
+```
+
+The desktop command scans the source rules and publishes metadata partitions of
+at most 250 cards. It needs neither Anki, an Anki snapshot, nor Node. Click
+**Refresh** in the reviewer afterward; additions load without resetting the
+review index or imported baseline. Reviewing remains standalone on Android and
+desktop; discovery and training currently run on desktop.
+
+Existing `anki_note_id` identities are preserved. New CSV rows receive an
+`srs_uid` column value, and new Markdown source notes receive `srs_uid` in
+frontmatter. Local `[!srs]` and existing `[!anki]` callouts receive a persistent
+`<!-- SRS-ID: <uuid> -->` after the quoted block if they lack an ID. Stable
+identities survive content changes, CSV reordering and file moves; after moving
+sources, update the source rule paths and run discovery again.
+
+Each enabled template listed in a source rule generates a card. Optional
+`when` filters on templates select variants using source properties, e.g.
+`"when": {"properties": {"production": true}}`. Cloze templates generate the
+ordinals present in the mapped cloze field. Missing content stays visible as a
+card error, with rating disabled. Missing source paths are reported while other sources continue to scan.
+Discovery does not delete existing cards when a source or rule disappears; suspend them explicitly when desired. Removing a
+source rule does not change an existing card's identity or history. Template
+keys and source-rule keys are identity-bearing names; keep them stable when
+editing presentation.
+
+## Train FSRS without Anki
+
+Training uses the standalone
+[fsrs-rs-python bindings](https://github.com/open-spaced-repetition/fsrs-rs-python)
+to the Rust FSRS optimizer. Neither Anki nor PyTorch is a training dependency.
+Select a profile ID from `study.json` or the **Profiles** screen:
+
+```sh
+uv run python migrate.py train --profile preset-1 --output ../training.json
+uv run python migrate.py train --profile preset-1 --apply --output ../training.json
+```
+
+Without `--apply`, the command reports trained parameters and evaluation only.
+With it, the profile is updated for future answers. Current due dates, saved
+memory states, card identities, imported baselines and all review logs are
+preserved. The first answer using the updated profile automatically writes its
+immutable scheduler configuration. Existing 19-weight presets remain unchanged
+until explicitly trained/applied; this optimizer produces **21 FSRS-6 weights**,
+with explicit standalone optimizer provenance.
+
+Training deduplicates imported/local events, excludes rescheduling observations,
+follows each card's winning answer branch, and computes gaps using your saved
+study timezone and rollover. Cards whose history lacks an initial learning/new
+review are excluded and counted in the report. At least 1,000 long-term training
+examples are required by default. In-sample log loss and RMSE are reported before
+and after fitting; these are not held-out accuracy estimates. Missing parents,
+conflicting event IDs, malformed/incomplete logs and insufficient data produce
+diagnostics rather than silently applying parameters.
+
+Sync `study.json` and `data/scheduler-configs/` alongside the card metadata and
+monthly review logs. The legacy `config.json` scheduler does not override these
+profiles. Historical archive files are immutable records, not settings editors.
+
 ## Take a desktop snapshot
 
 Synchronize and close Anki before copying `collection.anki2`. The importer refuses
@@ -60,17 +179,17 @@ reviewer store until verification has passed.
 ## Migrate all decks in one command
 
 Run inside this folder's `migration/` directory. The locked environment includes
-Anki **25.9.2**, the backend exercised by the automated tests:
+the optional Anki **26.9.4** backend for import/verification:
 
 ```sh
-uv sync --locked
+uv sync --locked --extra anki
 ```
 
 If your source Anki has a different version, update the managed dependency with
 `uv add` using that exact version (substitute the actual version):
 
 ```sh
-uv add 'anki==25.9.2'
+uv add --optional anki 'anki==26.9.4'
 ```
 
 This updates `pyproject.toml`, `uv.lock`, and the environment together. Run all
@@ -79,9 +198,9 @@ desktop Python commands through `uv run` as before.
 For a directory named `srs` directly inside your vault:
 
 ```sh
-uv run python migrate.py migrate \
+uv run --extra anki python migrate.py migrate \
   --collection /absolute/path/to/snapshot.anki2 \
-  --anki-version 25.9.2 \
+  --anki-version 26.9.4 \
   --day-zero YYYY-MM-DD
 ```
 
@@ -120,9 +239,9 @@ report contains counts and scheduling metadata, without note fields or rendered
 Anki questions/answers.
 
 ```sh
-uv run python migrate.py verify \
+uv run --extra anki python migrate.py verify \
   --collection /absolute/path/to/snapshot.anki2 \
-  --data ../data --anki-version 25.9.2 \
+  --data ../data --anki-version 26.9.4 \
   --output verification.json
 ```
 
@@ -144,7 +263,7 @@ their origin. They never enter the store or reference counts. Saved stability/di
 learning position, queue, and due are preserved; only missing saved memory uses
 historical reconstruction. Per-deck trained settings and effective retention
 are recorded with each new answer. Legacy parameter fields remain separate from
-unknown client settings in `other`; the selected native field is recorded.
+the selected native field and source policy; unused native fields are pruned.
 
 Anki's answer-state API uses its wall clock. **`--at` fixes count calculations;
 answer transitions use their separately recorded wall-clock timestamp.** The
@@ -158,7 +277,7 @@ The reviewer deliberately uses deterministic intervals. Filtered-deck cards are
 counted, but answering a card still in a filtered deck is currently disabled;
 return those cards to their original decks in Anki before final migration.
 
-The automated fixture suite verifies backend 25.9.2. Another source version must
+The automated fixture suite verifies backend 26.9.4. Another source version must
 pass its own native verification before cutover. The original snapshot and vault
 sources were not available for final acceptance in this workspace, so its exact
 reference counts and real desktop/Android operation remain to be checked on your
@@ -173,6 +292,7 @@ and the [JSON Schema](schemas/data.schema.json) for files in `data/`.
 srs/
   view.js, view.css          standalone browser reviewer
   config.json               editable templates
+  study.json                source rules, filter decks, scheduling profiles
   data/
     manifest.json
     imports/<revision>/
@@ -222,7 +342,7 @@ Browser source fragments and all desktop tooling/dependencies live under
 
 ```sh
 uv run python build.py
-uv run python -m unittest discover -s tests -v
+uv run --extra anki python -m unittest discover -s tests -v
 npm ci
 npm test
 ```

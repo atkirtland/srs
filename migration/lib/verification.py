@@ -96,7 +96,7 @@ def run(args):
     installed_version = importlib.metadata.version("anki")
     if not scheduling.anki_versions_match(installed_version, args.anki_version):
         raise SRSError(f"Installed Anki backend is {installed_version}; requested {args.anki_version}. "
-                       "Update it from migration/: uv add 'anki==" + args.anki_version + "'")
+                       "Update it from migration/: uv add --optional anki 'anki==" + args.anki_version + "'")
     manifest = json.loads((args.data / "manifest.json").read_text())
     if not scheduling.anki_versions_match(manifest.get("scheduling", {}).get("source_anki_version"), args.anki_version):
         raise SRSError("Store and verification backend versions differ; rerun migration with the source version")

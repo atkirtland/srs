@@ -1,5 +1,11 @@
 // Browser implementation bundled into ../view.js by build.py. No runtime tooling.
 function effectiveSettings(card, manifest) {
+  if(manifest.study){
+    const id=studyProfileId(card,manifest.study,manifest),profile=manifest.study.profiles[id];
+    const deck=manifest.scheduling.decks[card.original_deck_id||card.deck_id];
+    const retention=profile.imported_preset===deck?.normal?.config_id ? deck.normal.desired_retention : undefined;
+    return {...profile.settings,preset_id:id,desired_retention:retention??profile.settings.desired_retention};
+  }
   if (!manifest.scheduling) return manifest.scheduler;
   const meta = manifest.scheduling;
   const deck = meta.decks[card.original_deck_id || card.deck_id];
@@ -240,9 +246,9 @@ function deckTree(cards, states, manifest, now, activity = []) {
   roots.forEach(n => visit(n, null));
   return roots.filter(n => !(n.id === "1" && n.total === 0 && !n.children.length && roots.length > 1));
 }
-function reviewQueueV2(cards, states, events, manifest, now, group, introducedCount, deckId = null, skipped = new Set()) {
+function reviewQueueV2(cards, states, events, manifest, now, group, introducedCount, deckId = null, skipped = new Set(), cardFilter = null, precomputedTree = null) {
   if (!manifest.scheduling) return reviewQueue(cards, states, events, manifest, now, group, introducedCount);
-  const tree = deckTree(cards, states, manifest, now, events);
+  const tree = precomputedTree || deckTree(cards, states, manifest, now, events);
   const nodesById = new Map(), kinds = new Map(), today = dayNumber(now, manifest.timing);
   const kindOf = c => {
     if (!kinds.has(c.id)) kinds.set(c.id, queueKind(c, states.get(c.id), manifest, now, today));
@@ -256,7 +262,7 @@ function reviewQueueV2(cards, states, events, manifest, now, group, introducedCo
   const allocate = n => {
     const ids = new Set();
     const gather = p => {ids.add(p.id); p.children.forEach(gather);}; gather(n);
-    const eligible = cards.filter(c => ids.has(c.deck_id) && (!group || c.group === group) && states.has(c.id));
+    const eligible = cards.filter(c => ids.has(c.deck_id) && (!group || c.group === group) && (!cardFilter || cardFilter(c)) && states.has(c.id));
     const budget = {new:n.new,review:n.review,interday:n.interday,intraday:n.intraday};
     eligible.sort((a,b) => Number(skipped.has(a.id))-Number(skipped.has(b.id)) || (a.anki_due ?? 0) - (b.anki_due ?? 0) || a.id.localeCompare(b.id));
     const used = new Map();

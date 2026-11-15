@@ -286,6 +286,7 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   class Element {
     constructor(tag='div',options={}) {this.tag=tag;this.children=[];this.textContent=options.text||'';this.value=options.value||'';this.type=options.type;this.attr=options.attr||{};}
     createEl(tag,options){const e=new Element(tag,options);this.children.push(e);return e;}
+    setAttribute(key,value){this.attr[key]=value;}
     createDiv(options){return this.createEl('div',options);}
     empty(){this.children=[];this.textContent='';}
     querySelectorAll(tag){return this.children.flatMap(e=>[...(e.tag===tag?[e]:[]),...e.querySelectorAll(tag)]);}
@@ -303,7 +304,7 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   put('vocab.csv','anki_note_id,word,definition\n1,broken,\n2,ready,answer\n');
   let scans=0;
   const vault={getName:()=>`test-ui-${crypto.randomUUID()}`,getFiles:()=>{scans++;return [...files.values()];},getAbstractFileByPath:p=>files.get(p),read:async f=>f.text,
-    create:async(p,t)=>put(p,t),createFolder:async p=>files.set(p,{path:p}),append:async(f,t)=>{f.text+=t;f.stat.mtime++;f.stat.size=f.text.length;},on:()=>()=>{}};
+    create:async(p,t)=>put(p,t),modify:async(f,t)=>put(f.path,t),createFolder:async p=>files.set(p,{path:p}),append:async(f,t)=>{f.text+=t;f.stat.mtime++;f.stat.size=f.text.length;},on:()=>()=>{}};
   const component={register:f=>cleanups.push(f),registerEvent:()=>{},registerInterval:()=>{}};
   class FixedDate extends Date {constructor(...args){super(...(args.length?args:[now]));}static now(){return now;}}
   const context={dv:{app:{vault,metadataCache:{getFileCache:()=>({}),on:()=>()=>{}},workspace:{openLinkText:()=>{}}},component,container:root,
@@ -314,6 +315,22 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   const button=text=>root.querySelectorAll('button').find(b=>b.textContent===text);
   for(let i=0;i<100&&!button('Review');i++)await tick();
   assert.ok(button('Review'),'default deck homepage appears');
+  const deckSearch=root.querySelectorAll('input').find(e=>e.attr['aria-label']==='Find a deck');
+  deckSearch.value='Parent::A';deckSearch.oninput();
+  assert.ok(!root.querySelectorAll('summary').some(e=>e.attr['aria-label']==='Other'));
+  assert.ok(root.querySelectorAll('summary').some(e=>e.attr['aria-label']==='Parent'));
+  assert.ok(root.querySelectorAll('summary').some(e=>e.attr['aria-label']==='Parent::A'));
+  assert.ok(root.querySelectorAll('details').some(e=>e.open),'search expands matching ancestors');
+  deckSearch.value='nonexistent';deckSearch.oninput();
+  assert.ok(root.querySelectorAll('p').some(e=>e.textContent==='No decks match. Try another name.'));
+  button('Collapse all').onclick();
+  const browse=root.querySelectorAll('button').find(e=>e.attr['aria-label']==='Browse cards in Parent');
+  browse.onclick({preventDefault(){}});
+  for(let i=0;i<100&&!root.querySelectorAll('select').some(e=>e.attr['aria-label']==='Card deck');i++)await tick();
+  assert.equal(root.querySelectorAll('select').find(e=>e.attr['aria-label']==='Card deck').value,'parent');
+  assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='2 matching cards'));
+  button('Decks').onclick();
+  for(let i=0;i<100&&!button('Review');i++)await tick();
   const scansAtHome=scans;
   // Other sorts before Parent, so open the Parent root explicitly.
   root.querySelectorAll('button').filter(b=>b.textContent==='Review')[1].onclick({preventDefault(){}});
@@ -354,9 +371,15 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   search.value='ready';search.oninput();
   assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='1 matching cards'));
   button('Edited ready').onclick();
+  assert.ok(root.querySelectorAll('h5').some(e=>e.textContent==='Question'));
+  assert.ok(root.querySelectorAll('h5').some(e=>e.textContent==='Answer'));
+  assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='answer'),'editor shows the answer preview');
   let checkbox=root.querySelectorAll('input').find(e=>e.type==='checkbox');
   const tagsInput=root.querySelectorAll('input').find(e=>e.type==='text');
   checkbox.checked=true;checkbox.onchange();tagsInput.value='focused, focused, hard';tagsInput.oninput();
+  button('Decks').onclick();
+  assert.ok(root.querySelectorAll('div').some(e=>e.textContent.includes('You have unsaved changes')));
+  assert.ok(button('Save card settings'),'navigation preserves the unsaved editor');
   await button('Save card settings').onclick();
   let events=logs[0].text.trim().split('\n').map(JSON.parse);
   assert.equal(events.length,2);assert.equal(events[1].kind,'card_settings');
@@ -373,5 +396,88 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   assert.deepEqual(events[2].changes,{suspended:false});
   assert.equal(events.filter(e=>e.kind==='answer').length,1,'settings do not create answers');
   assert.deepEqual(JSON.parse(files.get(cardPath).text).map(c=>c.id),priorIds);
+  const finalStatus=root.querySelectorAll('select').find(e=>e.attr['aria-label']==='Card status');
+  finalStatus.value='errors';finalStatus.onchange();
+  const finalDeck=root.querySelectorAll('select').find(e=>e.attr['aria-label']==='Card deck');finalDeck.value='';finalDeck.onchange();
+  const finalSearch=root.querySelectorAll('input').find(e=>e.attr['aria-label']==='Search cards');
+  finalSearch.value='';finalSearch.oninput();
+  assert.ok(root.querySelectorAll('div').some(e=>e.textContent==='2 matching cards'));
+  finalSearch.value='not present';finalSearch.oninput();
+  assert.ok(root.querySelectorAll('p').some(e=>e.textContent==='No cards match these filters. Try a different search or deck.'));
+  const liveStudy=studyConfiguration(m);
+  liveStudy.decks.all={name:'All cards',parent_id:null,filter:{}};
+  put('srs/study.json',JSON.stringify(liveStudy));
+  button('Refresh').onclick();
+  for(let i=0;i<100&&!button('Profiles');i++)await tick();
+  await tick();button('Profiles').onclick();
+  for(let i=0;i<100&&!button('Save profile');i++)await tick();
+  const retention=root.querySelectorAll('input').find(e=>e.attr['aria-label']==='Main: Desired retention (0–1)');
+  assert.ok(retention);retention.value='.91';retention.oninput();
+  await button('Save profile').onclick();
+  assert.equal(JSON.parse(files.get('srs/study.json').text).profiles.main.settings.desired_retention,.91);
+  assert.deepEqual(JSON.parse(files.get(cardPath).text).map(c=>c.id),priorIds);
+  button('Decks').onclick();
+  for(let i=0;i<100&&!button('Review');i++)await tick();
+  assert.ok(root.querySelectorAll('summary').some(e=>e.attr['aria-label']==='All cards'));
+  button('New deck').onclick();
+  for(let i=0;i<100&&!button('Save deck');i++)await tick();
+  const deckName=root.querySelectorAll('input').find(e=>e.attr['aria-label']==='Deck name');
+  const deckPath=root.querySelectorAll('input').find(e=>e.attr['aria-label']==='Deck source paths');
+  deckName.value='Vocabulary practice';deckName.oninput();deckPath.value='vocab.csv';deckPath.oninput();
+  await button('Save deck').onclick();
+  assert.deepEqual(JSON.parse(files.get('srs/study.json').text).decks['vocabulary-practice'].filter,{paths:['vocab.csv']});
+  assert.ok(root.querySelectorAll('summary').some(e=>e.attr['aria-label']==='Vocabulary practice'));
   cleanups.forEach(f=>f());
+});
+
+function studyConfiguration(m=manifest()) {
+  return {format_version:1,default_profile:'main',profiles:{main:{name:'Main',settings:{...options,minimum_interval:1},reviews_per_day:100,imported_preset:'1'}},
+    profile_rules:[{profile:'main',filter:{deck_ids:['a','b','parent']}}],source_rules:{},decks:Object.fromEntries(Object.values(m.scheduling.decks).map(d=>[d.id,{name:d.name,parent_id:d.parent_id,filter:{deck_ids:[d.id],include_children:true}}]))};
+}
+test('filter study decks preserve imported counts, union overlapping selections and share daily allowances',()=>{
+  const cs=cards([0,1,2,0,2]),m=manifest(),config=studyConfiguration(m);
+  config.decks.all={name:'All cards',parent_id:null,filter:{}};
+  config.decks.overlap={name:'Overlapping',parent_id:null,filter:{any:[{groups:['test']},{templates:['front']}]}};
+  cs.forEach((c,i)=>Object.assign(c,{group:'test',template_key:'front',source:{path:i%2?'wiki/b/item.md':'wiki/a/item.md'},card_settings:{tags:i%2?['hard']:[]},properties:{production:i%2===0}}));
+  const runtime=SRS.studyRuntimeManifest(m,SRS.validateStudy(config));
+  const original=SRS.deckTree(cs,states(cs),m,now)[0];
+  const tree=SRS.studyDeckTree(cs,states(cs),runtime,now,[],new Set(),'');
+  const parent=tree.find(n=>n.id==='parent'),all=tree.find(n=>n.id==='all'),overlap=tree.find(n=>n.id==='overlap');
+  assert.deepEqual([parent.new,parent.learning,parent.review],[original.new,original.learning,original.review]);
+  assert.deepEqual([all.new,all.learning,all.review],[overlap.new,overlap.learning,overlap.review],'overlapping filters do not duplicate cards');
+  assert.equal(SRS.matchesStudyFilter(cs[1],{all:[{paths:['wiki/b']},{tags:['hard']}],not:{properties:{production:true}}},runtime),true);
+  assert.equal(SRS.matchesStudyFilter(cs[1],{properties:{absent:{exists:true}}},runtime),false);
+  config.profiles.main.settings.new_cards_per_day=1;
+  const capped=SRS.studyRuntimeManifest(m,config),sameDeck=cards([0,0,0]);sameDeck.forEach(c=>c.deck_id='a');
+  const activity=[{kind:'answer',card_id:sameDeck[0].id,review_time_ms:now,was_new:true,state:state(1)}];
+  const q=SRS.reviewQueueV2(sameDeck,states(sameDeck),activity,capped,now,'',undefined,null,new Set(),c=>c.id===sameDeck[2].id);
+  assert.equal(q.fresh,0,'an answer outside the selected filter still consumes the shared allowance');
+  assert.deepEqual(m,manifest(),'editable profiles do not mutate the imported manifest');
+});
+test('profile assignment, explicit card overrides and cloze variants preserve identity and saved memory',()=>{
+  const m=manifest(),config=studyConfiguration(m),[card]=cards([2]);
+  config.profiles.other={name:'Other',settings:{...options,desired_retention:.95},reviews_per_day:50};
+  config.profile_rules.unshift({profile:'other',filter:{tags:['hard']}});
+  card.card_settings={tags:['hard']};const runtime=SRS.studyRuntimeManifest(m,SRS.validateStudy(config));
+  assert.equal(SRS.studyProfileId(card,config,runtime),'other');
+  assert.equal(SRS.effectiveSettings(card,runtime).desired_retention,.95);
+  card.card_settings.profile='main';assert.equal(SRS.effectiveSettings(card,runtime).desired_retention,.85);
+  assert.equal(card.id,'card-0');assert.equal(card.baseline.stability,5);
+  assert.throws(()=>SRS.validateStudyFilter({typo:['x']}),/Unknown filter/);
+  assert.throws(()=>SRS.validateStudy({...config,decks:{a:{name:'A',parent_id:'a',filter:{}}}}),/cycle/);
+  const cloze={...card,group:'test',template_key:'cloze',anki_notetype:'Cloze',anki_ordinal:2,cloze:true};
+  const templates={format_version:1,groups:{test:{templates:[{key:'cloze',enabled:true,required_fields:[],front:'{{cloze:Text}}',back:'{{cloze:Text}}',anki_notetype:'Cloze',anki_ordinal:0}]}}};
+  assert.equal(SRS.configuredCards([cloze],templates)[0].id,card.id);
+  assert.equal(SRS.renderV2('{{cloze:Text}}',{Text:'{{c1::one}} and {{c3::three}}'},2,false),'one and […]');
+  assert.throws(()=>SRS.configuredCards([{...cloze,cloze:false}],templates),/binding changed/);
+  const event={format_version:2,kind:'card_settings',id:crypto.randomUUID(),device_id:'computer',card_id:card.id,time_ms:now,changes:{profile:'other'}};
+  assert.equal(SRS.validateEvent(event,'import'),event);
+  assert.throws(()=>SRS.validateEvent({...event,changes:{profile:7}},'import'),/Invalid profile/);
+});
+
+test('local and imported Markdown callouts resolve stable block identities',()=>{
+  const uuid=crypto.randomUUID();
+  const text=`> [!srs] Local question\n> Local answer\n> #tag\n<!-- SRS-ID: ${uuid} -->\n\n> [!anki] Old question\n> Old answer\n<!-- ID: 123 -->\n`;
+  const blocks=SRS.sourceBlocks(text);
+  assert.deepEqual(blocks,[{identity:`local:${uuid}`,front:'Local question',back:'Local answer',tags:['tag']},{identity:'anki:123',front:'Old question',back:'Old answer',tags:[]}]);
 });

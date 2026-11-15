@@ -1948,8 +1948,9 @@
           !Number.isSafeInteger(event.time_ms) || event.time_ms < 0 || !event.changes || typeof event.changes !== "object" || Array.isArray(event.changes) ||
           !Object.keys(event.changes).length) throw Error("Invalid card settings event");
       for (const [key,value] of Object.entries(event.changes)) {
-        if (!["suspended","tags"].includes(key)) throw Error(`Unknown card setting: ${key}`);
+        if (!["suspended","tags","profile"].includes(key)) throw Error(`Unknown card setting: ${key}`);
         if (value === null) continue;
+        if (key === "profile" && (typeof value!=="string"||!value.trim()))throw Error("Invalid profile setting");
         if (key === "suspended" && typeof value !== "boolean" || key === "tags" &&
             (!Array.isArray(value) || value.some(tag=>typeof tag!=="string" || !tag.trim()) || new Set(value).size!==value.length)) throw Error(`Invalid card setting: ${key}`);
       }
@@ -2095,7 +2096,7 @@
     }
     return cards.map((card) => {
       const template = templates.get(`${card.group}/${card.template_key}`);
-      if (template && (template.anki_notetype !== card.anki_notetype || template.anki_ordinal !== card.anki_ordinal)) throw Error(`Card binding changed for ${card.group}/${card.template_key}; re-run migration`);
+      if (template && (template.anki_notetype !== card.anki_notetype || template.anki_ordinal !== card.anki_ordinal && !(card.cloze===true && template.front.includes("{{cloze:")))) throw Error(`Card binding changed for ${card.group}/${card.template_key}; re-run migration`);
       return { ...card, template, active: true };
     });
   }

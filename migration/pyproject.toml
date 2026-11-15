@@ -5,13 +5,15 @@ description = "Export Anki notes to round-trip-friendly Markdown through AnkiCon
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "anki==26.9.4",
     "beautifulsoup4>=4.12,<5",
     "markdownify>=0.13,<2",
-    "nodejs-wheel>=24,<25",
     "pyyaml>=6,<7",
     "tzdata>=2025.2",
+    "fsrs-rs-python==0.9.3",
 ]
+
+[project.optional-dependencies]
+anki = ["anki==26.9.4", "nodejs-wheel>=24,<25"]
 
 [tool.uv]
 package = false

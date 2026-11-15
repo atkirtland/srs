@@ -3,7 +3,9 @@
 `data/` stores card identities, vault source references, imported scheduling
 metadata, and review events. Questions and answers are read from the vault at
 review time. Templates live in the editable `config.json` beside `data/`, not in
-the card partitions. There is no retained Anki note-content archive.
+the card partitions. Optional `study.json` beside it defines source rules, filter
+decks and scheduling profiles; see [its schema](schemas/study.schema.json).
+There is no retained Anki note-content archive.
 
 The current store format is **version 2**. Preserved version 1 answer events are
 also readable. File names do not determine event kind; inspect `format_version`
@@ -343,7 +345,9 @@ Files are immutable and retained across configuration changes and reimports.
 Missing/corrupt files produce a diagnostic; the writer never overwrites them.
 Sync this directory alongside monthly logs. Old configurations support auditing
 past answers; future answers continue to use current settings with the saved
-card state. The manifest remains the source of current deck settings.
+card state. With `study.json`, its profiles supply current scheduler settings. The manifest
+retains imported timing, hierarchy, baseline counters and deck overrides; without
+`study.json`, it also supplies the active scheduler settings.
 
 ### Card settings change: `card_settings`
 
@@ -363,7 +367,9 @@ and imported scheduling baselines:
 }
 ```
 
-Only changed fields are written. `suspended` is a boolean and `tags` is a list of
+Only changed fields are written. Optional `profile` is a scheduling-profile ID
+from `study.json`; null restores automatic profile assignment. `suspended` is a
+boolean and `tags` is a list of
 unique, nonempty strings. A null value removes an override; the index retains
 its timestamp so an older edit cannot resurrect it. Omitted fields stay unchanged.
 Tags are card-specific and do not modify source-note tags.
@@ -402,3 +408,36 @@ temporary publication artifact, not a separate document format. Review logs
 remain; there should be no generated `raw.json` or per-card `history-*.json`
 archive. Treat generated metadata and existing log lines as immutable; use
 `config.json` and vault source files for presentation/content edits.
+
+## Independent card discovery and profile training
+
+`study.json` is editable configuration outside `data/`, with `format_version: 1`,
+`default_profile`, `profiles`, ordered `profile_rules`, `source_rules`, and
+`decks`. It contains templates/source references and scheduler parameters, not
+note field values. Its schema is [schemas/study.schema.json](schemas/study.schema.json).
+The [README](README.md#source-rules-study-decks-and-profiles) documents filter
+semantics, precedence, daily budgets and commands.
+
+New source-discovered cards use the same card-partition format and persistent
+source/template identity. Optional `profile_id` supplies their initial profile;
+`cloze: true` allows several cloze ordinals to use one template. Their internal
+`deck_id` is `profile:<profile-id>`, a scheduling ledger constructed by the
+reviewer from current profiles. These ledger IDs are not editable study decks.
+The initial new-card state lives in the card's `baseline`; discovery does not
+invent historical reviews or change `import_id`. After publishing the new
+metadata generation it removes superseded generated import directories.
+
+Source properties, tags and rendered questions/answers used for filter
+evaluation remain transient. They are not copied into partitions. A source
+rule's template list controls new-card generation; optional template `when`
+filters use source properties. Existing UIDs and saved states are preserved.
+
+A new answer may carry `profile_id` to identify its effective profile at review
+time. Its immutable `scheduler_config_id` still records the actual interval
+parameters, independent of subsequent profile edits. The trainer reads all
+monthly logs, deduplicates IDs, selects the winning answer ancestry and excludes
+manual/rescheduling observations. It groups histories by the current profile
+assignment, including card-specific overrides. It can update `study.json` but
+never rewrites answers, card states, imported baselines, or scheduler archives.
+Training reports contain weights, sample/exclusion totals and labeled in-sample
+metrics only. They are optional desktop output, not part of the runtime store.

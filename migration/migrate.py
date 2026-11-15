@@ -47,9 +47,47 @@ def main(argv: list[str] | None = None) -> int:
     install.add_argument("--vault", type=Path, required=True)
     seed = commands.add_parser("seed-csv-uids", help="assign UUIDs to Obsidian-only CSV notes")
     seed.add_argument("csv", type=Path)
+    for name, help_text in [('init-study', 'create source rules, filter decks and profiles from the current catalog'),
+                            ('refresh-cards', 'discover new vault cards without Anki or replacing review baselines'),
+                            ('train', 'train standalone FSRS on imported and local reviews')]:
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument('--data', type=Path, default=PORTABLE / 'data' if PORTABLE else None)
+        command.add_argument('--study', type=Path, default=PORTABLE / 'study.json' if PORTABLE else None)
+        if name != 'train':
+            command.add_argument('--config', type=Path, default=PORTABLE / 'config.json' if PORTABLE else None)
+        command.add_argument('--vault', type=Path, default=PORTABLE.parent if PORTABLE else None)
+        if name == 'train':
+            command.add_argument('--profile', required=True)
+            command.add_argument('--apply', action='store_true', help='apply trained parameters to future answers')
+            command.add_argument('--output', type=Path)
+            command.add_argument('--minimum-reviews', type=int, default=1000, help='minimum long-term examples (default: 1000)')
+            command.add_argument('--epochs', type=int, default=5)
     args = parser.parse_args(argv)
     try:
-        if args.command == "seed-csv-uids":
+        if args.command in {'init-study', 'refresh-cards', 'train'}:
+            import study
+            if args.data is None or args.study is None:
+                raise ValueError('--data and --study are required outside the portable directory')
+            if args.command != 'train' and args.config is None:
+                raise ValueError('--config is required outside the portable directory')
+            if args.command == 'init-study':
+                result = study.initialize(args.data, args.config, args.study)
+                print(f"Created {args.study}: {len(result['source_rules'])} source rules, {len(result['decks'])} study decks, {len(result['profiles'])} profiles")
+                for identity, profile in result['profiles'].items():
+                    print(f"  {identity}: {profile['name']}")
+            elif args.command == 'refresh-cards':
+                if args.vault is None:
+                    raise ValueError('--vault is required')
+                print(json.dumps(study.refresh_cards(args.vault.resolve(), args.data, args.study, args.config), indent=2))
+            else:
+                import training
+                if args.minimum_reviews < 1 or args.epochs < 1:
+                    raise ValueError('minimum-reviews and epochs must be positive')
+                print(json.dumps(training.train(args.data, args.study, args.profile, vault=args.vault,
+                                               apply=args.apply, output=args.output,
+                                               minimum_reviews=args.minimum_reviews, epochs=args.epochs,
+                                               progress=lambda text: print(text,file=sys.stderr,flush=True)), indent=2))
+        elif args.command == "seed-csv-uids":
             print(f"Assigned {srs.seed_csv_uids(args.csv)} local note identities")
         elif args.command == "install-view":
             package = PORTABLE or ROOT / "ankobs-srs"
@@ -90,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
             installed_version = importlib.metadata.version("anki")
             if not scheduling.anki_versions_match(installed_version, args.anki_version):
                 raise srs.SRSError(f"Installed Anki backend is {installed_version}; requested {args.anki_version}. "
-                                   "Update the managed backend from migration/: uv add 'anki==" + args.anki_version + "'")
+                                   "Update the managed backend from migration/: uv add --optional anki 'anki==" + args.anki_version + "'")
             data = srs.build_export(srs.read_snapshot(args.collection), args.vault, sources.EXPORTS,
                                     config, args.day_zero, args.timezone, args.rollover_hour, installed_version)
             scheduling.reconstruct_missing(data, args.collection)
@@ -101,8 +139,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Archived import and report: {imported}")
             return 2 if data["report"]["issues"] else 0
         return 0
-    except (ValueError, OSError, sqlite3.Error, ZoneInfoNotFoundError, sources.ExportError) as error:
+    except (ValueError, OSError, sqlite3.Error, ZoneInfoNotFoundError, sources.ExportError, ImportError) as error:
         print(f"SRS: {error}", file=sys.stderr)
+        if isinstance(error, ImportError) and 'anki' in str(error):
+            print("Anki is optional: run import/verification with uv run --extra anki python migrate.py ...", file=sys.stderr)
         return 2
 
 

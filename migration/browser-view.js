@@ -3,22 +3,29 @@
     const root = input?.root || "ankobs-srs", dataRoot = `${root}/data`;
     const identity = `ankobs-srs:${api.vault.getName()}:${root}`;
     const host = dv.container.createDiv({cls:"ankobs-srs"});
-    const notice = host.createDiv(), controls = host.createDiv();
+    const notice = host.createDiv({cls:"srs-notice",attr:{role:"status","aria-live":"polite"}}), controls = host.createDiv({cls:"srs-toolbar"});
     const home = controls.createEl("button",{text:"Decks"});
     const manage = controls.createEl("button",{text:"Cards"});
-    const select = controls.createEl("select");
-    const deviceSelect = controls.createEl("select",{attr:{"aria-label":"This device"}});
-    const refresh = controls.createEl("button",{text:"Refresh"});
-    const rebuild = controls.createEl("button",{text:"Rebuild local index"});
-    const counts = host.createDiv(), homepage = host.createDiv(), front = host.createDiv(), back = host.createDiv();
-    const actions = host.createDiv(), source = host.createDiv();
+    const profilesButton=controls.createEl("button",{text:"Profiles"});
+    const sourcesButton=controls.createEl("button",{text:"Sources"});
+    const select = controls.createEl("select",{attr:{"aria-label":"Template group"}});
+    const tools = controls.createEl("details",{cls:"srs-tools"});
+    tools.createEl("summary",{text:"Tools"});
+    const toolBody = tools.createDiv();
+    const deviceSelect = toolBody.createEl("select",{attr:{"aria-label":"This device"}});
+    const refresh = toolBody.createEl("button",{text:"Refresh"});
+    const rebuild = toolBody.createEl("button",{text:"Rebuild local index"});
+    const context = host.createDiv({cls:"srs-context"});
+    const counts = host.createDiv({cls:"srs-counts"}), homepage = host.createDiv(), front = host.createDiv({cls:"srs-front"}), back = host.createDiv({cls:"srs-back"});
+    const actions = host.createDiv({cls:"srs-actions"}), source = host.createDiv({cls:"srs-source"});
     const dirty = new Set(), cache = new Map(), skipped = new Set();
     let taxonomy;
     let resolvedCards, resolvedConfig, sourceGeneration = 0, resolvedGeneration = -1;
     const candidateSources = new Map();
-    let manifest, cards = [], config, index, states, shown, configKey, started = 0;
+    let manifest, baseManifest, studyConfig, studyKey, panel="", cards = [], config, index, states, shown, configKey, started = 0;
     let busy = false, disposed = false, refreshTimer, pending = false, selectedDeck = null;
-    let reviewing = Boolean(input?.group);
+    let reviewing = Boolean(input?.group), activeGroup=input?.group||"";
+    let deckQuery="", expandedDecks=new Set(), editingDeckId=null;
     let managing=false, managerQuery="", managerStatus="all", managerDeck="", editedCardId=null, managerDirty=false;
     let deviceId = input?.device || localStorage.getItem(`${identity}:device-name`);
     if (!["computer","android"].includes(deviceId))deviceId=/Android/i.test(globalThis.navigator?.userAgent||"")?"android":"computer";
@@ -36,7 +43,7 @@
     };
     async function json(path) {const text=await store.read(path);if(text===null)throw Error(`Missing SRS file: ${path}`);return JSON.parse(text);}
     function message(e) {notice.textContent=String(e.message||e);}
-    function clearCard() {front.empty();back.empty();actions.empty();source.empty();homepage.empty();shown=null;}
+    function clearCard() {context.empty();front.empty();back.empty();actions.empty();source.empty();homepage.empty();shown=null;}
     function logFiles() {return api.vault.getFiles().filter(f=>
       f.path.startsWith(`${dataRoot}/reviews/`) && LOG_PATTERN.test(f.path.split("/").at(-1)))
       .map(f=>({path:f.path,stat:f.stat?{...f.stat}:undefined}));}
@@ -102,16 +109,18 @@
         metadata=taxonomy.get(path)||metadata;
       }
       if(card.source.kind==="block") {
-        const matches=[...data.text.matchAll(/^>[ \t]*\[!anki\](?:-[ \t]*|[ \t]+)([^\r\n]*)\r?\n((?:^>[ \t]?(?!\[!anki\](?:-|[ \t]))[^\r\n]*(?:\r?\n|$))+?)^[ \t]*<!--[ \t]*ID[ \t]*:[ \t]*(\d+)[ \t]*-->[ \t]*$/gmi)].filter(m=>`anki:${m[3]}`===card.note_uid);
+        const matches=sourceBlocks(data.text).filter(block=>block.identity===card.note_uid);
         if(matches.length!==1)throw Error(matches.length?"Duplicate block identity":"Missing Markdown block identity");
-        metadata={$front:matches[0][1].trim(),$back:matches[0][2].split(/\r?\n/).map(l=>l.replace(/^>[ \t]?/,"")).filter(l=>!/^\s*(?:#[^\s#]+\s*)+$/.test(l)).join("\n").trim()};
+        metadata={...metadata,$front:matches[0].front,$back:matches[0].back,tags:[...new Set([...(Array.isArray(metadata.tags)?metadata.tags:String(metadata.tags||"").split(/\s+/).filter(Boolean)),...matches[0].tags])]};
       }
       if(!metadata)throw Error(`Missing source identity: ${card.note_uid}`);
-      if(!data.rows && (metadata.anki_note_id || metadata.srs_uid)) {
+      if(card.source.kind!=="block" && !data.rows && (metadata.anki_note_id || metadata.srs_uid)) {
         const uid=metadata.anki_note_id?`anki:${metadata.anki_note_id}`:`local:${metadata.srs_uid}`;
         if(uid!==card.note_uid)throw Error("Source identity changed");
       }
       const note={metadata,body:data.body,filename:file.basename||file.path.split("/").at(-1).replace(/\.md$/,""),path,lookups:{us_states:US_STATES}};
+      card.properties=metadata;
+      card.source_tags=Array.isArray(metadata.tags)?metadata.tags:String(metadata.tags||"").split(/\s+/).filter(Boolean);
       const fields=fieldsFromNote(card,note);
       const special={...fields,Deck:manifest.scheduling?.decks[card.deck_id]?.name||"",Subdeck:manifest.scheduling?.decks[card.deck_id]?.name.split("::").at(-1)||"",Card:card.template.key,Type:card.anki_notetype,Tags:Array.isArray(metadata.tags)?metadata.tags.join(" "):String(metadata.tags||"")};
       const frontText=renderV2(card.template.front,special,card.anki_ordinal,false);
@@ -125,7 +134,9 @@
       taxonomy=null;
       candidateSources.clear();
       const result=[];
-      for(const card of configuredCards(cards,config)) {
+      for(const configured of configuredCards(cards,config)) {
+        const rule=studyConfig?.source_rules[configured.group];
+        const card=rule && configured.source ? {...configured,source:{...configured.source,fields:rule.fields,prepare:rule.prepare||null}}:configured;
         try {result.push(await resolveSource(card));}
         catch(e) {result.push({...card,content_error:e.message});}
       }
@@ -156,7 +167,7 @@
     }
     function contentProblems(available) {
       return available.filter(c=>c.content_error && (!select.value || c.group===select.value) &&
-        (!selectedDeck || manifest.scheduling.decks[c.deck_id]?.name===manifest.scheduling.decks[selectedDeck]?.name ||
+        (studyConfig ? !selectedDeck || studyDeckMatches(c,selectedDeck,studyConfig,manifest) : !selectedDeck || manifest.scheduling.decks[c.deck_id]?.name===manifest.scheduling.decks[selectedDeck]?.name ||
           manifest.scheduling.decks[c.deck_id]?.name.startsWith(manifest.scheduling.decks[selectedDeck]?.name+"::")));
     }
     function showErrors(available) {
@@ -175,27 +186,83 @@
       details.ontoggle=()=>{if(details.open && offset===0)page();};
     }
     function openCardSettings(card) {
-      managing=true;editedCardId=card.id;managerDirty=false;guardedDraw();
+      if(!leaveEditor())return;
+      panel="";managing=true;editedCardId=card.id;managerDirty=false;guardedDraw();
+    }
+    function leaveEditor() {
+      if(managerDirty){notice.textContent="You have unsaved changes. Save them or use the discard/close action before navigating.";return false;}
+      return true;
+    }
+    function showDecks(queue,available) {
+      homepage.createEl("h2",{text:"Decks"});
+      homepage.createEl("p",{text:"Choose a deck to study, or browse its cards. Counts include subdecks.",cls:"srs-muted"});
+      const filters=homepage.createDiv({cls:"srs-deck-filters"});
+      const search=filters.createEl("input",{type:"search",value:deckQuery,attr:{placeholder:"Find a deck…","aria-label":"Find a deck"}});
+      const expand=filters.createEl("button",{text:"Expand all"}),collapse=filters.createEl("button",{text:"Collapse all"});
+      if(studyConfig)filters.createEl("button",{text:"New deck"}).onclick=()=>{editingDeckId=null;panel="deck";guardedDraw();};
+      const list=homepage.createDiv({cls:"srs-deck-list"});
+      function render() {
+        list.empty();const query=deckQuery.trim().toLocaleLowerCase();
+        const matches=node=>node.name.toLocaleLowerCase().includes(query)||node.children.some(matches);
+        const build=(nodes,container)=>{for(const n of nodes) {
+          if(query && !matches(n))continue;
+          const details=container.createEl("details",{cls:"srs-deck"});
+          details.open=Boolean(query)||expandedDecks.has(n.id);
+          details.ontoggle=()=>{if(query)return;if(details.open)expandedDecks.add(n.id);else expandedDecks.delete(n.id);};
+          const summary=details.createEl("summary",{attr:{"aria-label":n.name}});
+          summary.createEl("span",{text:n.name.split("::").at(-1),cls:"srs-deck-name"});
+          const badges=summary.createDiv({cls:"srs-deck-counts"});showCounts(badges,n);
+          const buttons=summary.createDiv({cls:"srs-deck-actions"});
+          buttons.createEl("button",{text:"Review",attr:{"aria-label":`Review ${n.name}`}}).onclick=e=>{e.preventDefault();selectedDeck=n.id;reviewing=true;guardedDraw();};
+          buttons.createEl("button",{text:"Browse cards",attr:{"aria-label":`Browse cards in ${n.name}`}}).onclick=e=>{
+            e.preventDefault();managerDeck=n.id;managerQuery="";managerStatus="all";editedCardId=null;managing=true;guardedDraw();
+          };
+          if(studyConfig)buttons.createEl("button",{text:"Edit",attr:{"aria-label":`Edit deck ${n.name}`}}).onclick=e=>{e.preventDefault();editingDeckId=n.id;panel="deck";guardedDraw();};
+          const children=details.createDiv({cls:"srs-subdecks"});build(n.children,children);
+          if(!n.children.length)details.open=false;
+        }};build(queue.tree,list);
+        if(!list.children.length)list.createEl("p",{text:"No decks match. Try another name.",cls:"srs-empty"});
+      }
+      search.oninput=()=>{deckQuery=search.value;render();};
+      expand.onclick=()=>{const add=nodes=>{for(const n of nodes){expandedDecks.add(n.id);add(n.children);}};add(queue.tree);render();};
+      collapse.onclick=()=>{expandedDecks.clear();deckQuery="";search.value="";render();};
+      render();showErrors(available);
     }
     function showCardManager(available) {
       homepage.createEl("h3",{text:"Cards"});
       const filters=homepage.createDiv({cls:"srs-card-filters"});
       const search=filters.createEl("input",{type:"search",value:managerQuery,attr:{placeholder:"Search cards, sources, templates, or tags","aria-label":"Search cards"}});
       const status=filters.createEl("select",{attr:{"aria-label":"Card status"}});
-      for(const [value,text] of [["all","All cards"],["active","Active cards"],["suspended","Suspended cards"]])status.createEl("option",{value,text});
+      for(const [value,text] of [["all","All cards"],["active","Active cards"],["suspended","Suspended cards"],["errors","Content errors"]])status.createEl("option",{value,text});
       status.value=managerStatus;
       const deck=filters.createEl("select",{attr:{"aria-label":"Card deck"}});
       deck.createEl("option",{value:"",text:"All decks"});
-      for(const d of Object.values(manifest.scheduling?.decks||{}).sort((a,b)=>a.name.localeCompare(b.name)))deck.createEl("option",{value:d.id,text:d.name});
+      for(const [id,d] of Object.entries(studyConfig?.decks||manifest.scheduling?.decks||{}).sort(([,a],[,b])=>a.name.localeCompare(b.name)))deck.createEl("option",{value:id,text:d.name});
       deck.value=managerDeck;
-      const editor=homepage.createDiv({cls:"srs-card-editor"}), summary=homepage.createDiv(), list=homepage.createDiv();
+      const summary=homepage.createDiv({cls:"srs-card-summary",attr:{role:"status","aria-live":"polite"}});
+      const browser=homepage.createDiv({cls:"srs-card-browser"});
+      const list=browser.createDiv({cls:"srs-card-list"}), editor=browser.createDiv({cls:"srs-card-editor"});
+      const emptyEditor=()=>{editor.empty();editor.createEl("p",{text:"Select a card to preview its question and answer, suspend it, or edit its tags.",cls:"srs-empty"});};
+      emptyEditor();
       const entries=available.map(card=>({card,text:[card.id,card.note_uid,card.anki_notetype,card.template_key,card.source?.path,...(card.source?.candidates||[]),
         manifest.scheduling?.decks[card.deck_id]?.name,card.frontText,card.backText,card.content_error,...(card.card_settings?.tags||[])].join(" ").toLocaleLowerCase()}));
+      const rowButtons=new Map();
       const label=card=>(card.frontText||card.note_uid||card.id).replace(/<[^>]*>/g," ").replace(/\s+/g," ").trim().slice(0,140);
       function edit(card) {
+        if(!leaveEditor())return;
+        for(const [id,button] of rowButtons)button.setAttribute("aria-pressed",String(id===card.id));
         editedCardId=card.id;managerDirty=false;editor.empty();
         editor.createEl("h4",{text:label(card)});
-        editor.createEl("p",{text:`${card.anki_notetype||"Card"} · ${card.template_key||`ordinal ${card.anki_ordinal}`} · ${card.id}`});
+        editor.createEl("p",{text:manifest.scheduling?.decks[card.deck_id]?.name||card.group||"",cls:"srs-muted"});
+        if(!card.content_error) {
+          const preview=editor.createDiv({cls:"srs-card-preview"});
+          preview.createEl("h5",{text:"Question"});dv.el("div",card.frontText,{container:preview});
+          preview.createEl("h5",{text:"Answer"});dv.el("div",card.backText,{container:preview});
+        }
+        const metadata=editor.createEl("details",{cls:"srs-card-metadata"});
+        metadata.createEl("summary",{text:"Card details"});
+        metadata.createEl("p",{text:`${card.anki_notetype||"Card"} · ${card.template_key||`ordinal ${card.anki_ordinal}`}`});
+        metadata.createEl("p",{text:`Card ID: ${card.id}`});
         if(card.source?.path)editor.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"",false);
         if(card.content_error)editor.createEl("p",{text:card.content_error,cls:"srs-errors"});
         const suspension=editor.createEl("label",{text:"Suspended "});
@@ -203,31 +270,45 @@
         const originalSuspended=cardSuspended(card,states.get(card.id));suspended.checked=originalSuspended;
         const tagLabel=editor.createEl("label",{text:"Card tags (comma-separated)"});
         const tags=tagLabel.createEl("input",{type:"text",value:(card.card_settings?.tags||[]).join(", ")});
-        suspended.onchange=tags.oninput=()=>{managerDirty=true;};
+        let profileSelect;
+        if(studyConfig){
+          const profileLabel=editor.createEl("label",{text:"Scheduling profile"});
+          profileSelect=profileLabel.createEl("select",{attr:{"aria-label":"Card scheduling profile"}});
+          profileSelect.createEl("option",{value:"",text:`Automatic (${studyConfig.profiles[studyProfileId({...card,card_settings:{...card.card_settings,profile:null}},studyConfig,manifest)].name})`});
+          for(const [id,p] of Object.entries(studyConfig.profiles))profileSelect.createEl("option",{value:id,text:p.name||id});
+          profileSelect.value=card.card_settings?.profile||"";
+        }
+        const changed=editor.createDiv({cls:"srs-muted",attr:{role:"status"}});
+        suspended.onchange=tags.oninput=()=>{managerDirty=true;changed.textContent="Unsaved changes";};
+        if(profileSelect)profileSelect.onchange=()=>{managerDirty=true;changed.textContent="Unsaved changes";};
         const buttons=editor.createDiv();
-        buttons.createEl("button",{text:"Save card settings"}).onclick=()=>{
+        buttons.createEl("button",{text:"Save card settings",cls:"mod-cta"}).onclick=()=>{
           const changes={}, nextTags=[...new Set(tags.value.split(",").map(t=>t.trim()).filter(Boolean))];
+          if(profileSelect && profileSelect.value!==(card.card_settings?.profile||""))changes.profile=profileSelect.value||null;
           if(suspended.checked!==originalSuspended)changes.suspended=suspended.checked;
           if(canonical(nextTags)!==canonical(card.card_settings?.tags||[]))changes.tags=nextTags;
           return saveCardSettings(card,changes);
         };
-        buttons.createEl("button",{text:"Use imported defaults"}).onclick=()=>saveCardSettings(card,{suspended:null,tags:null});
-        buttons.createEl("button",{text:"Close settings"}).onclick=()=>{editor.empty();editedCardId=null;managerDirty=false;};
+        buttons.createEl("button",{text:"Use imported defaults"}).onclick=()=>saveCardSettings(card,{suspended:null,tags:null,...(studyConfig?{profile:null}:{})});
+        buttons.createEl("button",{text:"Close settings"}).onclick=()=>{emptyEditor();editedCardId=null;managerDirty=false;for(const button of rowButtons.values())button.setAttribute("aria-pressed","false");};
       }
       function renderList() {
-        list.empty();
+        list.empty();rowButtons.clear();
         const terms=managerQuery.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
         const deckName=manifest.scheduling?.decks[managerDeck]?.name;
         const matches=entries.filter(({card,text})=>!card.retired && terms.every(term=>text.includes(term)) &&
-          (managerStatus==="all" || cardSuspended(card,states.get(card.id))===(managerStatus==="suspended")) &&
-          (!deckName || manifest.scheduling.decks[card.deck_id]?.name===deckName || manifest.scheduling.decks[card.deck_id]?.name.startsWith(deckName+"::")));
+          (managerStatus==="all" || (managerStatus==="errors" ? Boolean(card.content_error) : cardSuspended(card,states.get(card.id))===(managerStatus==="suspended"))) &&
+          (studyConfig ? !managerDeck || studyDeckMatches(card,managerDeck,studyConfig,manifest) : !deckName || manifest.scheduling.decks[card.deck_id]?.name===deckName || manifest.scheduling.decks[card.deck_id]?.name.startsWith(deckName+"::")));
         summary.textContent=`${matches.length.toLocaleString()} matching cards`;
+        if(!matches.length)list.createEl("p",{text:"No cards match these filters. Try a different search or deck.",cls:"srs-empty"});
         let offset=0, more;
         const page=()=>{
           if(more)more.remove();
           for(const {card} of matches.slice(offset,offset+50)) {
             const row=list.createDiv({cls:"srs-card-row"});
-            row.createEl("button",{text:label(card)}).onclick=()=>edit(card);
+            const button=row.createEl("button",{text:label(card),attr:{"aria-label":`Edit ${label(card)}`,"aria-pressed":String(editedCardId===card.id)}});
+            rowButtons.set(card.id,button);button.onclick=()=>edit(card);
+            if(card.content_error)row.createEl("small",{text:"Content error",cls:"srs-error-badge"});
             row.createEl("span",{text:`${cardSuspended(card,states.get(card.id))?"Suspended":"Active"} · ${card.template_key||card.anki_ordinal} · ${manifest.scheduling?.decks[card.deck_id]?.name||""}${card.card_settings?.tags?.length?" · "+card.card_settings.tags.join(", "):""}`});
           }
           offset+=50;
@@ -240,9 +321,94 @@
       renderList();
       const selected=available.find(card=>card.id===editedCardId);if(selected)edit(selected);
     }
+    function showConfiguration(section){
+      if(section==="deck"){showDeckEditor();return;}
+      homepage.createEl("h2",{text:section==="profiles"?"Scheduling profiles":"Sources"});
+      if(!studyConfig){homepage.createEl("p",{text:"Create the study configuration on desktop first: uv run python migrate.py init-study"});return;}
+      homepage.createEl("button",{text:"Open study configuration"}).onclick=()=>api.workspace.openLinkText(`${root}/study.json`,"",false);
+      if(section==="sources"){
+        homepage.createEl("p",{text:"Rules create cards from your vault content. Templates define the questions; study decks select which cards to practice."});
+        homepage.createEl("p",{text:"Discover additions on desktop: uv run python migrate.py refresh-cards. Then Refresh here to load them. This preserves existing schedules and review logs."});
+        for(const [id,rule] of Object.entries(studyConfig.source_rules)){
+          const row=homepage.createDiv({cls:"srs-card-editor"});row.createEl("h3",{text:id});
+          row.createEl("p",{text:rule.sources.join(", ")});row.createEl("p",{text:`Templates: ${rule.templates.join(", ")}`});
+          row.createEl("p",{text:`New cards use: ${studyConfig.profiles[rule.profile].name||rule.profile}`});
+        }return;
+      }
+      homepage.createEl("p",{text:"Changes apply to future answers. Current memory states and due dates are preserved. Imported deck limits and daily counters remain in force."});
+      const profileForms=[];
+      for(const [id,profile] of Object.entries(studyConfig.profiles)){
+        const row=homepage.createEl("details",{cls:"srs-profile"});row.createEl("summary",{text:profile.name||id});
+        row.createEl("p",{text:`Train on desktop: uv run python migrate.py train --profile ${id} --apply`});
+        const fields={};profileForms.push(row);
+        for(const [key,label,value,type] of [["name","Name",profile.name,"text"],["desired_retention","Desired retention (0–1)",profile.settings.desired_retention,"number"],
+          ["new_cards_per_day","New cards per day",profile.settings.new_cards_per_day,"number"],["reviews_per_day","Reviews per day",profile.reviews_per_day,"number"],
+          ["learning_steps","Learning steps in minutes",profile.settings.learning_steps.join(", "),"text"],["relearning_steps","Relearning steps in minutes",profile.settings.relearning_steps.join(", "),"text"]]){
+          const labelEl=row.createEl("label",{text:label});fields[key]=labelEl.createEl("input",{type,value:String(value),attr:{"aria-label":`${profile.name||id}: ${label}`}});
+          fields[key].oninput=()=>{managerDirty=true;for(const other of profileForms)if(other!==row){other.querySelectorAll("input").forEach(e=>e.disabled=true);other.querySelectorAll("button").forEach(e=>e.disabled=true);}notice.textContent="Unsaved profile changes. Save or discard before navigating.";};
+        }
+        const weights=row.createEl("details");weights.createEl("summary",{text:`${profile.settings.weights.length} FSRS parameters`});weights.createEl("pre",{text:JSON.stringify(profile.settings.weights)});
+        row.createEl("button",{text:"Save profile",cls:"mod-cta"}).onclick=async()=>{
+          if(busy)return;busy=true;
+          try{
+            const replacement=JSON.parse(JSON.stringify(studyConfig)),next=replacement.profiles[id];
+            next.name=fields.name.value.trim()||id;next.reviews_per_day=Number(fields.reviews_per_day.value);
+            for(const key of ["desired_retention","new_cards_per_day"])next.settings[key]=Number(fields[key].value);
+            for(const key of ["learning_steps","relearning_steps"])next.settings[key]=fields[key].value.trim()?fields[key].value.split(",").map(x=>Number(x.trim())):[];
+            validateStudy(replacement);
+            await commitStudy(replacement);
+            managerDirty=false;await draw();notice.textContent="Profile saved. Existing due dates are preserved.";
+          }catch(e){message(e);}finally{busy=false;}
+        };
+        row.createEl("button",{text:"Discard profile changes"}).onclick=()=>{managerDirty=false;guardedDraw();};
+      }
+    }
+    async function commitStudy(replacement){
+      validateStudy(replacement);
+      await withStoreLock(identity,async()=>{
+        const file=api.vault.getAbstractFileByPath(`${root}/study.json`);
+        const update=text=>{if(canonical(JSON.parse(text))!==studyKey)throw Error("Study configuration changed; discard changes, Refresh and retry");return JSON.stringify(replacement,null,2)+"\n";};
+        if(api.vault.process)await api.vault.process(file,update);
+        else await api.vault.modify(file,update(await api.vault.read(file)));
+      });
+    }
+    function showDeckEditor(){
+      const previous=editingDeckId && studyConfig.decks[editingDeckId];
+      homepage.createEl("h2",{text:previous?"Edit study deck":"New study deck"});
+      homepage.createEl("p",{text:"A study deck selects existing cards. It does not create cards or change their schedules. Parent decks also include their children's selections."});
+      const form=homepage.createDiv({cls:"srs-card-editor"});
+      const name=form.createEl("label",{text:"Name"}).createEl("input",{type:"text",value:previous?.name||"",attr:{"aria-label":"Deck name"}});
+      const parent=form.createEl("label",{text:"Parent deck"}).createEl("select",{attr:{"aria-label":"Parent deck"}});
+      parent.createEl("option",{value:"",text:"None"});
+      for(const [id,deck] of Object.entries(studyConfig.decks))if(id!==editingDeckId)parent.createEl("option",{value:id,text:deck.name});parent.value=previous?.parent_id||"";
+      const mode=form.createEl("label",{text:"Select cards using"}).createEl("select",{attr:{"aria-label":"Deck filter mode"}});
+      if(previous)mode.createEl("option",{value:"existing",text:"Keep existing filter"});mode.createEl("option",{value:"sources",text:"Source paths, templates and tags"});mode.value=previous?"existing":"sources";
+      const inputs={};
+      for(const [key,title,placeholder] of [["paths","Source paths","wiki/biology, data/words.csv"],["groups","Source rule names","example-notes"],["templates","Template keys","recognition"],["tags","Required tags","extra-practice"]]){
+        const label=form.createEl("label",{text:title});inputs[key]=label.createEl("input",{type:"text",value:(previous?.filter[key]||[]).join(", "),attr:{placeholder,"aria-label":`Deck ${title.toLowerCase()}`}});
+        inputs[key].disabled=mode.value==="existing";
+      }
+      form.createEl("p",{text:"Separate alternatives with commas. All listed tags are required. Blank fields match all cards. Choose source filters to replace the existing filter.",cls:"srs-muted"});
+      for(const control of [name,parent,mode,...Object.values(inputs)]){
+        const change=()=>{managerDirty=true;notice.textContent="Unsaved deck changes.";for(const field of Object.values(inputs))field.disabled=mode.value==="existing";};
+        if(control===parent||control===mode)control.onchange=change;else control.oninput=change;
+      }
+      form.createEl("button",{text:"Save deck",cls:"mod-cta"}).onclick=async()=>{
+        if(busy)return;busy=true;
+        try{
+          if(!name.value.trim())throw Error("Give the deck a name");
+          const replacement=JSON.parse(JSON.stringify(studyConfig)),id=editingDeckId||name.value.trim().toLocaleLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")||crypto.randomUUID();
+          if(!editingDeckId && replacement.decks[id])throw Error("A deck with that ID already exists; choose another name");
+          const filter=mode.value==="existing"?previous.filter:Object.fromEntries(Object.entries(inputs).map(([key,field])=>[key,field.value.split(",").map(x=>x.trim()).filter(Boolean)]).filter(([,values])=>values.length));
+          replacement.decks[id]={name:name.value.trim(),parent_id:parent.value||null,filter};
+          await commitStudy(replacement);managerDirty=false;panel="";reviewing=false;selectedDeck=null;await draw();notice.textContent="Study deck saved.";
+        }catch(e){message(e);}finally{busy=false;}
+      };
+      form.createEl("button",{text:"Discard deck changes"}).onclick=()=>{managerDirty=false;panel="";guardedDraw();};
+    }
     async function saveCardSettings(card,changes) {
       if(busy)return;
-      if(!Object.keys(changes).length){notice.textContent="No settings changed.";return;}
+      if(!Object.keys(changes).length){managerDirty=false;notice.textContent="No settings changed.";return;}
       busy=true;homepage.querySelectorAll("button").forEach(button=>button.disabled=true);
       try {
         await withStoreLock(identity,async()=>{
@@ -259,27 +425,39 @@
     async function draw() {
       if(disposed)return;
       clearCard();counts.empty();notice.textContent="";
-      if((await json(`${dataRoot}/manifest.json`)).revision!==manifest.revision)throw Error("Card catalog changed; reopen this view");
-      config=await json(`${root}/config.json`);configKey=canonical(config);
+      home.setAttribute("aria-pressed",String(!panel && !managing && !reviewing));
+      profilesButton.setAttribute("aria-pressed",String(panel==="profiles"));
+      sourcesButton.setAttribute("aria-pressed",String(panel==="sources"));
+      manage.setAttribute("aria-pressed",String(managing));
+      const freshManifest=await json(`${dataRoot}/manifest.json`);
+      if(freshManifest.import_id!==baseManifest.import_id)throw Error("Imported baseline changed; reopen this view");
+      if(freshManifest.revision!==baseManifest.revision){await loadCatalog(freshManifest);resolvedCards=null;}
+      const studyText=await store.read(`${root}/study.json`);
+      studyConfig=studyText===null?null:validateStudy(JSON.parse(studyText));studyKey=canonical(studyConfig);
+      manifest=studyConfig?studyRuntimeManifest(baseManifest,studyConfig):baseManifest;
+      config=await json(`${root}/config.json`);configKey=canonical({templates:config,study:studyConfig});
       const snapshot=await withStoreLock(identity,async()=>{await syncIndex();return {latest:await index.latest(),activity:await index.activityToday(Date.now()),settings:await index.cardSettings()};});
-      const available=(await readSources()).map(card=>({...card,card_settings:snapshot.settings.get(card.id)||{}}));states=new Map();
+      const available=(await readSources()).map(card=>{
+        const value={...card,card_settings:snapshot.settings.get(card.id)||{}};
+        if(studyConfig)try{studyProfileId(value,studyConfig,manifest);}catch(e){value.content_error=e.message;}
+        return value;
+      });states=new Map();
       for(const card of available) {
         const projection=card.baseline || {state:card.queue===0?State.New:card.card_type===3?State.Relearning:card.queue===2?State.Review:State.Learning,due:card.due_ms,queue:card.queue,anki_due:card.anki_due};
         states.set(card.id,current(card,projection,snapshot.latest.get(card.id)));
       }
+      if(panel){showConfiguration(panel);return;}
       if(managing){showCardManager(available);return;}
-      const queue=reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value,undefined,selectedDeck,skipped);
+      const queue=reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value,undefined,studyConfig?null:selectedDeck,skipped,
+        studyConfig && selectedDeck ? c=>studyDeckMatches(c,selectedDeck,studyConfig,manifest):null);
       const errors=contentProblems(available).length;
       if(!reviewing && manifest.scheduling) {
-        const build=(nodes,container)=>{for(const n of nodes) {
-          const details=container.createEl("details"),summary=details.createEl("summary");
-          summary.createEl("span",{text:n.name.split("::").at(-1)+" · "});showCounts(summary,n);
-          const open=summary.createEl("button",{text:"Review"});
-          open.onclick=e=>{e.preventDefault();selectedDeck=n.id;reviewing=true;guardedDraw();};
-          build(n.children,details);
-        }};build(queue.tree,homepage);showErrors(available);notice.textContent=`${cards.length.toLocaleString()} cards · ${errors.toLocaleString()} content errors`;
+        if(studyConfig)queue.tree=studyDeckTree(available,states,manifest,Date.now(),snapshot.activity,skipped,select.value);
+        showDecks(queue,available);notice.textContent=`${cards.length.toLocaleString()} cards · ${errors.toLocaleString()} content errors`;
         return;
       }
+      context.createEl("h2",{text:studyConfig?.decks[selectedDeck]?.name||manifest.scheduling?.decks[selectedDeck]?.name||select.value||"All decks"});
+      context.createEl("button",{text:"Browse cards"}).onclick=()=>{managerDeck=selectedDeck||"";managerQuery="";managerStatus="all";editedCardId=null;managing=true;guardedDraw();};
       showCounts(counts,{...queue,errors});
       showErrors(available);
       // Session skips do not change states, event logs, or the displayed counts.
@@ -295,7 +473,7 @@
       let options;
       try {options=effectiveSettings(card,manifest);schedulerV2(options);if(!snapshot.latest.has(card.id))states.set(card.id,current(card,await baseline(card)));}
       catch(e){message(e);actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
-      const reveal=actions.createEl("button",{text:"Show answer"});
+      const reveal=actions.createEl("button",{text:"Show answer",cls:"mod-cta"});
       reveal.onclick=()=>{
         if(busy||shown!==card)return;
         try {
@@ -315,7 +493,7 @@
       try {
         const result=await withStoreLock(identity,async()=>{
           if((await json(`${dataRoot}/manifest.json`)).revision!==manifest.revision)throw Error("Catalog changed; reopen the view");
-          if(canonical(await json(`${root}/config.json`))!==configKey)return "Configuration changed. Queue refreshed.";
+          if(canonical({templates:await json(`${root}/config.json`),study:await store.read(`${root}/study.json`).then(t=>t===null?null:JSON.parse(t))})!==configKey)return "Configuration changed. Queue refreshed.";
           await syncIndex();
           if(canonical((await index.cardSettings()).get(card.id)||{})!==canonical(card.card_settings))return "Card settings changed. Queue refreshed.";
           const value=current(card,states.get(card.id).state,await index.get("latest",card.id));
@@ -326,7 +504,7 @@
           const next=nextStateV2(card,value.state,options,manifest,now,rating);
           const schedulerConfigId=await saveSchedulerConfig(store,`${dataRoot}/scheduler-configs`,options);
           const event={format_version:2,kind:"answer",id:crypto.randomUUID(),device_id:deviceId,card_id:card.id,
-            deck_id:card.original_deck_id||card.deck_id,import_id:manifest.import_id,parent:value.parent,
+            deck_id:card.original_deck_id||card.deck_id,...(studyConfig?{profile_id:studyProfileId(card,studyConfig,manifest)}:{}),import_id:manifest.import_id,parent:value.parent,
             review_time_ms:now,duration_ms:Math.max(0,now-started),rating,was_new:value.state.state===State.New,
             was_review:value.state.state===State.Review,scheduler_config_id:schedulerConfigId,state:next};
           validateEvent(event,manifest.import_id);
@@ -336,7 +514,7 @@
       }catch(e){clearCard();message(e);notice.textContent+=" — review paused. Refresh to retry.";}
       finally{busy=false;if(pending){pending=false;scheduleRefresh();}}
     }
-    async function guardedDraw(){if(busy || managing && managerDirty){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
+    async function guardedDraw(){if(busy || managerDirty){pending=true;return;}busy=true;try{await draw();}catch(e){clearCard();message(e);}finally{busy=false;if(pending){pending=false;scheduleRefresh();}}}
     function scheduleRefresh(file,oldPath){
       if(disposed)return;
       if(file){
@@ -346,19 +524,26 @@
       }
       clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);
     }
-    home.onclick=()=>{managing=false;managerDirty=false;reviewing=false;selectedDeck=null;guardedDraw();};
-    manage.onclick=()=>{managing=true;managerDirty=false;guardedDraw();};
-    select.onchange=()=>{managing=false;managerDirty=false;reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
-    refresh.onclick=()=>{if(managing && managerDirty){notice.textContent="Save or close the card settings before refreshing.";return;}cache.clear();sourceGeneration++;guardedDraw();};
+    home.onclick=()=>{if(!leaveEditor())return;panel="";managing=false;managerDirty=false;reviewing=false;selectedDeck=null;guardedDraw();};
+    manage.onclick=()=>{if(!leaveEditor())return;panel="";managing=true;managerDirty=false;guardedDraw();};
+    select.onchange=()=>{if(!leaveEditor()){select.value=activeGroup;return;}activeGroup=select.value;panel="";managing=false;managerDirty=false;reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
+    refresh.onclick=()=>{if(managerDirty){notice.textContent="Save or discard changes before refreshing.";return;}cache.clear();sourceGeneration++;guardedDraw();};
     rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,()=>index.clear());}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
+    profilesButton.onclick=()=>{if(!leaveEditor())return;managing=false;panel="profiles";guardedDraw();};
+    sourcesButton.onclick=()=>{if(!leaveEditor())return;managing=false;panel="sources";guardedDraw();};
+    async function loadCatalog(value){
+      baseManifest=value;
+      const paths=value.partition_count===undefined?value.partitions:Array.from({length:value.partition_count},(_,i)=>`imports/${value.revision}/cards-${String(i).padStart(5,"0")}.json`);
+      cards=[];for(const path of paths)cards.push(...await json(`${dataRoot}/${path}`));
+    }
     try {
       manifest=await json(`${dataRoot}/manifest.json`);if(![1,2].includes(manifest.format_version))throw Error("Unsupported store format");
       if(manifest.partition_count!==undefined && (!Number.isSafeInteger(manifest.partition_count)||manifest.partition_count<0))throw Error("Invalid card partition count");
       const partitions=manifest.partition_count===undefined?manifest.partitions:
         Array.from({length:manifest.partition_count},(_,i)=>`imports/${manifest.revision}/cards-${String(i).padStart(5,"0")}.json`);
-      for(const partition of partitions)cards.push(...await json(`${dataRoot}/${partition}`));
+      await loadCatalog(manifest);
       index=await ReviewIndex.open(identity,manifest.import_id,manifest.timing);if(disposed){index.close();return;}
-      select.createEl("option",{text:"All decks",value:""});
+      select.createEl("option",{text:"All template groups",value:""});
       for(const group of [...new Set(cards.map(c=>c.group).filter(Boolean))].sort())select.createEl("option",{text:group,value:group});
       if(input?.group)select.value=input.group;
       for(const name of ["create","modify","delete","rename"])component.registerEvent(api.vault.on(name,scheduleRefresh));
