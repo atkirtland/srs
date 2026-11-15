@@ -77,6 +77,18 @@
     let timeKey="", nextWake=Infinity;
     let busy = false, disposed = false, refreshTimer, pending = false, selectedDeck = null;
     let reviewing = Boolean(input?.group), activeGroup=input?.group||"";
+    const positionKey=`${identity}:position:${input?.group||""}`;
+    try {
+      const saved=JSON.parse(localStorage.getItem(positionKey)||"null");
+      if(saved&&typeof saved.reviewing==="boolean"){
+        reviewing=saved.reviewing;
+        selectedDeck=typeof saved.deck==="string"?saved.deck:null;
+        activeGroup=typeof saved.group==="string"?saved.group:activeGroup;
+      }
+    }catch{}
+    function savePosition(){
+      try{localStorage.setItem(positionKey,JSON.stringify({reviewing,deck:selectedDeck,group:activeGroup}));}catch{}
+    }
     let deckQuery="", expandedDecks=new Set(), editingDeckId=null;
     let managing=false, managerQuery="", managerStatus="all", managerDeck="", editedCardId=null, managerDirty=false;
     let deviceId = input?.device || localStorage.getItem(`${identity}:device-name`);
@@ -564,6 +576,8 @@
         configKey=nextConfigKey;runtimeLoaded=loaded;runtimeBase=baseManifest;
       }
       catalogDirty=false;
+      if(selectedDeck&&!(studyConfig?.decks[selectedDeck]||(!studyConfig&&manifest.scheduling?.decks[selectedDeck]))){selectedDeck=null;reviewing=false;}
+      savePosition();
       const nextHydrationKey=baseManifest.revision+":"+configKey;
       if(hydrationKey!==nextHydrationKey){cards=baseManifest.note_partition_count===undefined?rawCards:hydrateCatalog(rawCards,noteBindings,studyConfig);hydrationKey=nextHydrationKey;}
       const today=dayNumber(Date.now(),manifest.timing);
@@ -621,6 +635,7 @@
       showCounts(counts,{...queue,errors:schedulingIndex?.counts(selectedDeck,select.value).errors??contentProblems(available).length});showErrors(available);
       if(!card){front.textContent="No cards ready for review in this session.";return;}
       shown=card;started=Date.now();
+      context.createEl("h3",{cls:"srs-card-name",text:card.template?.name||`${card.anki_notetype||card.group||"Card"} · Card ${(card.anki_ordinal??0)+1}`});
       const skip=()=>{skipped.add(card.id);schedulingIndex?.bury(card.id);guardedDraw();};
       actions.createEl("button",{text:"Bury"}).onclick=skip;
       source.createEl("button",{text:"Card settings"}).onclick=()=>openCardSettings(card);
@@ -729,7 +744,7 @@
       index=await ReviewIndex.open(identity,manifest.import_id,manifest.timing);if(disposed){index.close();return;}
       select.createEl("option",{text:"All template groups",value:""});
       for(const group of [...new Set(cards.map(c=>c.group).filter(Boolean))].sort())select.createEl("option",{text:group,value:group});
-      if(input?.group)select.value=input.group;
+      if(activeGroup)select.value=activeGroup;
       for(const name of ["create","modify","delete","rename"])component.registerEvent(api.vault.on(name,scheduleRefresh));
       component.registerEvent(api.metadataCache.on("changed",scheduleRefresh));
       component.registerInterval(setInterval(()=>{indexDirty=true;if(!shown)guardedDraw();},60000));
