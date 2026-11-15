@@ -87,3 +87,11 @@ incrementally; study-day rollover rebuilds the scheduling index. Session buries
 are cleared on reopening. This runtime cache stays in memory and does not survive
 restarting Obsidian. Performance details report `sessionRestores: 1` on reuse,
 with `schedulingBuilds: 0` and `cardPreparations: 0`.
+
+Review indexing saves an intra-file checkpoint after each committed 500-event
+batch. Interrupted views resume from that checkpoint after verifying the saved
+prefix in hashed chunks; changed prefixes/deleted logs still trigger a rebuild.
+Completed-file checkpoints remain compatible. Imported-history database requests
+are batched, and indexing yields between batches so mobile views can respond to
+lifecycle events. The displayed indexing counter counts records processed in the
+current pass, so it restarts on reopening even when earlier work is reused.

@@ -165,7 +165,7 @@
       const force=new Set([...dirty].filter(p=>p.startsWith(`${dataRoot}/reviews/`)));
       const changes=[];
       const result=await index.sync(logFiles(),async f=>{const t=await store.read(f.path);if(t===null)throw Error(`Log disappeared: ${f.path}`);return t;},knownCardIds,{
-        force, readSchedulerConfig:id=>store.read(`${dataRoot}/scheduler-configs/${id}.json`),
+        force, shouldStop:()=>disposed, readSchedulerConfig:id=>store.read(`${dataRoot}/scheduler-configs/${id}.json`),
         onEvents:snapshotCache?batch=>changes.push(...batch):undefined,
         progress:n=>{if(!disposed && n>=500)notice.textContent=`Indexing reviews: ${n.toLocaleString()}…`;}
       });

@@ -2336,6 +2336,30 @@
       }));
       await transaction(this.database, ["seen", "latest", "introduced", "observations", "activity", "card_settings"], "readwrite", async (tx) => {
         const seen = tx.objectStore("seen"), latest = tx.objectStore("latest");
+        // Imported history has no order-dependent state updates. Queue its
+        // requests together instead of paying several database round trips/event.
+        if (records.every(r => r.event.kind === "historical_review" || r.event.kind === "scheduling_baseline")) {
+          const unique=new Map();
+          for(const record of records){
+            const previous=unique.get(record.event.id);
+            if(previous && previous.hash!==record.hash)throw Error(`Conflicting contents for event ${record.event.id}`);
+            unique.set(record.event.id,record);
+          }
+          const rows=[...unique.values()];
+          const previous=await Promise.all(rows.map(r=>request(seen.get(r.event.id))));
+          for(let i=0;i<rows.length;i++)
+            if(previous[i] && previous[i]!==rows[i].hash)throw Error(`Conflicting contents for event ${rows[i].event.id}`);
+          const writes=[];
+          for(let i=0;i<rows.length;i++){
+            const record=rows[i];
+            if(previous[i])continue;
+            writes.push(request(seen.put(record.hash,record.event.id)));
+            if(record.event.kind==="historical_review" && record.event.card_id)
+              writes.push(request(tx.objectStore("observations").put(record.event)));
+          }
+          await Promise.all(writes);
+          return;
+        }
         for (const record of records) {
           const previous = await request(seen.get(record.event.id));
           if (previous && previous !== record.hash) throw Error(`Conflicting contents for event ${record.event.id}`);
@@ -2366,10 +2390,10 @@
     }
     /** Fingerprint unchanged files; parse only appended lines when prefix matches.
      * A replaced/deleted log triggers a full rebuild so no stale states survive.
-     * Checkpoints commit only after every event in that file has been indexed.
+     * Partial checkpoints follow committed batches, allowing interrupted resumes.
      */
     async sync(files, read, knownCards, { progress = () => {
-    }, force = /* @__PURE__ */ new Set(), readSchedulerConfig, onEvents } = {}) {
+    }, force = /* @__PURE__ */ new Set(), readSchedulerConfig, onEvents, shouldStop = () => false } = {}) {
       const configs=new Map();
       const cached = await transaction(this.database, ["files"], "readonly", async (tx) => {
         const store = tx.objectStore("files");
@@ -2385,20 +2409,32 @@
         cached.clear();
       }
       for (const file of files) {
+        if(shouldStop())throw Error("Review indexing paused; progress saved");
         const old = cached.get(file.path);
-        if (old && file.stat && old.mtime === file.stat.mtime && old.size === file.stat.size && !force.has(file.path)) continue;
+        if (old && old.complete !== false && file.stat && old.mtime === file.stat.mtime && old.size === file.stat.size && !force.has(file.path)) continue;
         const text = await read(file);
         readFiles++;
         if (text && !text.endsWith("\n")) throw Error(`Incomplete final review record in ${file.path}`);
         let start = 0;
         if (old) {
-          if (text.length >= old.length && await hash(text.slice(0, old.length)) === old.hash) start = old.length;
+          let matches=text.length>=old.length;
+          if(matches && old.complete===false){
+            let offset=0;
+            for(const chunk of old.chunks){
+              if(await hash(text.slice(offset,chunk.end))!==chunk.hash){matches=false;break;}
+              offset=chunk.end;
+            }
+            if(offset!==old.length)matches=false;
+          } else if(matches)matches=await hash(text.slice(0,old.length))===old.hash;
+          if(matches)start=old.length;
           else {
             await this.clear();
-            const result = await this.sync(files, read, knownCards, { progress, readSchedulerConfig, onEvents });
+            const result = await this.sync(files, read, knownCards, { progress, readSchedulerConfig, onEvents, shouldStop });
             return { ...result, rebuilt: true };
           }
         }
+        let checkpointStart=start;
+        const chunks=old ? old.complete===false ? [...old.chunks] : [{end:old.length,hash:old.hash}] : [];
         let batch = [];
         while (start < text.length) {
           const end = text.indexOf("\n", start);
@@ -2412,10 +2448,16 @@
           }
           parsed++;
           if (batch.length === 500) {
+            if(shouldStop())throw Error("Review indexing paused; progress saved");
             await this.ingest(batch, knownCards, {readSchedulerConfig,configs});
+            chunks.push({end:start,hash:await hash(text.slice(checkpointStart,start))});
+            await this.put("files",file.path,{complete:false,length:start,chunks});
+            checkpointStart=start;
             onEvents?.(batch);
             batch = [];
             progress(parsed, file.path);
+            // Let mobile WebViews process lifecycle/UI events between batches.
+            await new Promise(resolve=>setTimeout(resolve,0));
           }
         }
         if (batch.length){await this.ingest(batch, knownCards, {readSchedulerConfig,configs});onEvents?.(batch);}

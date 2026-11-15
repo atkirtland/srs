@@ -908,3 +908,44 @@ test('reused scheduling index advances learning availability and clears session 
  assert.deepEqual(index.queue().cards.map(c=>c.id),fresh.queue().cards.map(c=>c.id));
  assert.equal(index.advance(now+86400000),false,'rollover requires a rebuild');
 });
+
+function importedHistory(count){
+  return Array.from({length:count},(_,i)=>({format_version:2,kind:'historical_review',id:`anki:col:${i+1}`,collection_key:'col',anki_revlog_id:String(i+1),device_id:device,card_id:'card-0',review_time_ms:i+1,original_review:{id:i+1}}));
+}
+test('interrupted review indexing resumes inside a log after reopening without replaying committed batches',async()=>{
+  const name=`resume-${crypto.randomUUID()}`,events=importedHistory(1200),text=events.map(e=>JSON.stringify(e)+'\n').join('');
+  const files=[{path:'history',stat:{mtime:1,size:text.length}}],known=new Set(['card-0']);
+  let index=await SRS.ReviewIndex.open(name,'import',timing,indexedDB);
+  await assert.rejects(()=>index.sync(files,()=>text,known,{progress:n=>{if(n===500)throw Error('view reloaded');}}),/view reloaded/);
+  assert.equal((await index.historyFor('card-0')).length,500);
+  assert.equal((await index.get('files','history')).complete,false);
+  index.close();index=await SRS.ReviewIndex.open(name,'import',timing,indexedDB);
+  const resumed=await index.sync(files,()=>text,known);
+  assert.equal(resumed.parsed,700);
+  assert.equal((await index.historyFor('card-0')).length,1200);
+  assert.equal((await index.sync(files,()=>assert.fail('unchanged file read'),known)).readFiles,0);
+  index.close();
+});
+test('partial review checkpoints detect rewritten prefixes and retain full rebuild behavior',async()=>{
+  const index=await SRS.ReviewIndex.open(`rewrite-${crypto.randomUUID()}`,'import',timing,indexedDB);
+  const events=importedHistory(600),known=new Set(['card-0']);
+  let text=events.map(e=>JSON.stringify(e)+'\n').join('');
+  const files=()=>[{path:'history',stat:{mtime:1,size:text.length}}];
+  await assert.rejects(()=>index.sync(files(),()=>text,known,{progress:()=>{throw Error('interrupted');}}),/interrupted/);
+  events[0].review_time_ms=99;text=events.map(e=>JSON.stringify(e)+'\n').join('');
+  const result=await index.sync(files(),()=>text,known);
+  assert.equal(result.rebuilt,true);assert.equal(result.parsed,600);
+  assert.equal((await index.historyFor('card-0')).find(e=>e.id===events[0].id).review_time_ms,99);
+  index.close();
+});
+test('bulk historical indexing still rejects conflicts atomically and preserves deduplication',async()=>{
+  const index=await SRS.ReviewIndex.open(`bulk-${crypto.randomUUID()}`,'import',timing,indexedDB),known=new Set(['card-0']);
+  const [one,two]=importedHistory(2),different={...one,review_time_ms:99};
+  await assert.rejects(()=>index.ingest([one,different],known),/Conflicting/);
+  assert.equal((await index.historyFor('card-0')).length,0);
+  await index.ingest([one,one],known);
+  assert.equal((await index.historyFor('card-0')).length,1);
+  await assert.rejects(()=>index.ingest([two,different],known),/Conflicting/);
+  assert.equal((await index.historyFor('card-0')).length,1);
+  index.close();
+});
