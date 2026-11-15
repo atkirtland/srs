@@ -15,9 +15,17 @@
     const deviceSelect = toolBody.createEl("select",{attr:{"aria-label":"This device"}});
     const refresh = toolBody.createEl("button",{text:"Refresh"});
     const rebuild = toolBody.createEl("button",{text:"Rebuild local index"});
-    const context = host.createDiv({cls:"srs-context"});
-    const counts = host.createDiv({cls:"srs-counts"}), homepage = host.createDiv(), front = host.createDiv({cls:"srs-front"}), back = host.createDiv({cls:"srs-back"});
-    const actions = host.createDiv({cls:"srs-actions"}), source = host.createDiv({cls:"srs-source"});
+    const content = host.createDiv({cls:"srs-content"});
+    const context = content.createDiv({cls:"srs-context"});
+    const counts = content.createDiv({cls:"srs-counts"}), homepage = content.createDiv(), front = content.createDiv({cls:"srs-front"}), back = content.createDiv({cls:"srs-back"});
+    const actions = host.createDiv({cls:"srs-actions"}), source = content.createDiv({cls:"srs-source"});
+    function sizeReviewer(){
+      const top=Math.max(0,host.getBoundingClientRect?.().top??0);
+      host.style?.setProperty("--srs-top",`${top}px`);
+    }
+    globalThis.addEventListener?.("resize",sizeReviewer);
+    globalThis.visualViewport?.addEventListener("resize",sizeReviewer);
+    component.register(()=>{globalThis.removeEventListener?.("resize",sizeReviewer);globalThis.visualViewport?.removeEventListener("resize",sizeReviewer);});
     const dirty = new Set(), cache = new Map(), skipped = new Set();
     let taxonomy;
     const contentCache=new Map(), metadataCache=new Map(), metrics=[];
@@ -176,8 +184,11 @@
       if(metadataOnly)return {...card,source:{...card.source,path},validation:"unchecked"};
       const fields=fieldsFromNote(card,note);
       const special={...fields,Deck:manifest.scheduling?.decks[card.deck_id]?.name||"",Subdeck:manifest.scheduling?.decks[card.deck_id]?.name.split("::").at(-1)||"",Card:card.template.key,Type:card.anki_notetype,Tags:Array.isArray(metadata.tags)?metadata.tags.join(" "):String(metadata.tags||"")};
-      const frontText=renderV2(card.template.front,special,card.anki_ordinal,false);
-      const backText=renderV2(card.template.back,{...special,FrontSide:frontText},card.anki_ordinal,true);
+      const images=text=>resolveImageEmbeds(text,path,
+        (target,source)=>api.metadataCache.getFirstLinkpathDest(target,source),
+        file=>api.vault.getResourcePath(file));
+      const frontText=images(renderV2(card.template.front,special,card.anki_ordinal,false));
+      const backText=images(renderV2(card.template.back,{...special,FrontSide:frontText},card.anki_ordinal,true));
       if(!frontText.trim() || !backText.trim())throw Error("Template produced an empty question or answer");
       return {...card,source:{...card.source,path},fields,frontText,backText};
     }
@@ -500,6 +511,9 @@
     async function draw() {
       if(disposed)return;
       clearCard();counts.empty();notice.textContent="";
+      host.setAttribute("data-reviewing",String(reviewing&&!managing&&!panel));
+      sizeReviewer();
+      content.scrollTop=0;
       home.setAttribute("aria-pressed",String(!panel && !managing && !reviewing));
       profilesButton.setAttribute("aria-pressed",String(panel==="profiles"));
       sourcesButton.setAttribute("aria-pressed",String(panel==="sources"));

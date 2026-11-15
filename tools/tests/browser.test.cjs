@@ -580,3 +580,16 @@ test('catalog reads are limited to four, preserve partition order and reject inc
   await assert.rejects(SRS.readCatalogPartitions(paths,async i=>{if(i===2)throw Error('missing partition');return [i];}),/missing partition/);
   assert.deepEqual(await SRS.readCatalogPartitions([],async()=>assert.fail('unexpected read')),[]);
 });
+
+ test('vault image embeds render inside HTML templates using source-relative Obsidian resolution',()=>{
+  const source='wiki/places/jp/regions/Okinawa.md',image={path:'attachments/japanese-region-maps/Okinawa.png'};
+  const resolve=(target,from)=>{assert.equal(target,image.path);assert.equal(from,source);return image;};
+  const fields={Map:SRS.transformField('image','![[attachments/japanese-region-maps/Okinawa.png]]',{})};
+  const front=SRS.renderV2('<div class="map">{{Map}}</div>',fields);
+  assert.equal(SRS.resolveImageEmbeds(front,source,resolve,()=> 'app://vault/Okinawa.png?a=1&b=2'),
+    '<div class="map"><img src="app://vault/Okinawa.png?a=1&amp;b=2" alt="Okinawa.png"></div>');
+  assert.equal(SRS.resolveImageEmbeds('![[photo.png|200x100]]',source,()=>image,()=> 'vault:image'),
+    '<img src="vault:image" alt="photo.png" width="200" height="100">');
+  assert.equal(SRS.resolveImageEmbeds('![[sound.mp3]] ![[note#block]]',source,()=>{throw Error('unexpected lookup');}), '![[sound.mp3]] ![[note#block]]');
+  assert.throws(()=>SRS.resolveImageEmbeds('![[missing.png]]',source,()=>null),/Missing vault image: missing.png/);
+ });

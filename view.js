@@ -2500,6 +2500,19 @@ function renderV2(template, fields, ordinal = 0, answer = false) {
   if (stack.length !== 1 || /{{|}}/.test(template.replace(token, ""))) throw Error("Unsupported template syntax");
   return output + template.slice(offset);
 }
+// Markdown renderers do not expand wikilink embeds inside HTML template blocks.
+function resolveImageEmbeds(content, sourcePath, resolveFile, resourcePath) {
+  const escape = value => String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return content.replace(/!\[\[([^\]\n]+)\]\]/g, (embed, reference) => {
+    const [target, size] = reference.split("|");
+    const path = target.split("#")[0];
+    if (!/\.(?:avif|bmp|gif|ico|jpe?g|png|svg|webp)$/i.test(path)) return embed;
+    const file = resolveFile(path, sourcePath);
+    if (!file) throw Error(`Missing vault image: ${path}`);
+    const dimensions = size?.match(/^(\d+)(?:x(\d+))?$/);
+    return `<img src="${escape(resourcePath(file))}" alt="${escape(path.split("/").at(-1))}"${dimensions ? ` width="${dimensions[1]}"${dimensions[2] ? ` height="${dimensions[2]}"` : ""}` : ""}>`;
+  });
+}
 function transformField(name, value, note) {
   const text = v => v == null ? "" : String(v).trim();
   const list = v => Array.isArray(v) ? v : [v];
@@ -2952,7 +2965,7 @@ function sourceBlocks(text) {
 }
 
   if (globalThis.__SRS_TEST__) {
-    globalThis.SRS = {readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, schedulerV2, effectiveSettings, renderV2, transformField, fieldsFromNote,
+    globalThis.SRS = {readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, schedulerV2, effectiveSettings, renderV2, resolveImageEmbeds, transformField, fieldsFromNote,
       deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
       ReviewIndex, appendReview, validateEvent, saveSchedulerConfig, verifySchedulerConfig, parseCSV, indexRows, configuredCards, initialState};
     return;
@@ -2974,9 +2987,17 @@ function sourceBlocks(text) {
     const deviceSelect = toolBody.createEl("select",{attr:{"aria-label":"This device"}});
     const refresh = toolBody.createEl("button",{text:"Refresh"});
     const rebuild = toolBody.createEl("button",{text:"Rebuild local index"});
-    const context = host.createDiv({cls:"srs-context"});
-    const counts = host.createDiv({cls:"srs-counts"}), homepage = host.createDiv(), front = host.createDiv({cls:"srs-front"}), back = host.createDiv({cls:"srs-back"});
-    const actions = host.createDiv({cls:"srs-actions"}), source = host.createDiv({cls:"srs-source"});
+    const content = host.createDiv({cls:"srs-content"});
+    const context = content.createDiv({cls:"srs-context"});
+    const counts = content.createDiv({cls:"srs-counts"}), homepage = content.createDiv(), front = content.createDiv({cls:"srs-front"}), back = content.createDiv({cls:"srs-back"});
+    const actions = host.createDiv({cls:"srs-actions"}), source = content.createDiv({cls:"srs-source"});
+    function sizeReviewer(){
+      const top=Math.max(0,host.getBoundingClientRect?.().top??0);
+      host.style?.setProperty("--srs-top",`${top}px`);
+    }
+    globalThis.addEventListener?.("resize",sizeReviewer);
+    globalThis.visualViewport?.addEventListener("resize",sizeReviewer);
+    component.register(()=>{globalThis.removeEventListener?.("resize",sizeReviewer);globalThis.visualViewport?.removeEventListener("resize",sizeReviewer);});
     const dirty = new Set(), cache = new Map(), skipped = new Set();
     let taxonomy;
     const contentCache=new Map(), metadataCache=new Map(), metrics=[];
@@ -3135,8 +3156,11 @@ function sourceBlocks(text) {
       if(metadataOnly)return {...card,source:{...card.source,path},validation:"unchecked"};
       const fields=fieldsFromNote(card,note);
       const special={...fields,Deck:manifest.scheduling?.decks[card.deck_id]?.name||"",Subdeck:manifest.scheduling?.decks[card.deck_id]?.name.split("::").at(-1)||"",Card:card.template.key,Type:card.anki_notetype,Tags:Array.isArray(metadata.tags)?metadata.tags.join(" "):String(metadata.tags||"")};
-      const frontText=renderV2(card.template.front,special,card.anki_ordinal,false);
-      const backText=renderV2(card.template.back,{...special,FrontSide:frontText},card.anki_ordinal,true);
+      const images=text=>resolveImageEmbeds(text,path,
+        (target,source)=>api.metadataCache.getFirstLinkpathDest(target,source),
+        file=>api.vault.getResourcePath(file));
+      const frontText=images(renderV2(card.template.front,special,card.anki_ordinal,false));
+      const backText=images(renderV2(card.template.back,{...special,FrontSide:frontText},card.anki_ordinal,true));
       if(!frontText.trim() || !backText.trim())throw Error("Template produced an empty question or answer");
       return {...card,source:{...card.source,path},fields,frontText,backText};
     }
@@ -3459,6 +3483,9 @@ function sourceBlocks(text) {
     async function draw() {
       if(disposed)return;
       clearCard();counts.empty();notice.textContent="";
+      host.setAttribute("data-reviewing",String(reviewing&&!managing&&!panel));
+      sizeReviewer();
+      content.scrollTop=0;
       home.setAttribute("aria-pressed",String(!panel && !managing && !reviewing));
       profilesButton.setAttribute("aria-pressed",String(panel==="profiles"));
       sourcesButton.setAttribute("aria-pressed",String(panel==="sources"));

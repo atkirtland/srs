@@ -75,6 +75,19 @@ function renderV2(template, fields, ordinal = 0, answer = false) {
   if (stack.length !== 1 || /{{|}}/.test(template.replace(token, ""))) throw Error("Unsupported template syntax");
   return output + template.slice(offset);
 }
+// Markdown renderers do not expand wikilink embeds inside HTML template blocks.
+function resolveImageEmbeds(content, sourcePath, resolveFile, resourcePath) {
+  const escape = value => String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return content.replace(/!\[\[([^\]\n]+)\]\]/g, (embed, reference) => {
+    const [target, size] = reference.split("|");
+    const path = target.split("#")[0];
+    if (!/\.(?:avif|bmp|gif|ico|jpe?g|png|svg|webp)$/i.test(path)) return embed;
+    const file = resolveFile(path, sourcePath);
+    if (!file) throw Error(`Missing vault image: ${path}`);
+    const dimensions = size?.match(/^(\d+)(?:x(\d+))?$/);
+    return `<img src="${escape(resourcePath(file))}" alt="${escape(path.split("/").at(-1))}"${dimensions ? ` width="${dimensions[1]}"${dimensions[2] ? ` height="${dimensions[2]}"` : ""}` : ""}>`;
+  });
+}
 function transformField(name, value, note) {
   const text = v => v == null ? "" : String(v).trim();
   const list = v => Array.isArray(v) ? v : [v];

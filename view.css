@@ -44,7 +44,7 @@
 .ankobs-srs .srs-card-editor button { margin: .3rem .4rem .3rem 0; white-space: normal; height: auto; }
 .ankobs-srs .srs-card-preview { border-block: 1px solid var(--srs-border); padding: .4rem 0 1rem; margin: .8rem 0; max-height: 45vh; overflow: auto; }
 .ankobs-srs .srs-card-preview h5 { color: var(--text-muted); margin: .8rem 0 .5rem; }
-.ankobs-srs .srs-card-preview img, .ankobs-srs .srs-front img, .ankobs-srs .srs-back img { max-width: 100%; }
+.ankobs-srs .srs-card-preview img, .ankobs-srs .srs-front img, .ankobs-srs .srs-back img { max-width: min(100%, 40rem); max-height: 40vh; max-height: 40dvh; width: auto; height: auto; object-fit: contain; vertical-align: middle; }
 .ankobs-srs .srs-card-metadata { margin: .8rem 0; font-size: .85em; }
 .ankobs-srs .srs-empty { color: var(--text-muted); padding: 1rem; }
 .ankobs-srs .srs-context { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: .5rem; }
@@ -66,3 +66,30 @@
 .ankobs-srs .srs-profile label { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: .5rem; margin: .8rem 0; }
 .ankobs-srs .srs-profile pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .ankobs-srs .srs-profile button { margin: .3rem .5rem .3rem 0; }
+
+/* Keep review actions outside the scrolling card, within this Obsidian pane. */
+.ankobs-srs[data-reviewing="true"] {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - var(--srs-top, 6rem) - 1rem);
+  height: calc(100dvh - var(--srs-top, 6rem) - 1rem);
+  min-height: 0;
+  overflow: hidden;
+}
+.ankobs-srs[data-reviewing="true"] > .srs-toolbar,
+.ankobs-srs[data-reviewing="true"] > .srs-notice { flex-shrink: 0; }
+.ankobs-srs[data-reviewing="true"] > .srs-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: .25rem .5rem;
+}
+.ankobs-srs[data-reviewing="true"] > .srs-actions {
+  flex-shrink: 0;
+  margin-top: .5rem;
+  padding: .75rem .5rem max(.75rem, env(safe-area-inset-bottom));
+  border-top: 1px solid var(--srs-border);
+  background: var(--background-primary);
+}
+.ankobs-srs[data-reviewing="true"] > .srs-actions button { flex: 1 1 6rem; height: auto; white-space: normal; }
