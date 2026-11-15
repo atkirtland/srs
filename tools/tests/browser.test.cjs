@@ -686,3 +686,37 @@ test('block topic filters partition nested Obsidian and Anki tags',()=>{
     filters.forEach(f=>SRS.validateStudyFilter(f));
   }
 });
+
+test('template JavaScript requires explicit opt-in and runs on the displayed side',()=>{
+  const template='<div id="sentence">{{Sentence}}</div><script>document.getElementById("sentence").textContent += "!";</script>';
+  assert.throws(()=>SRS.renderV2(template,{Sentence:'hello'}),/JavaScript/);
+  assert.throws(()=>SRS.renderV2(template,{Sentence:'hello'},0,false,{allow_javascript:'true'}),/JavaScript/);
+  const rendered=SRS.renderV2(template,{Sentence:'hello'},0,false,{allow_javascript:true});
+  assert.throws(()=>SRS.templateScriptParts(rendered),/disabled/);
+  const {html,scripts}=SRS.templateScriptParts(rendered,true);
+  assert.equal(html,'<div id="sentence">hello</div>');
+  const node={id:'sentence',textContent:'hello'};
+  const side={querySelectorAll:()=>[node]};
+  SRS.runTemplateScripts(side,scripts,{});
+  assert.equal(node.textContent,'hello!');
+  assert.throws(()=>SRS.templateScriptParts('<script src="a.js"></script>',true),/External/);
+});
+
+test('Chinese template highlighting handles blank and quoted target words',()=>{
+  const template={front:`<div id="exampleSentence">{{Example Sentence}}</div>
+<span class="srs-highlight-word" hidden>{{Word}}</span>
+<script>
+const word = document.querySelector('.srs-highlight-word').textContent;
+const sentence = document.getElementById('exampleSentence');
+if (word && sentence) sentence.textContent = sentence.textContent.replace(word, () => '（' + word + '）');
+</script>`};
+  for(const word of ['', '他', '"$&']) {
+    const sentence={id:'exampleSentence',textContent:`${word}說${word}`};
+    const target={textContent:word};
+    const fields={Word:word,'Example Sentence':sentence.textContent,Deck:'',Tags:''};
+    const {scripts}=SRS.templateScriptParts(SRS.renderV2(template.front,fields,0,false,{allow_javascript:true}),true);
+    const side={querySelector:()=>target,querySelectorAll:()=>[sentence]};
+    SRS.runTemplateScripts(side,scripts,{});
+    assert.equal(sentence.textContent,word?`（${word}）說${word}`:'說');
+  }
+});

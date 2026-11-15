@@ -52,7 +52,7 @@ def documents(config, templates):
         bindings[key] = {k: rule[k] for k in ('templates', 'profile')}
     return {
         'sources.json': dict(format_version=1, rules=sources),
-        'cards.json': dict(format_version=1, groups=templates['groups'], rules=bindings),
+        'cards.json': dict(format_version=1, **({'allow_javascript': templates['allow_javascript']} if 'allow_javascript' in templates else {}), groups=templates['groups'], rules=bindings),
         'decks.json': dict(format_version=1, decks=config['decks']),
         'profile-rules.json': dict(format_version=1, rules=config.get('profile_rules', [])),
     }

@@ -43,8 +43,8 @@ function schedulerV2(options) {
   };
   return engine;
 }
-function renderV2(template, fields, ordinal = 0, answer = false) {
-  if (/<script\b|\bon\w+\s*=|javascript:/i.test(template)) throw Error("Unsupported template operation: JavaScript");
+function renderV2(template, fields, ordinal = 0, answer = false, options = {}) {
+  if (options.allow_javascript !== true && /<script\b|\bon\w+\s*=|javascript:/i.test(template)) throw Error("Unsupported template operation: JavaScript (enable allow_javascript in config/cards.json)");
   const token = /{{([#/^]?)([^{}]+)}}/g;
   const stack = [{visible: true, name: null}];
   let output = "", offset = 0;
@@ -74,6 +74,27 @@ function renderV2(template, fields, ordinal = 0, answer = false) {
   }
   if (stack.length !== 1 || /{{|}}/.test(template.replace(token, ""))) throw Error("Unsupported template syntax");
   return output + template.slice(offset);
+}
+function templateScriptParts(content, allowJavascript = false) {
+  const scripts=[];
+  const html=content.replace(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi,(_,attributes,code)=>{
+    if(allowJavascript!==true)throw Error("Template JavaScript is disabled");
+    if(/\bsrc\s*=/i.test(attributes))throw Error("External template scripts are unsupported; use inline JavaScript");
+    if(/\btype\s*=\s*["']?module\b/i.test(attributes))throw Error("Module template scripts are unsupported; use inline JavaScript");
+    scripts.push(code);return "";
+  });
+  return {html,scripts};
+}
+function runTemplateScripts(container, scripts, documentRoot = globalThis.document) {
+  if(!scripts.length)return;
+  // Scope common Anki DOM lookups to the displayed side, including duplicate
+  // question/answer IDs. This is a convenience, not an execution sandbox.
+  const scopedDocument=new Proxy(documentRoot,{get(target,key){
+    if(key==="getElementById")return id=>[...container.querySelectorAll("[id]")].find(el=>el.id===id)||null;
+    if(key==="querySelector"||key==="querySelectorAll")return container[key].bind(container);
+    const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+  }});
+  for(const code of scripts)new Function("document",code).call(container,scopedDocument);
 }
 // Markdown renderers do not expand wikilink embeds inside HTML template blocks.
 function resolveImageEmbeds(content, sourcePath, resolveFile, resourcePath) {

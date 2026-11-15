@@ -2473,8 +2473,8 @@ function schedulerV2(options) {
   };
   return engine;
 }
-function renderV2(template, fields, ordinal = 0, answer = false) {
-  if (/<script\b|\bon\w+\s*=|javascript:/i.test(template)) throw Error("Unsupported template operation: JavaScript");
+function renderV2(template, fields, ordinal = 0, answer = false, options = {}) {
+  if (options.allow_javascript !== true && /<script\b|\bon\w+\s*=|javascript:/i.test(template)) throw Error("Unsupported template operation: JavaScript (enable allow_javascript in config/cards.json)");
   const token = /{{([#/^]?)([^{}]+)}}/g;
   const stack = [{visible: true, name: null}];
   let output = "", offset = 0;
@@ -2504,6 +2504,27 @@ function renderV2(template, fields, ordinal = 0, answer = false) {
   }
   if (stack.length !== 1 || /{{|}}/.test(template.replace(token, ""))) throw Error("Unsupported template syntax");
   return output + template.slice(offset);
+}
+function templateScriptParts(content, allowJavascript = false) {
+  const scripts=[];
+  const html=content.replace(/<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi,(_,attributes,code)=>{
+    if(allowJavascript!==true)throw Error("Template JavaScript is disabled");
+    if(/\bsrc\s*=/i.test(attributes))throw Error("External template scripts are unsupported; use inline JavaScript");
+    if(/\btype\s*=\s*["']?module\b/i.test(attributes))throw Error("Module template scripts are unsupported; use inline JavaScript");
+    scripts.push(code);return "";
+  });
+  return {html,scripts};
+}
+function runTemplateScripts(container, scripts, documentRoot = globalThis.document) {
+  if(!scripts.length)return;
+  // Scope common Anki DOM lookups to the displayed side, including duplicate
+  // question/answer IDs. This is a convenience, not an execution sandbox.
+  const scopedDocument=new Proxy(documentRoot,{get(target,key){
+    if(key==="getElementById")return id=>[...container.querySelectorAll("[id]")].find(el=>el.id===id)||null;
+    if(key==="querySelector"||key==="querySelectorAll")return container[key].bind(container);
+    const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+  }});
+  for(const code of scripts)new Function("document",code).call(container,scopedDocument);
 }
 // Markdown renderers do not expand wikilink embeds inside HTML template blocks.
 function resolveImageEmbeds(content, sourcePath, resolveFile, resourcePath) {
@@ -3136,7 +3157,7 @@ class SchedulingIndex {
 }
 
   if (globalThis.__SRS_TEST__) {
-    globalThis.SRS = {SchedulingIndex, SchedulingOrder, readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, schedulerV2, effectiveSettings, renderV2, resolveImageEmbeds, transformField, fieldsFromNote,
+    globalThis.SRS = {SchedulingIndex, SchedulingOrder, readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, schedulerV2, effectiveSettings, renderV2, templateScriptParts, runTemplateScripts, resolveImageEmbeds, transformField, fieldsFromNote,
       deckTree, queueKind, reviewQueueV2, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
       ReviewIndex, appendReview, validateEvent, saveSchedulerConfig, verifySchedulerConfig, parseCSV, indexRows, configuredCards, initialState};
     return;
@@ -3384,8 +3405,9 @@ class SchedulingIndex {
       const images=text=>resolveImageEmbeds(text,path,
         (target,source)=>api.metadataCache.getFirstLinkpathDest(target,source),
         file=>api.vault.getResourcePath(file));
-      const frontText=images(renderV2(card.template.front,special,card.anki_ordinal,false));
-      const backText=images(renderV2(card.template.back,{...special,FrontSide:frontText},card.anki_ordinal,true));
+      const frontText=images(renderV2(card.template.front,special,card.anki_ordinal,false,config));
+      const backText=images(renderV2(card.template.back,{...special,FrontSide:frontText},card.anki_ordinal,true,config));
+      templateScriptParts(frontText,config.allow_javascript);templateScriptParts(backText,config.allow_javascript);
       if(!frontText.trim() || !backText.trim())throw Error("Template produced an empty question or answer");
       return {...card,source:{...card.source,path},fields,frontText,backText};
     }
@@ -3422,6 +3444,12 @@ class SchedulingIndex {
         await index.put("baselines",key,state);
       }
       return state;
+    }
+    function displayCardContent(container,text) {
+      const {html,scripts}=templateScriptParts(text,config.allow_javascript);
+      const side=container.createDiv();
+      dv.el("div",html,{container:side});
+      runTemplateScripts(side,scripts);
     }
     function showCounts(el,n) {
       el.createEl("span",{text:`${n.new ?? n.fresh ?? 0} new`,cls:"srs-new"});
@@ -3527,8 +3555,8 @@ class SchedulingIndex {
         editor.createEl("p",{text:manifest.scheduling?.decks[card.deck_id]?.name||card.group||"",cls:"srs-muted"});
         if(!card.content_error) {
           const preview=editor.createDiv({cls:"srs-card-preview"});
-          preview.createEl("h5",{text:"Question"});dv.el("div",card.frontText,{container:preview});
-          preview.createEl("h5",{text:"Answer"});dv.el("div",card.backText,{container:preview});
+          preview.createEl("h5",{text:"Question"});displayCardContent(preview,card.frontText);
+          preview.createEl("h5",{text:"Answer"});displayCardContent(preview,card.backText);
         }
         const metadata=editor.createEl("details",{cls:"srs-card-metadata"});
         metadata.createEl("summary",{text:"Card details"});
@@ -3802,7 +3830,7 @@ class SchedulingIndex {
       source.createEl("button",{text:"Card settings"}).onclick=()=>{cardMenu.open=false;openCardSettings(card);};
       if(card.source?.path)source.createEl("button",{text:"Open source"}).onclick=()=>{cardMenu.open=false;api.workspace.openLinkText(card.source.path,"","tab");};
       if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
-      dv.el("div",card.frontText,{container:front});
+      displayCardContent(front,card.frontText);
       let options;
       try {options=effectiveSettings(card,manifest);schedulerV2(options);if(!snapshot.latest.has(card.id)){const value=current(card,await baseline(card));states.set(card.id,value);if(!card.baseline)schedulingIndex?.update(card,value);}}
       catch(e){message(e);actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
@@ -3810,7 +3838,7 @@ class SchedulingIndex {
       reveal.onclick=()=>{
         if(busy||shown!==card)return;
         try {
-          dv.el("div",card.backText,{container:back});actions.empty();
+          displayCardContent(back,card.backText);actions.empty();
           if(card.source?.kind==="block" && !String(card.fields?.Back||"").trim()) {
             back.createEl("button",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"","tab");
           }

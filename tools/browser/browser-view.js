@@ -241,8 +241,9 @@
       const images=text=>resolveImageEmbeds(text,path,
         (target,source)=>api.metadataCache.getFirstLinkpathDest(target,source),
         file=>api.vault.getResourcePath(file));
-      const frontText=images(renderV2(card.template.front,special,card.anki_ordinal,false));
-      const backText=images(renderV2(card.template.back,{...special,FrontSide:frontText},card.anki_ordinal,true));
+      const frontText=images(renderV2(card.template.front,special,card.anki_ordinal,false,config));
+      const backText=images(renderV2(card.template.back,{...special,FrontSide:frontText},card.anki_ordinal,true,config));
+      templateScriptParts(frontText,config.allow_javascript);templateScriptParts(backText,config.allow_javascript);
       if(!frontText.trim() || !backText.trim())throw Error("Template produced an empty question or answer");
       return {...card,source:{...card.source,path},fields,frontText,backText};
     }
@@ -279,6 +280,12 @@
         await index.put("baselines",key,state);
       }
       return state;
+    }
+    function displayCardContent(container,text) {
+      const {html,scripts}=templateScriptParts(text,config.allow_javascript);
+      const side=container.createDiv();
+      dv.el("div",html,{container:side});
+      runTemplateScripts(side,scripts);
     }
     function showCounts(el,n) {
       el.createEl("span",{text:`${n.new ?? n.fresh ?? 0} new`,cls:"srs-new"});
@@ -384,8 +391,8 @@
         editor.createEl("p",{text:manifest.scheduling?.decks[card.deck_id]?.name||card.group||"",cls:"srs-muted"});
         if(!card.content_error) {
           const preview=editor.createDiv({cls:"srs-card-preview"});
-          preview.createEl("h5",{text:"Question"});dv.el("div",card.frontText,{container:preview});
-          preview.createEl("h5",{text:"Answer"});dv.el("div",card.backText,{container:preview});
+          preview.createEl("h5",{text:"Question"});displayCardContent(preview,card.frontText);
+          preview.createEl("h5",{text:"Answer"});displayCardContent(preview,card.backText);
         }
         const metadata=editor.createEl("details",{cls:"srs-card-metadata"});
         metadata.createEl("summary",{text:"Card details"});
@@ -659,7 +666,7 @@
       source.createEl("button",{text:"Card settings"}).onclick=()=>{cardMenu.open=false;openCardSettings(card);};
       if(card.source?.path)source.createEl("button",{text:"Open source"}).onclick=()=>{cardMenu.open=false;api.workspace.openLinkText(card.source.path,"","tab");};
       if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
-      dv.el("div",card.frontText,{container:front});
+      displayCardContent(front,card.frontText);
       let options;
       try {options=effectiveSettings(card,manifest);schedulerV2(options);if(!snapshot.latest.has(card.id)){const value=current(card,await baseline(card));states.set(card.id,value);if(!card.baseline)schedulingIndex?.update(card,value);}}
       catch(e){message(e);actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
@@ -667,7 +674,7 @@
       reveal.onclick=()=>{
         if(busy||shown!==card)return;
         try {
-          dv.el("div",card.backText,{container:back});actions.empty();
+          displayCardContent(back,card.backText);actions.empty();
           if(card.source?.kind==="block" && !String(card.fields?.Back||"").trim()) {
             back.createEl("button",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"","tab");
           }

@@ -317,9 +317,18 @@ identities while preserving existing IDs; no separate seeding command is needed.
 
 Templates support fields, nested conditional/inverted sections, `FrontSide`,
 `cloze:` and `text:` filters, and vault media references. Unknown fields, `type:`
-inputs, JavaScript, and unsupported filters produce visible card errors and
+inputs and unsupported filters produce visible card errors and
 prevent rating. Cloze ordinals remain the existing Anki ordinals. Editing the
 front/back presentation does not create new identities or rewrite history.
+
+Template JavaScript is disabled by default. To enable it, set the top-level
+`"allow_javascript": true` in `config/cards.json` and reload the reviewer.
+Inline scripts run after each question, revealed answer, or browser preview is
+displayed. `document.getElementById`, `querySelector`, and `querySelectorAll`
+look within that displayed side, so question and answer IDs do not interfere.
+Scripts run with the reviewer's privileges; this is not a sandbox. Only enable
+templates you trust. External and module scripts are unsupported. Content checks
+validate templates but do not execute scripts; execution errors appear when displayed.
 
 ## Verify against native Anki
 
