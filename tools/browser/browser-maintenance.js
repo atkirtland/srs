@@ -83,6 +83,7 @@ class MaintenanceCache {
 }
 class CardMaintenance {
   constructor(io,root,cache,options={}){this.io=io;this.root=root;this.data=`${root}/data`;this.cache=cache;this.options=options;this.stats={parsed_files:0,reused_files:0,hashed_files:0};this.observed=new Map();this.seeded=new Map();this.parsedHashes=new Map();this.needsSeed=new Set();}
+  inScope(path){const scope=this.options.sourcePath;return !scope||(Array.isArray(scope)?scope.includes(path):scope===path);}
   check(){if(this.options.cancelled?.())throw Error('Maintenance cancelled; catalog unchanged');}
   async json(path){const text=await this.io.read(path);if(text===null)throw Error(`Missing file: ${path}`);return JSON.parse(text);}
   async inputs(){
@@ -90,7 +91,7 @@ class CardMaintenance {
     const parts={};for(const [key,path]of Object.entries(names))parts[key]=await this.json(`${this.root}/${path}`);
     return {parts,config:composeStudyDocuments(parts),templates:parts.cards,manifest:await this.json(`${this.data}/manifest.json`)};
   }
-  files(rule,strict,issues,group){
+  files(rule,strict,issues,group,scoped=true){
     const selected=new Map();
     for(const path of rule.sources){
       if(!path||path.startsWith('/')||path.split('/').some(p=>p==='..'||p==='.')||path.includes('\\'))throw Error('Source path escapes vault');
@@ -105,11 +106,11 @@ class CardMaintenance {
         const key=relative.normalize('NFC').toLowerCase();if(folded.has(key))throw Error(`Filename collision: ${file.path}`);folded.add(key);selected.set(file.path,file);
       }
     }
-    return [...selected.values()].sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
+    return [...selected.values()].filter(file=>!scoped||this.inScope(file.path)).sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
   }
   async fingerprint(input,prune){
     const files=new Map(),issues=[];
-    for(const [group,rule]of Object.entries(input.config.source_rules))for(const f of this.files(rule,prune,issues,group))files.set(f.path,f);
+    for(const [group,rule]of Object.entries(input.config.source_rules))for(const f of this.files(rule,prune,issues,group,false))files.set(f.path,f);
     for(const f of this.io.files())if(f.path.startsWith(this.data+'/cards/')||f.path.startsWith(this.data+'/notes/')||prune&&f.path.startsWith(this.data+'/reviews/'))files.set(f.path,f);
     return canonical([input,[...files.values()].map(f=>[f.path,f.mtime,f.size,f.version||0]).sort(),issues]);
   }
@@ -259,9 +260,12 @@ class CardMaintenance {
   }
   async plan(prune=false){
     await new CatalogPublisher(this.io,this.data).recover();const input=await this.inputs(),signature=await this.fingerprint(input,prune);
-    const checkpoint=await this.cache.get('unchanged:'+prune);
+    const checkpointKey=canonical(['unchanged',prune,this.options.sourcePath||null]);
+    const checkpoint=await this.cache.get(checkpointKey);
     if(checkpoint?.signature===signature)return {input,signature,prune,files:{},result:{...checkpoint.result,scan:{parsed_files:0,reused_files:checkpoint.fileCount,hashed_files:0}}};
+    if(this.options.sourcePath&&prune)throw Error('File sync must use refresh mode');
     const discovered=await this.discover(input,prune),catalog=await this.catalog(input.manifest);
+    if(this.options.sourcePath&&!Object.values(input.config.source_rules).some(rule=>this.files(rule,false,[], '').length))throw Error('This file is not selected by any source rule; run full maintenance for moved or deleted files');
     const cards=hydrateCatalog(catalog.cards,catalog.notes,input.config);let result,notes,stored;
     if(prune){
       const pending=[],protectedCards=[];
@@ -274,13 +278,13 @@ class CardMaintenance {
       result={removable_cards:removable.length,removable_notes:catalog.notes.length-notes.length,cards:removable,protected_cards:protectedCards,scan:this.stats};
     }else{
       const conversions=await this.conversions(cards,discovered.found,discovered.bindings);let added=0,updated=conversions.count;
-      const known=new Map(cards.filter(c=>!c.retired).map(c=>[canonical([c.group,c.note_uid,c.template_key,c.anki_ordinal]),c])),ids=new Set(cards.map(c=>c.id));
+      const known=new Map(cards.filter(c=>!c.retired||this.options.sourcePath&&this.inScope(c.source?.path)).map(c=>[canonical([c.group,c.note_uid,c.template_key,c.anki_ordinal]),c])),ids=new Set(cards.map(c=>c.id));
       const unbound=new Map();for(const c of cards)if(!c.retired&&(!c.group||!c.template_key)){const k=canonical([c.note_uid,c.anki_notetype,c.anki_ordinal]);if(!unbound.has(k))unbound.set(k,[]);unbound.get(k).push(c);}
       const proposals=new Map();for(const item of discovered.found){const k=canonical([item.note_uid,item.anki_notetype,item.anki_ordinal]);if(unbound.has(k)){if(!proposals.has(k))proposals.set(k,new Set());proposals.get(k).add(canonical([item.group,item.template_key]));}}
       if([...proposals.values()].some(s=>s.size>1))throw Error('Multiple rules bind the same imported card');
       const now=this.options.now?.()??Date.now();
       for(const item of discovered.found){this.check();const key=canonical([item.group,item.note_uid,item.template_key,item.anki_ordinal]);let previous=known.get(key);
-        if(previous){if(canonical(previous.source)!==canonical(item.source)){previous.source=item.source;updated++;}continue;}
+        if(previous){if(previous.retired){delete previous.retired;updated++;}if(canonical(previous.source)!==canonical(item.source)){previous.source=item.source;updated++;}continue;}
         const imported=unbound.get(canonical([item.note_uid,item.anki_notetype,item.anki_ordinal]));
         if(imported){if(imported.length!==1)throw Error('Ambiguous imported card binding');previous=imported[0];Object.assign(previous,{group:item.group,template_key:item.template_key,source:item.source,...(item.cloze?{cloze:true}:{})});known.set(key,previous);updated++;continue;}
         if(item.cloze&&cards.some(c=>!c.retired&&c.group===item.group&&c.note_uid===item.note_uid&&c.anki_ordinal===item.anki_ordinal&&c.anki_notetype===item.anki_notetype))continue;
@@ -290,8 +294,24 @@ class CardMaintenance {
         const card={...item,id,anki_card_id:null,original_deck_id:null,deck_id:`profile:${item.profile_id}`,active:true,supported:true,queue:0,card_type:0,due_ms:now,anki_due:0,baseline:state,scheduling:{queue:0},memory:{}};
         cards.push(card);known.set(key,card);ids.add(id);added++;
       }
+      let retired=0;
+      if(this.options.sourcePath){
+        const generated=new Set(discovered.found.map(c=>canonical([c.group,c.note_uid,c.template_key,c.anki_ordinal])));
+        const missing=cards.filter(c=>!c.retired&&this.inScope(c.source?.path)&&!generated.has(canonical([c.group,c.note_uid,c.template_key,c.anki_ordinal])));
+        // Resolve missing identities across sources before retiring: a row/block may have moved.
+        const absent=missing.filter(c=>!discovered.live.has(canonical([c.group,c.note_uid])));
+        if(absent.length){
+          const lookup=new CardMaintenance(this.io,this.root,this.cache,{...this.options,sourcePath:null});
+          const elsewhere=await lookup.discover(input,true);
+          if(elsewhere.issues.length)throw Error('Some sources are unavailable; run full maintenance before retiring missing cards');
+          const liveIds=new Set([...elsewhere.live].map(key=>JSON.parse(key)[1]));
+          if(absent.some(c=>liveIds.has(c.note_uid)))throw Error('A source identity moved to another file or type; run Refresh cards to reconcile it');
+          for(const [path,stamp]of lookup.observed)this.observed.set(path,stamp);
+        }
+        for(const card of missing){card.retired=true;retired++;}
+      }
       const separated=await this.separate(cards);notes=separated.notes;stored=separated.cards;
-      result={added,updated,cards:cards.length,issues:discovered.issues,type_conversions:conversions.batches,scan:this.stats};
+      result={added,updated,...(this.options.sourcePath?{retired}:{}),cards:cards.length,issues:discovered.issues,type_conversions:conversions.batches,scan:this.stats};
     }
     this.check();for(const [path,stamp]of this.observed)if(canonical(this.io.stat(path))!==stamp)throw Error(`Source changed during scan: ${path}`);const after=await this.inputs(),finalSignature=await this.fingerprint(after,prune);
     // Only our own identity insertions may change input versions during discovery.
@@ -301,7 +321,7 @@ class CardMaintenance {
     this.publishTime=new Date(this.options.now?.()??Date.now()).toISOString();const files=this.partitions(catalog,notes,stored),changed=Object.keys(files).length>0;
     const manifest={...input.manifest,catalog_layout:'flat',partition_count:this.partitionCount(stored,catalog.parts.cards),note_partition_count:this.partitionCount(notes,catalog.parts.notes),revision:changed?crypto.randomUUID():input.manifest.revision};delete manifest.partitions;
     const plan={input,signature:finalSignature,prune,files,manifest,result:{...result,revision:manifest.revision}};
-    if(!changed)await this.cache.put('unchanged:'+prune,{signature:finalSignature,result:plan.result,fileCount:Object.values(input.config.source_rules).reduce((n,r)=>n+this.files(r,prune,[], '').length,0)});
+    if(!changed)await this.cache.put(checkpointKey,{signature:finalSignature,result:plan.result,fileCount:Object.values(input.config.source_rules).reduce((n,r)=>n+this.files(r,prune,[], '').length,0)});
     return plan;
   }
   async separate(cards){
@@ -336,4 +356,14 @@ class CardMaintenance {
     }
     return {...plan.result,...(plan.prune?{applied:true}:{})};
   }
+}
+
+// Enumerate configured source files without reading or parsing their contents.
+function maintenanceFileChoices(rules,io){
+  const engine=new CardMaintenance(io,'',null),choices=new Map();
+  for(const [id,rule]of Object.entries(rules))for(const file of engine.files(rule,false,[],id)){
+    if(!choices.has(file.path))choices.set(file.path,{path:file.path,rules:[]});
+    choices.get(file.path).rules.push(id);
+  }
+  return [...choices.values()].sort((a,b)=>a.path.localeCompare(b.path));
 }

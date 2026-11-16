@@ -165,7 +165,7 @@
       dialog.createEl('h3',{text:title});
       return new Promise(resolve=>{let finished=false;const finish=value=>{if(finished)return;finished=true;maintenanceDialogCancel=null;dialog.remove();resolve(value);};maintenanceDialogCancel=()=>finish(null);render(dialog,finish);});
     }
-    async function runMaintenance(prune){
+    async function runMaintenance(prune,sourcePath=null){
       if(busy||checking||managerDirty||maintenanceActive)return;
       maintenanceActive=true;maintenanceCancelled=false;busy=true;let maintenanceCache;
       const buttons=[...host.querySelectorAll('button,select,input,textarea')],disabled=buttons.map(b=>b.disabled);
@@ -185,6 +185,7 @@
             }
           };
           const engine=new CardMaintenance(io,root,maintenanceCache,{
+            sourcePath,
             cancelled:()=>disposed||maintenanceCancelled,
             progress:stats=>{notice.textContent=`Scanning ${stats.path} · ${stats.parsed_files} parsed · ${stats.reused_files} reused`;},
             chooseMapping:plan=>maintenanceDialog(`${plan.old_type} → ${plan.new_type}`, (dialog,finish)=>{
@@ -205,7 +206,7 @@
           const result=await engine.apply(plan);notice.textContent=JSON.stringify(result);
           sessionCache.invalidate();reviewFiles=null;cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;presidents=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;invalidateScanProgress();sourceGeneration++;resetQueues();
           const scan=result.scan;
-          maintenanceResult=(prune?`Pruned ${result.removable_cards} cards and ${result.removable_notes} notes.`:`Refresh complete: ${result.added} added · ${result.updated} updated · ${result.cards} total cards.`)+` ${scan.parsed_files} files parsed · ${scan.reused_files} reused · ${scan.hashed_files} hashed.`;
+          maintenanceResult=sourcePath?`File synced: ${result.added} added · ${result.updated} updated · ${result.retired} retired.`:(prune?`Pruned ${result.removable_cards} cards and ${result.removable_notes} notes.`:`Refresh complete: ${result.added} added · ${result.updated} updated · ${result.cards} total cards.`)+` ${scan.parsed_files} files parsed · ${scan.reused_files} reused · ${scan.hashed_files} hashed.`;
           maintenanceIssues=result.issues||[];
         });
       }catch(error){maintenanceResult=error.message;}
@@ -589,19 +590,67 @@
       renderList();
       const selected=available.find(card=>card.id===editedCardId);if(selected)edit(selected);
     }
+    let sourceSearchQuery="";const expandedSources=new Set();
     function showConfiguration(section){
       if(section==="deck"){showDeckEditor();return;}
       homepage.createEl("h2",{text:section==="profiles"?"Scheduling profiles":"Sources"});
       if(!studyConfig){homepage.createEl("p",{text:"Create the study configuration once from migration/: uv run python migrate.py init-study"});return;}
       homepage.createEl("button",{text:panel==="profiles"?"Open scheduling profiles":"Open source rules"}).onclick=()=>api.workspace.openLinkText(`${root}/${studyParts?(panel==="profiles"?"data/profiles.json":"config/sources.json"):"study.json"}`,"","tab");
       if(section==="sources"){
-        homepage.createEl("p",{text:"Rules create cards from your vault content. Templates define the questions; study decks select which cards to practice."});
-        homepage.createEl("p",{text:"Use Tools → Refresh cards to discover additions. Existing schedules and review logs are preserved."});
-        for(const [id,rule] of Object.entries(studyConfig.source_rules)){
-          const row=homepage.createDiv({cls:"srs-card-editor"});row.createEl("h3",{text:id});
-          row.createEl("p",{text:rule.sources.join(", ")});row.createEl("p",{text:`Templates: ${rule.templates.join(", ")}`});
-          row.createEl("p",{text:`New cards use: ${studyConfig.profiles[rule.profile].name||rule.profile}`});
-        }return;
+        const filters=homepage.createDiv({cls:"srs-card-filters"});
+        const search=filters.createEl("input",{type:"search",value:sourceSearchQuery,placeholder:"Search source files or rules…",attr:{"aria-label":"Search source files or rules"}});
+        homepage.createEl("p",{text:"Find a file to sync its cards, or expand a source rule. Sync preserves schedules and review history.",cls:"srs-muted"});
+        const results=homepage.createDiv({attr:{role:"status"}}),rulesList=homepage.createDiv({cls:"srs-source-rules"});
+        let choices;
+        const getChoices=()=>{
+          if(!choices){
+            const files=api.vault.getFiles().map(f=>({path:f.path,file:true,mtime:f.stat.mtime,size:f.stat.size}));
+            const byPath=new Map(files.map(f=>[f.path,f]));
+            choices=maintenanceFileChoices(studyConfig.source_rules,{
+              files:()=>files,stat:path=>byPath.get(path)||(api.vault.getAbstractFileByPath(path)?{path,file:false}:null)
+            });
+          }return choices;
+        };
+        function fileRows(container,files){
+          let offset=0,more;
+          const page=()=>{
+            more?.remove();
+            for(const file of files.slice(offset,offset+30)){
+              const row=container.createDiv({cls:"srs-source-file"});
+              const link=row.createEl("a",{text:file.path,href:`obsidian://open?vault=${encodeURIComponent(api.vault.getName())}&file=${encodeURIComponent(file.path)}`,attr:{target:"_blank",rel:"noopener"}});
+              link.onclick=event=>{event.preventDefault();api.workspace.openLinkText(file.path,"","tab");};
+              row.createEl("button",{text:"Sync",attr:{"aria-label":`Sync ${file.path}`}}).onclick=()=>runMaintenance(false,file.path);
+            }
+            offset+=30;
+            if(offset<files.length){more=container.createEl("button",{text:`Show more (${files.length-offset} remaining)`});more.onclick=page;}
+          };page();
+        }
+        function renderSources(){
+          results.empty();rulesList.empty();
+          const terms=sourceSearchQuery.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+          const matches=text=>terms.every(term=>text.toLocaleLowerCase().includes(term));
+          const files=terms.length?getChoices().filter(file=>matches(file.path+' '+file.rules.join(' '))):[];
+          if(terms.length)results.createEl("p",{text:`${files.length} matching files`});
+          for(const [id,rule]of Object.entries(studyConfig.source_rules)){
+            if(terms.length&&!matches(id+' '+rule.sources.join(' '))&&!files.some(file=>file.rules.includes(id)))continue;
+            const row=rulesList.createEl("details",{cls:"srs-source-rule"});
+            const summary=row.createEl("summary");summary.createEl("span",{text:id});
+            const sync=summary.createEl("button",{text:"Sync",attr:{"aria-label":`Sync files in ${id}`,title:"Sync the files shown inside this source"}});
+            const selectedFiles=()=>getChoices().filter(file=>file.rules.includes(id)&&(!terms.length||matches(file.path+' '+id)||matches(id+' '+rule.sources.join(' '))));
+            sync.onclick=event=>{event.preventDefault();event.stopPropagation();const paths=selectedFiles().map(file=>file.path);if(paths.length)runMaintenance(false,paths);else notice.textContent='No matching source files to sync.';};
+            const body=row.createDiv();let filled=false;
+            const fill=()=>{
+              if(filled)return;filled=true;
+              body.createEl("p",{text:rule.sources.join(", ")});body.createEl("p",{text:`Templates: ${rule.templates.join(", ")}`});
+              body.createEl("p",{text:`New cards use: ${studyConfig.profiles[rule.profile].name||rule.profile}`});
+              const selected=selectedFiles();
+              body.createEl("p",{text:`${selected.length} source files`,cls:"srs-muted"});fileRows(body,selected);
+            };
+            row.open=expandedSources.has(id);if(row.open)fill();
+            row.ontoggle=()=>{if(row.open){expandedSources.add(id);fill();}else expandedSources.delete(id);};
+          }
+        }
+        search.oninput=()=>{sourceSearchQuery=search.value;renderSources();};renderSources();return;
       }
       homepage.createEl("p",{text:"Changes apply to future answers. Current memory states and due dates are preserved. Imported deck limits and daily counters remain in force."});
       const profileForms=[];
@@ -806,6 +855,7 @@
       cardMenu.hidden=false;
       source.createEl("button",{text:"Card settings"}).onclick=()=>{cardMenu.open=false;openCardSettings(card);};
       if(card.source?.path)source.createEl("button",{text:"Open source"}).onclick=()=>{cardMenu.open=false;api.workspace.openLinkText(card.source.path,"","tab");};
+      if(card.source?.path)source.createEl("button",{text:"Sync source file"}).onclick=()=>{cardMenu.open=false;runMaintenance(false,card.source.path);};
       if(card.content_error){front.textContent=card.content_error;actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       displayCardContent(front,card.frontText);
       let options;

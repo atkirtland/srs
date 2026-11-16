@@ -169,6 +169,21 @@ and review logs. No Python, Node, or Anki runtime is required. Maintenance runs
 only when selected. **Reload reviewer** reloads existing data without discovering cards.
 FSRS training still runs through the desktop Python tools.
 
+For a single file, choose **Sync source file** in the current card’s dropdown,
+or open **Sources**, search for its path or rule name, and click **Sync** beside
+a source row. File links appear inside the expandable source rows. The row’s
+**Sync** button syncs its matching files; individual files also have a **Sync**
+button. Expand a row to see its configuration and files. File lists show 30 entries at a time. Searching lists
+configured files without parsing their contents.
+It uses the shared maintenance cache to generate cards from that file and retire
+cards it no longer generates, keeping their identities, schedules, and history.
+Restoring the source/template and syncing again restores the retired cards.
+For a CSV or Markdown file with multiple notes, this syncs the entire file.
+Missing identities trigger a lookup across configured sources to avoid retiring
+moved notes; if an identity moved elsewhere, use **Tools → Refresh cards** to
+reconcile it. File sync still reads the catalog, but normally parses only the
+selected source file. This action needs no Obsidian plugin.
+
 Structural Markdown notes are eligible only when they have an existing
 `anki_note_id` or a `srs_note_id` field. To opt a new note in, add a blank field:
 

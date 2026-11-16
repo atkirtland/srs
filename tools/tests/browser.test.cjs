@@ -1162,3 +1162,85 @@ test('Anki bridge states select current scheduling without inventing review acti
   const dst=Date.parse('2026-03-07T21:00:00Z'),day=SRS.dayNumber(dst,timing);
   assert.equal(SRS.reviewIntervalLabel({queue:2,scheduled_days:2,due:SRS.studyDayStart(day+2,timing)},dst,timing),'2d');
 });
+
+test('file sync adds and retires only selected CSV cards, retaining and restoring identity/history',async()=>{
+  const f=maintenanceFixture();
+  const sources=f.json('srs/config/sources.json');sources.rules.words.sources.push('other.csv');f.put('srs/config/sources.json',sources);
+  f.put('other.csv','anki_note_id,word\n2,two\n');
+  let e=f.engine();await e.apply(await e.plan());
+  const before=f.json('srs/data/cards/cards-00000.json');
+  const first=before.find(c=>c.id=== '8756ff58-0f9f-5c7d-a1ec-b8d9f77b173b');
+  first.baseline.reps=10;f.put('srs/data/cards/cards-00000.json',before);
+  const other=before.find(c=>c.id!==first.id);
+  f.put('other.csv','anki_note_id,word\n2,two\n4,four\n');
+  f.put('words.csv','anki_note_id,word\n3,three\n');
+  e=f.engine({sourcePath:'words.csv'});const plan=await e.plan();
+  assert.equal(plan.result.added,1);assert.equal(plan.result.retired,1);await e.apply(plan);
+  let cards=f.json('srs/data/cards/cards-00000.json');
+  assert.equal(cards.length,3);assert.deepEqual(cards.find(c=>c.id===other.id),other);
+  assert.equal(cards.find(c=>c.id===first.id).retired,true);
+  assert.deepEqual(cards.find(c=>c.id===first.id).baseline,first.baseline);
+  f.put('words.csv','anki_note_id,word\n1,one\n3,three\n');
+  e=f.engine({sourcePath:'words.csv'});await e.apply(await e.plan());
+  cards=f.json('srs/data/cards/cards-00000.json');assert.equal(cards.length,3);
+  assert.equal(cards.find(c=>c.id===first.id).retired,undefined);
+  assert.equal(cards.find(c=>c.id===first.id).added_at,first.added_at);
+});
+
+
+test('file sync refuses retirement when an identity moved to another source file',async()=>{
+  const f=maintenanceFixture(),sources=f.json('srs/config/sources.json');
+  sources.rules.words.sources.push('other.csv');f.put('srs/config/sources.json',sources);
+  f.put('other.csv','anki_note_id,word\n');let e=f.engine();await e.apply(await e.plan());
+  const before=f.files.get('srs/data/cards/cards-00000.json').text;
+  f.put('words.csv','anki_note_id,word\n');f.put('other.csv','anki_note_id,word\n1,one\n');
+  await assert.rejects(f.engine({sourcePath:'words.csv'}).plan(),/moved/);
+  assert.equal(f.files.get('srs/data/cards/cards-00000.json').text,before);
+});
+
+test('file sync retires disabled templates and preserves other source cards',async()=>{
+  const f=maintenanceFixture();let e=f.engine();await e.apply(await e.plan());
+  const config=f.json('srs/config/cards.json');config.groups.words.templates[0].enabled=false;f.put('srs/config/cards.json',config);
+  e=f.engine({sourcePath:'words.csv'});const plan=await e.plan();assert.equal(plan.result.retired,1);
+  await e.apply(plan);assert.equal(f.json('srs/data/cards/cards-00000.json')[0].retired,true);
+});
+
+test('file sync shares generation cache and does not parse unrelated edits when adding',async()=>{
+  const f=maintenanceFixture(),sources=f.json('srs/config/sources.json');
+  sources.rules.words.sources.push('other.csv');f.put('srs/config/sources.json',sources);
+  f.put('other.csv','anki_note_id,word\n2,two\n');let e=f.engine();await e.apply(await e.plan());
+  f.put('other.csv','anki_note_id,word\n2,changed\n');
+  f.put('words.csv','anki_note_id,word\n1,one\n3,three\n');f.reads.length=0;
+  e=f.engine({sourcePath:'words.csv'});const plan=await e.plan();
+  assert.equal(plan.result.added,1);assert.equal(plan.result.scan.parsed_files,1);
+  assert.ok(!f.reads.includes('other.csv'));
+  f.put('other.csv','anki_note_id,word\n2,changed again\n');
+  await assert.rejects(e.apply(plan),/changed/);
+  e=f.engine({sourcePath:'words.csv'});const retry=await e.plan();
+  assert.equal(retry.result.scan.parsed_files,0);assert.equal(retry.result.scan.reused_files,1);
+  await e.apply(retry);
+});
+
+test('source file picker lists only refresh-eligible paths, groups shared files and reads no content',()=>{
+  const f=maintenanceFixture();
+  f.put('notes/a.md','unread');f.put('notes/b.md','unread');f.put('notes/nested/c.md','unread');
+  f.put('notes/image.png','unread');f.put('unrelated.md','unread');
+  const rules={words:f.rule,shared:{...f.rule},structural:{...f.rule,sources:['notes'],recursive:false,filenames:['a']}};
+  const choices=SRS.maintenanceFileChoices(rules,f.io);
+  assert.deepEqual(choices,[{path:'notes/a.md',rules:['structural']},{path:'words.csv',rules:['words','shared']}]);
+  assert.equal(f.reads.length,0);assert.equal(f.writes.length,0);
+  rules.structural.kind='block';
+  assert.deepEqual(SRS.maintenanceFileChoices(rules,f.io).map(f=>f.path),['notes/a.md','notes/b.md','words.csv']);
+  rules.structural.recursive=true;
+  assert.ok(SRS.maintenanceFileChoices(rules,f.io).some(f=>f.path==='notes/nested/c.md'));
+});
+
+test('source row sync publishes multiple selected files together and leaves other files alone',async()=>{
+  const f=maintenanceFixture(),sources=f.json('srs/config/sources.json');
+  sources.rules.words.sources.push('second.csv','third.csv');f.put('srs/config/sources.json',sources);
+  f.put('second.csv','anki_note_id,word\n2,two\n');f.put('third.csv','anki_note_id,word\n3,three\n');
+  const engine=f.engine({sourcePath:['words.csv','second.csv']});const plan=await engine.plan();
+  assert.equal(plan.result.added,2);await engine.apply(plan);
+  assert.equal(f.json('srs/data/cards/cards-00000.json').length,2);
+  assert.ok(!f.reads.includes('third.csv'));
+});

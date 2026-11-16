@@ -101,3 +101,16 @@
 
 .ankobs-srs .srs-rotated-image { display: grid; place-items: center; width: min(100%, 40dvh, 40rem); aspect-ratio: 1; margin: 0 auto; }
 .ankobs-srs .srs-rotated-image img { max-width: 100%; max-height: min(40dvh, 100%); transform: rotate(var(--srs-image-rotation)); }
+
+.ankobs-srs .srs-source-rules { border: 1px solid var(--srs-border); border-radius: .5rem; margin-top: 1rem; }
+.ankobs-srs .srs-source-rule + .srs-source-rule { border-top: 1px solid var(--srs-border); }
+.ankobs-srs .srs-source-rule > summary { display: flex; align-items: center; gap: .6rem; padding: .45rem .7rem; list-style: none; }
+.ankobs-srs .srs-source-rule > summary::-webkit-details-marker { display: none; }
+.ankobs-srs .srs-source-rule > summary::before { content: "▸"; color: var(--text-muted); }
+.ankobs-srs .srs-source-rule[open] > summary::before { content: "▾"; }
+.ankobs-srs .srs-source-rule > summary > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ankobs-srs .srs-source-rule > summary > button { flex-shrink: 0; }
+.ankobs-srs .srs-source-rule > div { padding: 0 .8rem .8rem; }
+.ankobs-srs .srs-source-file { display: flex; align-items: center; gap: .75rem; padding: .35rem 0; border-bottom: 1px solid var(--srs-border); }
+.ankobs-srs .srs-source-file a { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ankobs-srs .srs-source-file button { flex-shrink: 0; }
