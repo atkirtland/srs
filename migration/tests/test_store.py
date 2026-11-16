@@ -133,7 +133,13 @@ class StoreTests(unittest.TestCase):
         root = srs.publish(data, destination)
         manifest = json.loads((destination / "manifest.json").read_text())
         payloads = {p.name: p.read_bytes() for p in (destination / "reviews").glob("*.jsonl")}
-        self.assertEqual(sum(len(p.splitlines()) for p in payloads.values()), 18 + 24)
+        self.assertEqual(sum(len(p.splitlines()) for p in payloads.values()), 18)
+        self.assertTrue(all(json.loads(line)['kind'] == 'historical_review'
+                            for payload in payloads.values() for line in payload.splitlines()))
+        stored = [c for path in srs.partition_paths(manifest)
+                  for c in json.loads((destination / path).read_text())]
+        self.assertEqual({c['id']: c['baseline'] for c in stored},
+                         {c['id']: c['baseline'] for c in data['cards']})
         srs.publish(self.build(), destination)
         self.assertEqual(payloads, {p.name: p.read_bytes() for p in (destination / "reviews").glob("*.jsonl")})
         for path in destination.rglob("*"):

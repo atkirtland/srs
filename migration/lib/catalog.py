@@ -278,11 +278,8 @@ def publish(data, destination):
     notes, stored_cards = layout.separate_cards(data['cards']) if normalized else ([], data['cards'])
     events = list(data['observations'])
     runtime = [{k:v for k,v in c.items() if k != 'history'} for c in stored_cards]
-    for card in data['cards']:
-        events.append({"format_version": 2, "kind": "scheduling_baseline",
-                       "id": f"baseline:{import_id}:{card['id']}", "card_id": card["id"],
-                       "review_time_ms": data["snapshot_ms"], "import_id": import_id,
-                       "state": card["baseline"], "scheduling": card["scheduling"]})
+    # Starting states already live in card metadata. Logs contain actual review
+    # observations, not duplicate copies of the imported scheduling baseline.
     # Reimports compare immutable records, including duplicates in conflict copies.
     seen = {}
     reviews = destination / "reviews"

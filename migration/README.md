@@ -4,6 +4,11 @@ This directory owns one-time Anki import, native scheduler verification, and
 initial conversion of imported metadata into editable study configuration.
 Ongoing card discovery and training live in [`../tools/`](../tools/README.md).
 
+Initial scheduling baselines and original Anki scheduling fields are stored on
+cards, not duplicated as `scheduling_baseline` events in review logs. Readers
+still accept those legacy events. The incremental bridge's `anki_state` events
+are different: they carry a later scheduling update after new Anki reviews.
+
 | Command | Purpose |
 | --- | --- |
 | `migrate.py inspect --collection <snapshot>` | Inspect snapshot metadata and template definitions. |
