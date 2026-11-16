@@ -2933,6 +2933,25 @@ class ContentCheckProgress {
   save(){try{this.storage.setItem(this.key,JSON.stringify({version:2,signature:this.signature,results:[...this.results],active:this.active,deck:this.deck,group:this.group}));}catch{}}
   invalidate(){this.signature=null;this.results.clear();this.active=false;this.save();}
 }
+
+// Deliberate horizontal swipes only; scrolling and slow drags do not rate cards.
+function reviewSwipe(dx,dy,elapsed){
+  return elapsed<=700&&Math.abs(dx)>=80&&Math.abs(dx)>Math.abs(dy)*2.5?(dx<0?"left":"right"):null;
+}
+function compactReviewAnswer(front,back,includesFront){
+  if(includesFront){front.hidden=true;return;}
+  // Hide repeated question blocks, retaining the full answer and changed clozes.
+  const selector="p,li,h1,h2,h3,h4,h5,h6,pre,table,div";
+  const signature=node=>node.innerHTML.trim().replace(/\s+/g," ");
+  const answers=new Set([...back.querySelectorAll(selector)].map(signature).filter(Boolean));
+  for(const node of front.querySelectorAll(selector)){
+    if(answers.has(signature(node)))node.hidden=true;
+  }
+  const images=new Set([...back.querySelectorAll("img")].map(n=>n.outerHTML));
+  for(const node of front.querySelectorAll("img")){
+    if(images.has(node.outerHTML))node.hidden=true;
+  }
+}
 // One unowned runtime per vault/root, kept only for this app session. Ownership is
 // transferred on reopen so two reviewer views never mutate the same indexes.
 class ReviewerSessionCache {
@@ -3748,7 +3767,7 @@ function maintenanceFileChoices(rules,io){
 }
 
   if (globalThis.__SRS_TEST__) {
-    globalThis.SRS = {maintenanceFileChoices,maintenanceMetadata,CardMaintenance, MaintenanceCache, maintenanceIdentity, maintenanceCardId, maintenanceQuestion, CatalogPublisher,ReviewerSessionCache, CatalogCache, ContentCheckProgress, preparePresidents, groupContentErrors, SchedulingIndex, SchedulingOrder, readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, studyFilterNeedsMetadata, schedulerV2, effectiveSettings, renderV2, templateScriptParts, runTemplateScripts, resolveImageEmbeds, transformField, fieldsFromNote,
+    globalThis.SRS = {reviewSwipe, compactReviewAnswer,maintenanceFileChoices,maintenanceMetadata,CardMaintenance, MaintenanceCache, maintenanceIdentity, maintenanceCardId, maintenanceQuestion, CatalogPublisher,ReviewerSessionCache, CatalogCache, ContentCheckProgress, preparePresidents, groupContentErrors, SchedulingIndex, SchedulingOrder, readCatalogPartitions, studyMemberships, composeStudyDocuments, hydrateCatalog, sourceBlocks, validateStudy, validateStudyFilter, matchesStudyFilter, studyProfileId, studyRuntimeManifest, studyDeckTree, studyDeckMatches, studyFilterNeedsMetadata, schedulerV2, effectiveSettings, renderV2, templateScriptParts, runTemplateScripts, resolveImageEmbeds, transformField, fieldsFromNote,
       deckTree, queueKind, reviewQueueV2, reviewIntervalLabel, nextStateV2, studyDay, studyDayStart, dayNumber, cardSuspended,
       ReviewIndex, appendReview, validateEvent, saveSchedulerConfig, verifySchedulerConfig, parseCSV, indexRows, configuredCards, initialState};
     return;
@@ -3777,6 +3796,29 @@ function maintenanceFileChoices(rules,io){
     const cardHeader=content.createDiv({cls:"srs-card-header"});
     const front=content.createDiv({cls:"srs-front"}), back=content.createDiv({cls:"srs-back"});
     const actions = host.createDiv({cls:"srs-actions"});
+    const answerFeedback=host.createDiv({cls:"srs-answer-feedback",attr:{role:"status","aria-live":"polite","aria-atomic":"true"}});
+    const secondaryActions=host.createDiv({cls:"srs-secondary-actions"});
+    let swipeAction=null,swipeStart=null;
+    const interactive="button,a,input,textarea,select,summary,details,[contenteditable],audio,video";
+    content.addEventListener("touchstart",event=>{
+      swipeStart=null;
+      if(event.touches.length!==1||event.target.closest(interactive)||globalThis.getSelection?.()?.toString())return;
+      const t=event.touches[0];swipeStart={x:t.clientX,y:t.clientY,time:Date.now(),action:swipeAction};
+    },{passive:true});
+    content.addEventListener("touchmove",event=>{
+      if(!swipeStart)return;
+      if(event.touches.length!==1){swipeStart=null;return;}
+      const t=event.touches[0];
+      if(Math.abs(t.clientY-swipeStart.y)>24&&Math.abs(t.clientY-swipeStart.y)>Math.abs(t.clientX-swipeStart.x))swipeStart=null;
+    },{passive:true});
+    content.addEventListener("touchcancel",()=>{swipeStart=null;},{passive:true});
+    content.addEventListener("touchend",event=>{
+      const start=swipeStart;swipeStart=null;
+      if(!start||busy||!start.action||start.action!==swipeAction||globalThis.getSelection?.()?.toString())return;
+      const t=event.changedTouches[0];
+      const direction=reviewSwipe(t.clientX-start.x,t.clientY-start.y,Date.now()-start.time);
+      if(direction)start.action(direction);
+    },{passive:true});
     const cardName=cardHeader.createEl("h3",{cls:"srs-card-name"});
     const cardMenu=cardHeader.createEl("details",{cls:"srs-tools srs-card-menu"});
     cardMenu.createEl("summary",{text:"⋯",attr:{"aria-label":"Card actions"}});
@@ -3985,7 +4027,7 @@ function maintenanceFileChoices(rules,io){
       return {study:text===null?null:validateStudy(JSON.parse(text)),templates:await json(`${root}/config.json`),parts:null};
     }
     function message(e) {notice.textContent=String(e.message||e);}
-    function clearCard() {context.empty();front.empty();back.empty();actions.empty();source.empty();cardHeader.hidden=true;cardMenu.hidden=true;cardMenu.open=false;homepage.empty();shown=null;}
+    function clearCard() {swipeAction=null;swipeStart=null;context.empty();front.hidden=false;front.empty();back.empty();actions.empty();secondaryActions.empty();source.empty();cardHeader.hidden=true;cardMenu.hidden=true;cardMenu.open=false;homepage.empty();shown=null;}
     function reviewFileMap(){
       if(!reviewFiles)reviewFiles=new Map(api.vault.getFiles().filter(f=>f.path.startsWith(`${dataRoot}/reviews/`)&&LOG_PATTERN.test(f.path.split("/").at(-1))).map(f=>[f.path,f]));
       return reviewFiles;
@@ -4519,6 +4561,12 @@ function maintenanceFileChoices(rules,io){
       if(disposed)return;
       clearCard();counts.empty();notice.textContent="";
       host.setAttribute("data-reviewing",String(reviewing&&!managing&&!panel));
+      answerFeedback.empty();
+      if(reviewing&&!managing&&!panel&&undoReview){
+        const label=["Again","Hard","Good","Easy"][undoReview.event.rating-1];
+        answerFeedback.createEl("span",{text:`Saved: ${label}`,attr:{"data-rating":String(undoReview.event.rating)}});
+        answerFeedback.createEl("button",{text:"Undo"}).onclick=()=>undoButton.onclick();
+      }
       sizeReviewer();
       content.scrollTop=0;
       home.setAttribute("aria-pressed",String(!panel && !managing && !reviewing));
@@ -4606,7 +4654,7 @@ function maintenanceFileChoices(rules,io){
       cardHeader.hidden=false;
       cardName.textContent=card.template?.name||`${card.anki_notetype||card.group||"Card"} · Card ${(card.anki_ordinal??0)+1}`;
       const skip=()=>{skipped.add(card.id);schedulingIndex?.bury(card.id);guardedDraw();};
-      actions.createEl("button",{text:"Bury"}).onclick=skip;
+      secondaryActions.createEl("button",{text:"Bury"}).onclick=skip;
       cardMenu.hidden=false;
       source.createEl("button",{text:"Card settings"}).onclick=()=>{cardMenu.open=false;openCardSettings(card);};
       if(card.source?.path)source.createEl("button",{text:"Open source"}).onclick=()=>{cardMenu.open=false;api.workspace.openLinkText(card.source.path,"","tab");};
@@ -4617,20 +4665,21 @@ function maintenanceFileChoices(rules,io){
       try {options=effectiveSettings(card,manifest);schedulerV2(options);if(!snapshot.latest.has(card.id)){const value=current(card,await baseline(card));states.set(card.id,value);if(!card.baseline)schedulingIndex?.update(card,value);}}
       catch(e){message(e);actions.createEl("button",{text:"Rating unavailable"}).disabled=true;return;}
       const reveal=actions.createEl("button",{text:"Show answer",cls:"mod-cta"});
+      swipeAction=direction=>{if(direction==="left")reveal.onclick();};
       reveal.onclick=()=>{
         if(busy||shown!==card)return;
         try {
-          displayCardContent(back,card.backText);actions.empty();
+          displayCardContent(back,card.backText);compactReviewAnswer(front,back,card.template.back.includes("{{FrontSide}}"));actions.empty();content.scrollTop=0;
           if(card.source?.kind==="block" && !String(card.fields?.Back||"").trim()) {
             back.createEl("button",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"","tab");
           }
-          actions.createEl("button",{text:"Bury"}).onclick=skip;
+          swipeAction=direction=>answer(card,direction==="left"?3:1);
           for(const [i,label]of["Again","Hard","Good","Easy"].entries()) {
             const now=Date.now();
             const preview=nextStateV2(card,states.get(card.id).state,options,manifest,now,i+1);
             actions.createEl("button",{text:`${label} (${reviewIntervalLabel(preview,now,manifest.timing)})`}).onclick=()=>answer(card,i+1);
           }
-        }catch(e){message(e);actions.empty();actions.createEl("button",{text:"Bury"}).onclick=skip;}
+        }catch(e){swipeAction=null;message(e);actions.empty();}
       };
     }
     async function answer(card,rating) {

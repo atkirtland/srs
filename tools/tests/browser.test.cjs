@@ -284,6 +284,7 @@ test('adding card settings upgrades the local database without rebuilding histor
 });
 test('reviewer scopes content errors, reuses resolved content, and Bury writes nothing; live edits preserve identity',async()=>{
   class Element {
+    addEventListener(){}
     constructor(tag='div',options={}) {this.tag=tag;this.children=[];this.textContent=options.text||'';this.value=options.value||'';this.type=options.type;this.attr=options.attr||{};}
     createEl(tag,options){const e=new Element(tag,options);this.children.push(e);return e;}
     setAttribute(key,value){this.attr[key]=value;}
@@ -376,6 +377,8 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   assert.ok(rate);
   const performanceCounts=()=>{button('Performance details').onclick();const notice=root.querySelectorAll('div').find(e=>e.textContent.startsWith('{"fileReads"'));return JSON.parse(notice.textContent.split(' · ')[0]);};
   const beforeAnswer=performanceCounts();await rate.onclick();
+  assert.ok(root.querySelectorAll('span').some(e=>e.textContent==='Saved: Good'));
+  assert.ok(button('Undo'));
   const afterAnswer=performanceCounts();
   assert.equal(afterAnswer.schedulingBuilds,beforeAnswer.schedulingBuilds,'answer updates the existing scheduling index');
   assert.equal(afterAnswer.cardPreparations,beforeAnswer.cardPreparations,'answer does not prepare the catalog again');
@@ -392,7 +395,8 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   assert.equal(savedConfig.scheduler_version,'ts-fsrs@5.2.3/FSRS-6');
   assert.ok(!('preset_id' in savedConfig.settings));assert.ok(!('new_cards_per_day' in savedConfig.settings));
   assert.equal(button('Undo review').disabled,false);
-  await button('Undo review').onclick();
+  await button('Undo').onclick();
+  assert.ok(!root.querySelectorAll('span').some(e=>e.textContent==='Saved: Good'));
   assert.equal(files.get(logs[0].path).text,'','undo removes the answer rather than introducing a training observation');
   assert.ok(button('Show answer'),'undone card is available again');
   assert.equal(button('Undo review').disabled,true);
@@ -1243,4 +1247,19 @@ test('source row sync publishes multiple selected files together and leaves othe
   assert.equal(plan.result.added,2);await engine.apply(plan);
   assert.equal(f.json('srs/data/cards/cards-00000.json').length,2);
   assert.ok(!f.reads.includes('third.csv'));
+});
+
+test('review swipes require a deliberate horizontal gesture',()=>{
+  assert.equal(SRS.reviewSwipe(-100,10,300),'left');
+  assert.equal(SRS.reviewSwipe(100,-10,300),'right');
+  for(const args of [[40,0,100],[100,80,200],[100,0,1000],[0,100,200]])assert.equal(SRS.reviewSwipe(...args),null);
+});
+test('answer compaction retains changed blocks and hides repeated question content',()=>{
+  const node=html=>({innerHTML:html,hidden:false});
+  const repeated=node('<b>Question</b>'),cloze=node('[…]'),image={hidden:false,outerHTML:'<img src="/map.svg">'};
+  const front={hidden:false,querySelectorAll:s=>s==='img'?[image]:[repeated,cloze]};
+  const back={querySelectorAll:s=>s==='img'?[image]:[node('<b>Question</b>'),node('Revealed answer')]};
+  SRS.compactReviewAnswer(front,back,false);
+  assert.equal(repeated.hidden,true);assert.equal(cloze.hidden,false);assert.equal(image.hidden,true);assert.equal(front.hidden,false);
+  SRS.compactReviewAnswer(front,back,true);assert.equal(front.hidden,true);
 });

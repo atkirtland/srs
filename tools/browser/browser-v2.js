@@ -455,3 +455,22 @@ class ContentCheckProgress {
   save(){try{this.storage.setItem(this.key,JSON.stringify({version:2,signature:this.signature,results:[...this.results],active:this.active,deck:this.deck,group:this.group}));}catch{}}
   invalidate(){this.signature=null;this.results.clear();this.active=false;this.save();}
 }
+
+// Deliberate horizontal swipes only; scrolling and slow drags do not rate cards.
+function reviewSwipe(dx,dy,elapsed){
+  return elapsed<=700&&Math.abs(dx)>=80&&Math.abs(dx)>Math.abs(dy)*2.5?(dx<0?"left":"right"):null;
+}
+function compactReviewAnswer(front,back,includesFront){
+  if(includesFront){front.hidden=true;return;}
+  // Hide repeated question blocks, retaining the full answer and changed clozes.
+  const selector="p,li,h1,h2,h3,h4,h5,h6,pre,table,div";
+  const signature=node=>node.innerHTML.trim().replace(/\s+/g," ");
+  const answers=new Set([...back.querySelectorAll(selector)].map(signature).filter(Boolean));
+  for(const node of front.querySelectorAll(selector)){
+    if(answers.has(signature(node)))node.hidden=true;
+  }
+  const images=new Set([...back.querySelectorAll("img")].map(n=>n.outerHTML));
+  for(const node of front.querySelectorAll("img")){
+    if(images.has(node.outerHTML))node.hidden=true;
+  }
+}
