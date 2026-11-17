@@ -474,3 +474,22 @@ function compactReviewAnswer(front,back,includesFront){
     if(images.has(node.outerHTML))node.hidden=true;
   }
 }
+
+// Scheduling snapshots and manual/rescheduling Anki entries are not recall attempts.
+function reviewObservation(event){
+  return (event.kind==="answer" || event.kind==="historical_review" && [0,1,2].includes(event.review_type)) &&
+    [1,2,3,4].includes(event.rating) && Number.isFinite(event.review_time_ms);
+}
+function reviewAnalytics(now,days,timing){
+  const cards=new Map(), daily=new Map(), weekCards=new Map(), today=dayNumber(now,timing), start=today-days+1;
+  return {cards,daily,weekCards,visit(event){
+    if(!reviewObservation(event)||event.review_time_ms>now||event.review_time_ms<now-(days+2)*86400000)return;
+    const day=dayNumber(event.review_time_ms,timing);if(day<start)return;
+    const week=Math.floor((today-day)/7);if(!weekCards.has(week))weekCards.set(week,new Set());weekCards.get(week).add(event.card_id);
+    const metric=map=>{let m=map.get(map===cards?event.card_id:day);if(!m){m={attempts:0,again:0,duration:0,recallAttempts:0,recalled:0};map.set(map===cards?event.card_id:day,m);}return m;};
+    for(const m of [metric(cards),metric(daily)]){
+      m.attempts++;m.again+=event.rating===1?1:0;m.duration+=Math.max(0,Number(event.duration_ms)||0);
+      if(event.kind==="historical_review"?event.review_type===1:event.was_review===true){m.recallAttempts++;m.recalled+=event.rating>1?1:0;}
+    }
+  }};
+}

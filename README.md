@@ -29,6 +29,20 @@ The first opening indexes review logs in persistent local IndexedDB. Later openi
 process only changed logs. Vault content is resolved once per open view and reused
 while reviewing; source or template changes, or Refresh, invalidate that cache.
 
+Open **Analytics** for review recall by week, time spent by source, and repeated
+Again answers over the last 30, 90, or 365 study days. Click a chart bar to open
+its cards in the same **Cards** browser. Cards supports review filters and sorting
+by Again answers, attempts, time spent, lifetime lapses, or name. Select a card
+for its preview, settings, and expandable review history (latest 100 attempts).
+Recall counts scheduled review attempts only; learning attempts contribute to
+time and failures. Imported Anki manual/rescheduling entries and scheduling
+snapshots are excluded. Concurrent answer branches remain separate recorded
+attempts. Statistics use the collection timezone and study-day rollover.
+Analytics scans the local review index on demand and caches the result until
+reviews change, the study day rolls over, or the period changes; it adds no scan
+to the deck homepage or reviewing path. The first analytics load can take longer
+with a large history. No review logs or scheduling data are changed.
+
 Open **Cards** to search questions, answers, source paths, card IDs, templates,
 and card-specific tags. Filter by deck or suspension status, then select a card
 to suspend/restore it or edit its tags. **Card settings** opens the same editor

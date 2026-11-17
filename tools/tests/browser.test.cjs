@@ -285,7 +285,7 @@ test('adding card settings upgrades the local database without rebuilding histor
 test('reviewer scopes content errors, reuses resolved content, and Bury writes nothing; live edits preserve identity',async()=>{
   class Element {
     addEventListener(){}
-    constructor(tag='div',options={}) {this.tag=tag;this.children=[];this.textContent=options.text||'';this.value=options.value||'';this.type=options.type;this.attr=options.attr||{};}
+    constructor(tag='div',options={}) {this.style={setProperty(){}};this.tag=tag;this.children=[];this.textContent=options.text||'';this.value=options.value||'';this.type=options.type;this.attr=options.attr||{};}
     createEl(tag,options){const e=new Element(tag,options);this.children.push(e);return e;}
     setAttribute(key,value){this.attr[key]=value;}
     createDiv(options){return this.createEl('div',options);}
@@ -414,6 +414,13 @@ test('reviewer scopes content errors, reuses resolved content, and Bury writes n
   const logBeforeRefusedUndo=logs[0].text;
   await button('Undo review').onclick();
   assert.equal(logs[0].text,logBeforeRefusedUndo,'undo preserves a log with a subsequent event');
+  button('Analytics').onclick();
+  for(let i=0;i<200&&!root.querySelectorAll('h2').some(e=>e.textContent==='Review analytics');i++)await tick();
+  assert.ok(root.querySelectorAll('h2').some(e=>e.textContent==='Review analytics'),JSON.stringify(root.querySelectorAll('div').map(e=>e.textContent).filter(Boolean)));
+  assert.ok(root.querySelectorAll('h3').some(e=>e.textContent==='Again answers per card'));
+  button('Browse analyzed cards').onclick();
+  for(let i=0;i<100&&!root.querySelectorAll('input').length;i++)await tick();
+  assert.ok(root.querySelectorAll('div').some(e=>/matching cards/.test(e.textContent)));
   button('Cards').onclick();
   for(let i=0;i<100&&!root.querySelectorAll('input').length;i++)await tick();
   const search=root.querySelectorAll('input').find(e=>e.type==='search');
@@ -1262,4 +1269,33 @@ test('answer compaction retains changed blocks and hides repeated question conte
   SRS.compactReviewAnswer(front,back,false);
   assert.equal(repeated.hidden,true);assert.equal(cloze.hidden,false);assert.equal(image.hidden,true);assert.equal(front.hidden,false);
   SRS.compactReviewAnswer(front,back,true);assert.equal(front.hidden,true);
+});
+
+
+test('analytics separates recall from learning, excludes snapshots/manual changes, and uses study days',()=>{
+  const report=SRS.reviewAnalytics(now,30,timing);
+  const events=[
+    {...answer(),was_review:true,was_new:false,rating:1,duration_ms:1200},
+    {...answer(),id:'second',was_review:true,was_new:false,rating:2,duration_ms:800},
+    {...answer(),id:'learning',rating:1,duration_ms:300},
+    {kind:'historical_review',id:'old',card_id:'card-1',review_type:1,rating:4,review_time_ms:now-86400000,duration_ms:700},
+    {kind:'historical_review',id:'manual',card_id:'card-1',review_type:4,rating:4,review_time_ms:now},
+    {...answer(),kind:'anki_state'},
+    {...answer(),review_time_ms:now-31*86400000},
+    {...answer(),review_time_ms:now+1}
+  ];
+  events.forEach(report.visit);
+  assert.deepEqual(report.cards.get('card-0'),{attempts:3,again:2,duration:2300,recallAttempts:2,recalled:1});
+  assert.deepEqual(report.cards.get('card-1'),{attempts:1,again:0,duration:700,recallAttempts:1,recalled:1});
+  assert.equal(report.weekCards.get(0).size,2);
+  assert.equal(report.daily.size,2);
+});
+test('analytics scans deduplicated imported and local attempts, and history excludes state snapshots',async()=>{
+  const index=await SRS.ReviewIndex.open('analytics-index','import',timing,indexedDB),known=new Set(['card-0']);
+  const old={format_version:2,kind:'historical_review',id:'anki:col:123',device_id:device,collection_key:'col',anki_revlog_id:'123',card_id:'card-0',review_time_ms:now-1,rating:1,review_type:1,duration_ms:400,original_review:{id:123}};
+  await index.ingest([old,answer()],known);await index.ingest([old,answer()],known);
+  const report=SRS.reviewAnalytics(now,30,timing);await index.scanReviews(report.visit);
+  assert.equal(report.cards.get('card-0').attempts,2);
+  const history=await index.reviewsFor('card-0');assert.equal(history.length,2);assert.equal(history[0].kind,'answer');
+  assert.deepEqual(await index.reviewsFor('absent'),[]);index.close();
 });

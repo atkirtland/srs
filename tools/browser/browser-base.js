@@ -2324,6 +2324,22 @@
     async historyFor(cardId) {
       return transaction(this.database,["observations"],"readonly",tx=>request(tx.objectStore("observations").index("card_id").getAll(cardId)));
     }
+    async scanReviews(visit) {
+      return transaction(this.database,["observations","activity"],"readonly",tx=>Promise.all(
+        ["observations","activity"].map(name=>new Promise((resolve,reject)=>{
+          const cursor=tx.objectStore(name).openCursor();
+          cursor.onerror=()=>reject(cursor.error);
+          cursor.onsuccess=()=>{const row=cursor.result;if(!row){resolve();return;}visit(row.value);row.continue();};
+        }))));
+    }
+    async reviewsFor(cardId) {
+      const events=await this.historyFor(cardId);
+      await transaction(this.database,["activity"],"readonly",tx=>new Promise((resolve,reject)=>{
+        const cursor=tx.objectStore("activity").openCursor();cursor.onerror=()=>reject(cursor.error);
+        cursor.onsuccess=()=>{const row=cursor.result;if(!row){resolve();return;}if(row.value.card_id===cardId)events.push(row.value);row.continue();};
+      }));
+      return events.filter(reviewObservation).sort((a,b)=>b.review_time_ms-a.review_time_ms||b.id.localeCompare(a.id));
+    }
     async activityToday(now) {
       const day=studyDay(now,this.timing);
       return transaction(this.database,["activity"],"readonly",tx=>request(tx.objectStore("activity").index("day").getAll(day)));

@@ -157,3 +157,11 @@
 .ankobs-srs .srs-answer-feedback button { background: transparent; box-shadow: none; }
 .ankobs-srs .srs-answer-feedback [data-rating="1"] { color: var(--text-error, #df4848); }
 .ankobs-srs .srs-answer-feedback [data-rating="3"] { color: var(--text-success, #36a265); }
+
+.ankobs-srs .srs-analytics-chart { margin: 1rem 0; }
+.ankobs-srs .srs-chart-row { display: grid; grid-template-columns: minmax(6rem, 1fr) minmax(3rem, 3fr) auto; gap: .6rem; align-items: center; width: 100%; height: auto; padding: .45rem; margin: .2rem 0; text-align: left; white-space: normal; }
+.ankobs-srs .srs-chart-track { background: var(--background-modifier-border); border-radius: 3px; overflow: hidden; height: .85rem; }
+.ankobs-srs .srs-chart-bar { display: block; background: var(--interactive-accent); height: 100%; }
+@media (max-width: 700px) {
+  .ankobs-srs .srs-chart-row { font-size: .85em; grid-template-columns: minmax(5rem, 1fr) minmax(2rem, 1fr) auto; gap: .3rem; }
+}

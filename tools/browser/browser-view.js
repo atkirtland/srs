@@ -7,6 +7,7 @@
     const home = controls.createEl("button",{text:"Decks"});
     let undoReview=null;
     const manage = controls.createEl("button",{text:"Cards"});
+    const analyticsButton=controls.createEl("button",{text:"Analytics"});
     const profilesButton=controls.createEl("button",{text:"Profiles"});
     const sourcesButton=controls.createEl("button",{text:"Sources"});
     const select = controls.createEl("select",{attr:{"aria-label":"Template group"}});
@@ -268,6 +269,7 @@
         onEvents:snapshotCache?batch=>changes.push(...batch):undefined,
         progress:n=>{if(!disposed && n>=500)notice.textContent=`Indexing reviews: ${n.toLocaleString()}…`;}
       });
+      if(result.parsed||result.rebuilt)analytics=null;
       for(const path of force)dirty.delete(path);
       if(snapshotCache){
         if(result.rebuilt||changes.some(e=>e.kind==='card_settings')){snapshotCache=null;runtimeCards=null;schedulingIndex=null;indexDirty=true;}
@@ -474,7 +476,7 @@
 
     function openCardSettings(card) {
       if(!leaveEditor())return;
-      panel="";managing=true;editedCardId=card.id;managerDirty=false;guardedDraw();
+      panel="";managing=true;managerMetric="all";editedCardId=card.id;managerDirty=false;guardedDraw();
     }
     function leaveEditor() {
       if(managerDirty){notice.textContent="You have unsaved changes. Save them or use the discard/close action before navigating.";return false;}
@@ -502,7 +504,7 @@
           const buttons=summary.createDiv({cls:"srs-deck-actions"});
           buttons.createEl("button",{text:"Review",attr:{"aria-label":`Review ${n.name}`}}).onclick=e=>{e.preventDefault();selectedDeck=n.id;reviewing=true;guardedDraw();};
           buttons.createEl("button",{text:"Browse cards",attr:{"aria-label":`Browse cards in ${n.name}`}}).onclick=e=>{
-            e.preventDefault();managerDeck=n.id;managerQuery="";managerStatus="all";editedCardId=null;managing=true;guardedDraw();
+            e.preventDefault();managerDeck=n.id;managerMetric="all";managerQuery="";managerStatus="all";editedCardId=null;managing=true;guardedDraw();
           };
           if(studyConfig)buttons.createEl("button",{text:"Edit",attr:{"aria-label":`Edit deck ${n.name}`}}).onclick=e=>{e.preventDefault();editingDeckId=n.id;panel="deck";guardedDraw();};
           const children=details.createDiv({cls:"srs-subdecks"});build(n.children,children);
@@ -515,7 +517,44 @@
       collapse.onclick=()=>{expandedDecks.clear();deckQuery="";search.value="";render();};
       render();showErrors(available);
     }
-    function showCardManager(available) {
+    let analytics=null, analyticsDays=30, managerMetric="all", managerSort="again", analyticsSnapshot=null;
+    async function loadAnalytics(){
+      if(analytics&&analyticsSnapshot===snapshotCache&&analytics.days===analyticsDays&&analytics.day===dayNumber(Date.now(),manifest.timing))return;
+      const result=reviewAnalytics(Date.now(),analyticsDays,manifest.timing);
+      notice.textContent="Analyzing review history…";
+      await index.scanReviews(result.visit);
+      analytics={...result,days:analyticsDays,day:dayNumber(Date.now(),manifest.timing)};analyticsSnapshot=snapshotCache;
+      notice.textContent="";
+    }
+    function openAnalyzedCards(metric="all"){
+      panel="";managing=true;managerMetric=metric;managerSort=metric==="time"?"duration":"again";
+      managerQuery="";managerStatus="all";managerDeck="";editedCardId=null;guardedDraw();
+    }
+    function showAnalytics(available){
+      homepage.createEl("h2",{text:"Review analytics"});
+      const period=homepage.createEl("select",{attr:{"aria-label":"Analytics period"}});
+      for(const days of [30,90,365])period.createEl("option",{value:String(days),text:`Last ${days} study days`});
+      period.value=String(analyticsDays);period.onchange=()=>{analyticsDays=Number(period.value);analytics=null;guardedDraw();};
+      homepage.createEl("p",{text:"Includes imported Anki and local attempts. Recall measures scheduled review attempts (Hard, Good, or Easy count as recalled); learning attempts count toward time and failures. Manual scheduling entries are excluded.",cls:"srs-muted"});
+      const total=[...analytics.cards.values()].reduce((a,m)=>{for(const k of Object.keys(a))a[k]+=m[k];return a;},{attempts:0,again:0,duration:0,recallAttempts:0,recalled:0});
+      homepage.createEl("p",{text:`${total.attempts.toLocaleString()} attempts · ${Math.round(total.duration/60000)} minutes · ${total.recallAttempts?(100*total.recalled/total.recallAttempts).toFixed(1)+"% review recall":"No scheduled review attempts"}`});
+      const chart=(title,rows)=>{
+        const box=homepage.createDiv({cls:"srs-analytics-chart"});box.createEl("h3",{text:title});
+        const max=Math.max(1,...rows.map(r=>r.value));
+        for(const r of rows){const button=box.createEl("button",{cls:"srs-chart-row",attr:{"aria-label":`${r.label}: ${r.text}. View cards`}});
+          button.createEl("span",{text:r.label});const track=button.createEl("span",{cls:"srs-chart-track"});track.createEl("span",{cls:"srs-chart-bar"}).style.width=`${100*r.value/max}%`;
+          button.createEl("span",{text:r.text});button.onclick=()=>openAnalyzedCards(r.metric);
+        }
+      };
+      // Weekly bins keep charts readable on phones; bar labels include sample sizes.
+      const weeks=new Map();for(const [day,m] of analytics.daily){const key=Math.floor((analytics.day-day)/7);const v=weeks.get(key)||{recalled:0,recallAttempts:0};v.recalled+=m.recalled;v.recallAttempts+=m.recallAttempts;weeks.set(key,v);}
+      chart("Review recall by week",[...weeks].sort((a,b)=>b[0]-a[0]).map(([w,m])=>({label:w===0?"Past 7 days":`${w*7+1}–${Math.min((w+1)*7,analyticsDays)} days ago`,value:m.recallAttempts?100*m.recalled/m.recallAttempts:0,text:m.recallAttempts?`${(100*m.recalled/m.recallAttempts).toFixed(0)}% (${m.recallAttempts})`:"No review attempts",metric:`week:${w}`})));
+      const groups=new Map();for(const card of available){const m=analytics.cards.get(card.id);if(!m)continue;const source=card.source_id||card.group||card.anki_notetype||"Other";groups.set(source,(groups.get(source)||0)+m.duration);}
+      chart("Review time by source (top 10)",[...groups].sort((a,b)=>b[1]-a[1]).slice(0,10).map(([source,time])=>({label:source,value:time,text:`${(time/60000).toFixed(1)} min`,metric:`source:${source}`})));
+      chart("Again answers per card",[["0",0,0],["1–2",1,2],["3–4",3,4],["5+",5,Infinity]].map(([label,min,max])=>({label,value:[...analytics.cards.values()].filter(m=>m.again>=min&&m.again<=max).length,text:`${[...analytics.cards.values()].filter(m=>m.again>=min&&m.again<=max).length} cards`,metric:`fail:${min}:${max}`})));
+      homepage.createEl("button",{text:"Browse analyzed cards"}).onclick=()=>openAnalyzedCards("reviewed");
+    }
+    async function showCardManager(available) {
       homepage.createEl("h3",{text:"Cards"});
       const filters=homepage.createDiv({cls:"srs-card-filters"});
       const search=filters.createEl("input",{type:"search",value:managerQuery,attr:{placeholder:"Search cards, sources, templates, or tags","aria-label":"Search cards"}});
@@ -526,6 +565,13 @@
       deck.createEl("option",{value:"",text:"All decks"});
       for(const [id,d] of Object.entries(studyConfig?.decks||manifest.scheduling?.decks||{}).sort(([,a],[,b])=>a.name.localeCompare(b.name)))deck.createEl("option",{value:id,text:d.name});
       deck.value=managerDeck;
+      const metric=filters.createEl("select",{attr:{"aria-label":"Review filter"}});
+      for(const [value,text] of [["all","All cards"],["reviewed","Reviewed in period"],["difficult","3+ Again answers"],["time","Has recorded review time"],...(!["all","reviewed","difficult","time"].includes(managerMetric)?[[managerMetric,"Chart selection"]]:[])])metric.createEl("option",{value,text});
+      metric.value=managerMetric;
+      const sort=filters.createEl("select",{attr:{"aria-label":"Sort cards"}});
+      for(const [value,text] of [["again","Most Again answers"],["duration","Most time spent"],["attempts","Most attempts"],["lapses","Most lifetime lapses"],["name","Card name"]])sort.createEl("option",{value,text});
+      sort.value=managerSort;
+      filters.createEl("span",{text:`Review statistics: last ${analyticsDays} study days`,cls:"srs-muted"});
       const summary=homepage.createDiv({cls:"srs-card-summary",attr:{role:"status","aria-live":"polite"}});
       const browser=homepage.createDiv({cls:"srs-card-browser"});
       const list=browser.createDiv({cls:"srs-card-list"}), editor=browser.createDiv({cls:"srs-card-editor"});
@@ -557,6 +603,13 @@
         metadata.createEl("p",{text:`Card ID: ${card.id}`});
         if(card.source?.path)editor.createEl("a",{text:"Open source"}).onclick=()=>api.workspace.openLinkText(card.source.path,"","tab");
         if(card.content_error)editor.createEl("p",{text:card.content_error,cls:"srs-errors"});
+        const stats=analytics.cards.get(card.id);
+        editor.createEl("p",{text:`${stats?.attempts||0} attempts · ${stats?.again||0} Again · ${((stats?.duration||0)/60000).toFixed(1)} min in period · ${states.get(card.id)?.state?.lapses||0} lifetime lapses`});
+        const history=editor.createEl("details");history.createEl("summary",{text:"Review history"});
+        let historyLoaded=false;history.ontoggle=async()=>{if(!history.open||historyLoaded)return;historyLoaded=true;
+          try{const events=await index.reviewsFor(card.id);history.createEl("p",{text:`${events.length} attempts (latest 100 shown)`});
+          for(const event of events.slice(0,100))history.createEl("p",{text:`${new Date(event.review_time_ms).toLocaleString()} · ${["Again","Hard","Good","Easy"][event.rating-1]} · ${((event.duration_ms||0)/1000).toFixed(1)}s · ${event.kind==="historical_review"?"Anki":"Local"}`});
+          }catch(e){history.createEl("p",{text:e.message});historyLoaded=false;}};
         const suspension=editor.createEl("label",{text:"Suspended "});
         const suspended=suspension.createEl("input",{type:"checkbox"});
         const originalSuspended=cardSuspended(card,states.get(card.id));suspended.checked=originalSuspended;
@@ -588,9 +641,20 @@
         list.empty();rowButtons.clear();
         const terms=managerQuery.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
         const deckName=manifest.scheduling?.decks[managerDeck]?.name;
-        const matches=entries.filter(({card,text})=>!card.retired && terms.every(term=>text.includes(term)) &&
+        const selectedMetric=card=>{
+          const m=analytics.cards.get(card.id);
+          if(managerMetric==="all")return true;if(!m)return false;
+          if(managerMetric==="reviewed")return true;if(managerMetric==="difficult")return m.again>=3;if(managerMetric==="time")return m.duration>0;
+          if(managerMetric.startsWith("source:"))return (card.source_id||card.group||card.anki_notetype||"Other")===managerMetric.slice(7);
+          if(managerMetric.startsWith("fail:")){const [,min,max]=managerMetric.split(":");return m.again>=Number(min)&&m.again<=Number(max);}
+          if(managerMetric.startsWith("week:"))return analytics.weekCards?.get(Number(managerMetric.slice(5)))?.has(card.id)||false;
+          return false;
+        };
+        const matches=entries.filter(({card,text})=>selectedMetric(card)&&!card.retired && terms.every(term=>text.includes(term)) &&
           (managerStatus==="all" || (managerStatus==="errors" ? Boolean(card.content_error) : cardSuspended(card,states.get(card.id))===(managerStatus==="suspended"))) &&
           (studyConfig ? !managerDeck || deckMatches(card,managerDeck) : !deckName || manifest.scheduling.decks[card.deck_id]?.name===deckName || manifest.scheduling.decks[card.deck_id]?.name.startsWith(deckName+"::")));
+        matches.sort((a,b)=>managerSort==="name"?label(a.card).localeCompare(label(b.card)):
+          ((managerSort==="lapses"?states.get(b.card.id)?.state?.lapses:analytics.cards.get(b.card.id)?.[managerSort])||0)-((managerSort==="lapses"?states.get(a.card.id)?.state?.lapses:analytics.cards.get(a.card.id)?.[managerSort])||0)||a.card.id.localeCompare(b.card.id));
         summary.textContent=`${matches.length.toLocaleString()} matching cards`;
         if(!matches.length)list.createEl("p",{text:"No cards match these filters. Try a different search or deck.",cls:"srs-empty"});
         let offset=0, more;
@@ -600,6 +664,8 @@
             const row=list.createDiv({cls:"srs-card-row"});
             const button=row.createEl("button",{text:label(card),attr:{"aria-label":`Edit ${label(card)}`,"aria-pressed":String(editedCardId===card.id)}});
             rowButtons.set(card.id,button);button.onclick=()=>edit(card);
+            const stats=analytics.cards.get(card.id);
+            row.createEl("small",{text:`${stats?.attempts||0} attempts · ${stats?.again||0} Again · ${((stats?.duration||0)/60000).toFixed(1)} min`});
             if(card.content_error)row.createEl("small",{text:"Content error",cls:"srs-error-badge"});
             row.createEl("span",{text:`${cardSuspended(card,states.get(card.id))?"Suspended":"Active"} · ${card.template_key||card.anki_ordinal} · ${manifest.scheduling?.decks[card.deck_id]?.name||""}${card.card_settings?.tags?.length?" · "+card.card_settings.tags.join(", "):""}`});
           }
@@ -608,6 +674,7 @@
         };page();
       }
       search.oninput=()=>{managerQuery=search.value;renderList();};
+      metric.onchange=()=>{managerMetric=metric.value;renderList();};sort.onchange=()=>{managerSort=sort.value;renderList();};
       status.onchange=()=>{managerStatus=status.value;renderList();};
       deck.onchange=()=>{managerDeck=deck.value;renderList();};
       renderList();
@@ -798,6 +865,7 @@
       home.setAttribute("aria-pressed",String(!panel && !managing && !reviewing));
       profilesButton.setAttribute("aria-pressed",String(panel==="profiles"));
       sourcesButton.setAttribute("aria-pressed",String(panel==="sources"));
+      analyticsButton.setAttribute("aria-pressed",String(panel==="analytics"));
       manage.setAttribute("aria-pressed",String(managing));
       if(catalogDirty)await withStoreLock(identity,()=>new CatalogPublisher(store,dataRoot).recover());
       const freshManifest=catalogDirty?await json(`${dataRoot}/manifest.json`):baseManifest;
@@ -854,8 +922,10 @@
       if(manifest.scheduling&&!schedulingIndex){counters.schedulingBuilds++;schedulingIndex=await measure("Scheduling index",()=>new SchedulingIndex(available,states,manifest,snapshot.activity,clockNow,studyConfig?membershipCache:null));for(const id of skipped)schedulingIndex.bury(id);}
       nextWake=schedulingIndex?.nextWake??Infinity;
       timeKey=String(schedulingIndex?.today??today);
+      if(panel==="analytics"||managing)await loadAnalytics();
+      if(panel==="analytics"){showAnalytics(available);return;}
       if(panel){showConfiguration(panel);return;}
-      if(managing){showCardManager(available);return;}
+      if(managing){await showCardManager(available);return;}
       if(!reviewing && manifest.scheduling) {
         const queue={tree:await measure("Deck screen",()=>schedulingIndex.tree(select.value))};
         showDecks(queue,available);notice.textContent=`${cards.length.toLocaleString()} cards · ${knownErrors.size.toLocaleString()} known content errors · ${(Math.max(0,schedulingIndex.counts().total-new Set([...contentCache.keys(),...scanProgress.results.keys()]).size)).toLocaleString()} unchecked`;
@@ -863,7 +933,7 @@
       }
       const queue=await measure("Selected queue",()=>schedulingIndex?schedulingIndex.queue(selectedDeck,select.value):reviewQueueV2(available,states,snapshot.activity,manifest,Date.now(),select.value));
       context.createEl("h2",{text:studyConfig?.decks[selectedDeck]?.name||manifest.scheduling?.decks[selectedDeck]?.name||select.value||"All decks"});
-      context.createEl("button",{text:"Browse cards"}).onclick=()=>{managerDeck=selectedDeck||"";managerQuery="";managerStatus="all";editedCardId=null;managing=true;guardedDraw();};
+      context.createEl("button",{text:"Browse cards"}).onclick=()=>{managerDeck=selectedDeck||"";managerMetric="all";managerQuery="";managerStatus="all";editedCardId=null;managing=true;guardedDraw();};
 
       // Session skips do not change states, event logs, or the displayed counts.
       const renderGeneration=sourceGeneration;
@@ -1008,10 +1078,11 @@
       clearTimeout(refreshTimer);refreshTimer=setTimeout(guardedDraw,400);
     }
     home.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=false;managerDirty=false;reviewing=false;selectedDeck=null;guardedDraw();};
-    manage.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=true;managerDirty=false;guardedDraw();};
+    manage.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;panel="";managing=true;managerMetric="all";managerDirty=false;guardedDraw();};
     select.onchange=()=>{operation++;checking=false;if(!leaveEditor()){select.value=activeGroup;return;}activeGroup=select.value;panel="";managing=false;managerDirty=false;reviewing=Boolean(select.value);selectedDeck=null;guardedDraw();};
     refresh.onclick=()=>{if(managerDirty){notice.textContent="Save or discard changes before refreshing.";return;}reviewFiles=null;cache.clear();contentCache.clear();metadataCache.clear();candidateSources.clear();taxonomy=null;presidents=null;runtimeDirty=true;catalogDirty=true;indexDirty=true;invalidateScanProgress();sourceGeneration++;operation++;checking=false;resetQueues();guardedDraw();};
     rebuild.onclick=async()=>{if(busy)return;busy=true;try{await withStoreLock(identity,async()=>{sessionCache.invalidate();await index.clear();await catalogCache?.clear();const maintenanceCache=await MaintenanceCache.open(identity);try{await maintenanceCache.cache.clear();}finally{maintenanceCache.close();}});}catch(e){message(e);}finally{busy=false;await guardedDraw();}};
+    analyticsButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="analytics";guardedDraw();};
     profilesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="profiles";guardedDraw();};
     sourcesButton.onclick=()=>{operation++;checking=false;if(!leaveEditor())return;managing=false;panel="sources";guardedDraw();};
     function catalogDirectory(value,kind){
