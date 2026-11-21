@@ -1,0 +1,25 @@
+{
+  "format_version": 1,
+  "rules": {
+    "example-notes": {
+      "sources": [
+        "examples/notes.csv"
+      ],
+      "recursive": false,
+      "fields": [
+        {
+          "name": "Front",
+          "source": "question",
+          "transform": "text",
+          "required": true
+        },
+        {
+          "name": "Back",
+          "source": "answer",
+          "transform": "text",
+          "required": true
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "format_version": 1,
+  "decks": {
+    "example": {
+      "name": "Example",
+      "parent_id": null,
+      "filter": {
+        "groups": [
+          "example-notes"
+        ]
+      }
+    }
+  }
+}

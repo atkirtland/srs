@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import sys
 from .vault import ExportError
+from .settings import default_vault
 
 REVIEWER = Path(__file__).resolve().parents[2]
 
@@ -18,7 +19,7 @@ def main(argv=None):
         command.add_argument('--data', type=Path, default=REVIEWER / 'data')
         command.add_argument('--study', type=Path, help='legacy study.json or configuration directory (default: --config)')
         command.add_argument('--config', type=Path, default=REVIEWER / 'config', help='configuration directory')
-        command.add_argument('--vault', type=Path, default=REVIEWER.parent)
+        command.add_argument('--vault', type=Path, default=default_vault())
     train.add_argument('--profile', required=True)
     train.add_argument('--apply', action='store_true', help='apply fitted parameters to future answers')
     train.add_argument('--output', type=Path)

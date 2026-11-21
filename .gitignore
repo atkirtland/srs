@@ -1,12 +1,19 @@
 data/
-/migration/config/
+/migration/config/*
+!/migration/config/*.example.json
 anki-inventory.json
 verification-counts.json
 __pycache__/
 .venv/
 node_modules/
 verification.json
-config/
+/config/*
+!/config/*.example.json
+/config.json
+/study.json
 temp/
 
 /tools/.cache/
+/anki-review-import.json
+
+/training.json

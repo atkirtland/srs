@@ -7,7 +7,10 @@ uv sync --locked
 uv run python srs.py train --profile preset-1 --apply
 ```
 
-Defaults point to `../config/`, `../data/`, and the containing vault.
+Defaults point to `../config/`, `../data/`, and the containing vault. Set the
+vault in ignored `../config/local.json` (copy `local.example.json`), with
+`SRS_VAULT`, or with `--vault`. Only synthetic `*.example.json` configurations
+are tracked.
 Profiles live in `../data/profiles.json`. `--config` selects another configuration
 directory; `--data` selects its store. Legacy `--study <study.json>` remains
 available for compatibility.

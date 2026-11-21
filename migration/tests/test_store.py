@@ -78,7 +78,7 @@ class StoreTests(unittest.TestCase):
         self.day_zero = datetime.fromtimestamp(col.sched.day_cutoff, timezone.utc).date() - timedelta(days=col.sched.today + 1)
         col.close()
         self.raw = srs.read_snapshot(self.collection)
-        self.config = json.loads((Path(__file__).resolve().parents[1] / "config/srs.json").read_text())
+        self.config = json.loads((Path(__file__).resolve().parents[1] / "config/srs.example.json").read_text())
         self.config["groups"] = {}
         self.exports = {"test": sources.Export("data/test.csv", "Basic", (
             sources.Field("Front", "front", sources.text), sources.Field("Back", "back", sources.text)))}

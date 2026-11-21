@@ -1,0 +1,11 @@
+{
+  "format_version": 1,
+  "scheduler": {
+    "algorithm": "FSRS-6",
+    "desired_retention": 0.9,
+    "maximum_interval": 36500,
+    "enable_fuzz": false,
+    "new_cards_per_day": 20
+  },
+  "groups": {}
+}

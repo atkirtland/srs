@@ -1,0 +1,25 @@
+{
+  "example-notes": {
+    "source_kind": "list",
+    "sources": [
+      "examples/notes.csv"
+    ],
+    "notetype": "Basic",
+    "query": "note:Basic",
+    "identity_fields": ["Front"],
+    "fields": [
+      {
+        "source": "question",
+        "transform": "text",
+        "required": true,
+        "anki": "Front"
+      },
+      {
+        "source": "answer",
+        "transform": "text",
+        "required": true,
+        "anki": "Back"
+      }
+    ]
+  }
+}

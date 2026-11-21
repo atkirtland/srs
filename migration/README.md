@@ -16,6 +16,11 @@ are different: they carry a later scheduling update after new Anki reviews.
 | `migrate.py verify ...` | Compare counts and transitions with a disposable Anki collection copy. |
 | `migrate.py init-study` | Create `../config/`, `../data/profiles.json` and separate note/card bindings once. |
 
+Copy `config/exports.example.json` and `config/srs.example.json` to local files
+without `.example` and customize them before importing. These local files are
+ignored. Migration defaults to the system timezone; `--timezone` and the ignored
+`../config/local.json` can override it. See the main README for vault settings.
+
 Run native import and verification with their optional backend:
 
 ```sh

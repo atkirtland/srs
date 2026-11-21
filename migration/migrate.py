@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "lib"))
 
 import srs
 from srs_tools.vault import ExportError
+from srs_tools.settings import default_vault, default_timezone
 
 
 def forward_ongoing(argv):
@@ -47,10 +48,10 @@ def main(argv: list[str] | None = None) -> int:
     inspect.add_argument("--output", type=Path)
     migrate = commands.add_parser("migrate", help="archive history and generate configured cards")
     migrate.add_argument("--collection", type=Path, required=True)
-    migrate.add_argument("--vault", type=Path, default=PORTABLE.parent if PORTABLE else None)
+    migrate.add_argument("--vault", type=Path, default=default_vault())
     migrate.add_argument("--config", type=Path)
     migrate.add_argument("--output", type=Path, help="default: <vault>/ankobs-srs/data")
-    migrate.add_argument("--timezone", required=True, help="Anki scheduling timezone, e.g. America/Chicago")
+    migrate.add_argument("--timezone", help="Anki scheduling timezone (default: local settings or system timezone)")
     migrate.add_argument("--day-zero", type=date.fromisoformat, required=True,
                          help="local calendar date corresponding to Anki scheduler day zero (YYYY-MM-DD)")
     migrate.add_argument("--rollover-hour", type=int, choices=range(24), default=4)
@@ -118,6 +119,7 @@ def main(argv: list[str] | None = None) -> int:
             import verification
             return verification.run(args)
         else:
+            args.timezone = args.timezone or default_timezone()
             if args.vault is None:
                 raise srs.SRSError("--vault is required outside the portable vault directory")
             portable = PORTABLE or args.vault / "ankobs-srs"
@@ -125,7 +127,10 @@ def main(argv: list[str] | None = None) -> int:
             if config_path.suffix != '.json':
                 config_path = config_path / 'cards.json'
             import sources
-            config = srs.load_config(config_path, sources.EXPORTS)
+            template_input = config_path
+            if not args.config and not template_input.exists():
+                template_input = ROOT / 'config/srs.example.json'
+            config = srs.load_config(template_input, sources.EXPORTS)
             import importlib.metadata
             import scheduling
             installed_version = importlib.metadata.version("anki")

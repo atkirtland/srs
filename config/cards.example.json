@@ -1,0 +1,29 @@
+{
+  "format_version": 1,
+  "groups": {
+    "example-notes": {
+      "templates": [
+        {
+          "key": "recognition",
+          "enabled": true,
+          "anki_notetype": "Basic",
+          "anki_ordinal": 0,
+          "required_fields": [
+            "Front",
+            "Back"
+          ],
+          "front": "{{Front}}",
+          "back": "{{Back}}"
+        }
+      ]
+    }
+  },
+  "rules": {
+    "example-notes": {
+      "templates": [
+        "recognition"
+      ],
+      "profile": "example"
+    }
+  }
+}

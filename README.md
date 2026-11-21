@@ -58,6 +58,38 @@ changed settings create a new one. Existing inline review configurations remain
 readable. These archive files are retained across reimports and should sync with
 the review logs.
 
+## Local configuration
+
+Only `*.example.json` configuration files belong in Git. Personalized configuration,
+review logs, generated data, and reports stay ignored. Examples contain synthetic data.
+
+For a new setup, copy the examples you need without overwriting existing files:
+
+```sh
+cp -n config/local.example.json config/local.json
+cp -n migration/config/exports.example.json migration/config/exports.json
+cp -n migration/config/srs.example.json migration/config/srs.json
+```
+
+Edit `config/local.json` to set `vault` to your vault directory, or leave it null
+to use the directory containing this repository. Relative paths resolve from the
+local settings file. `--vault` overrides `SRS_VAULT`, which overrides this setting.
+`SRS_SETTINGS` can select a different local settings file.
+
+Leave `timezone` null to use the operating system timezone for new imports.
+`--timezone` overrides the local setting; `TZ` controls system timezone discovery.
+Existing imported history keeps its recorded timezone and scheduling baseline.
+Supply the collection's day-zero date as `--day-zero YYYY-MM-DD`; it is not today's date.
+Verification uses the current system clock unless an explicit reference time is given.
+
+A fresh Anki import and `init-study` generate your personalized `config/*.json`
+and `data/profiles.json`. Alternatively, copy `sources.example.json`,
+`cards.example.json`, `decks.example.json`, and `profile-rules.example.json` to
+matching filenames without `.example`, and copy `profiles.example.json` to
+`data/profiles.json`. The example source expects an `examples/notes.csv` file
+in your vault with `question` and `answer` columns. Example FSRS weights are
+synthetic; import your own settings or train a profile before real study.
+
 ## Source rules, study decks, and profiles
 
 Editable configuration lives in `config/`. Scheduling profiles and generated
@@ -362,14 +394,13 @@ uv run --extra anki python migrate.py verify \
   --output verification.json
 ```
 
-Replace `--at` with the corresponding Anki reference time; omit it to use command
-start time. `--node /path/to/node` selects an executable outside PATH.
+Verification uses the current system time. Pass `--at` only for a reproducible
+reference time. `--node /path/to/node` selects an executable outside PATH.
 
 Every deck and parent must agree **exactly** in all three counts. Missing snapshot
 cards, a different count, missing transition coverage, memory/step differences,
 or deterministic interval differences produce status 2 and detailed diagnostics.
-Content
-errors do not affect the comparison. A successful count comparison is reported
+Content errors do not affect the comparison. A successful count comparison is reported
 separately from scheduling comparisons.
 
 The harness exercises all four ratings for available new, learning, review, and

@@ -11,6 +11,8 @@ CONFIG_DIR = Path(__file__).resolve().parents[1] / "config"
 
 def load_json(filename: str) -> Any:
     path = CONFIG_DIR / filename
+    if not path.exists():
+        path = path.with_name(path.stem + '.example' + path.suffix)
     try:
         return parse_json(path.read_text(encoding="utf-8"), str(path))
     except (OSError, json.JSONDecodeError, ValueError) as error:

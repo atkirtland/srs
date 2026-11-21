@@ -14,7 +14,9 @@ import yaml
 from .configuration import JAPANESE_REGIONS, US_STATES_BY_SLUG
 
 
-DEFAULT_VAULT = Path("/path/to/vault")
+from .settings import default_vault
+
+DEFAULT_VAULT = default_vault()
 ValueTransform = Callable[[Any, "Note"], str]
 
 
