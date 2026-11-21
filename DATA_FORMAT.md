@@ -8,6 +8,9 @@ the vault at review time and is never archived here.
 
 There is no retained Anki note-content archive.
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the component layout and configuration
+rules, and [README.md](README.md) for setup and commands.
+
 The current store format is **version 2**. Preserved version 1 answer events are
 also readable. File names do not determine event kind; inspect `format_version`
 and `kind` inside each record.
@@ -429,7 +432,7 @@ from the store. Session Bury choices are also not written as review events.
 
 Discovery writes only changed note/card partitions, with atomic replacement per
 file. `catalog.pending.json` temporarily records the changed partitions and target
-manifest. If interrupted, the next CLI open completes the pending update; the
+manifest. If interrupted, reopening the reviewer completes the pending update; the
 reviewer pauses while it is present. Review logs and scheduler archives are not
 rewritten. Generated metadata contains no note content; edit `config/cards.json`
 and vault source files for presentation/content changes.
@@ -441,7 +444,8 @@ records with unknown addition times omit it; upgrading does not invent a date.
 
 ## Independent card discovery and profile training
 
-Ongoing commands are `tools/srs.py refresh-cards` and `tools/srs.py train`.
+Card discovery runs through **Tools → Refresh cards** in the reviewer;
+profile training runs through `tools/srs.py train` on desktop.
 The one-time imported-metadata initializer remains `migration/migrate.py init-study`.
 The editable documents (all `format_version: 1`) are:
 
@@ -458,14 +462,9 @@ files and [schemas/data.schema.json](schemas/data.schema.json) for profiles and
 generated metadata. [schemas/study.schema.json](schemas/study.schema.json)
 describes the old combined/runtime representation, not a required stored file.
 
-`tools/srs.py upgrade-layout` converts existing `study.json`/`config.json` and
-card partitions in place. It checks configuration equivalence, card IDs and
-baselines before switching the manifest, then removes the superseded generated
-imports and legacy configuration. It never writes review logs or scheduler
-archives, changes `import_id`, retrains a profile, or reschedules a card. A
-converted store can keep using its existing incremental review index.
-The [README](README.md#source-rules-study-decks-and-profiles) documents filter
-semantics, precedence, daily budgets and commands.
+Legacy `study.json`/`config.json` representations remain readable; there is no
+`upgrade-layout` CLI command. The [architecture reference](ARCHITECTURE.md#configuration-and-storage-locations)
+documents filters, profile precedence, and daily budgets.
 
 New source-discovered cards use the same card-partition format and persistent
 source/template identity. Optional `profile_id` supplies their initial profile;

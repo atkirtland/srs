@@ -6,3 +6,6 @@ loader or package installation is needed on desktop or Android.
 To update, change the pinned tools development dependency and copy
 `node_modules/js-yaml/dist/browser/js-yaml.umd.min.js` and its `LICENSE` here.
 Run the browser YAML regression tests and rebuild `view.js`.
+
+The bundled ts-fsrs code in `../browser-base.js` is covered by
+[ts-fsrs-LICENSE](ts-fsrs-LICENSE).

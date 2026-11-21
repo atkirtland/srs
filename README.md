@@ -1,11 +1,12 @@
-# Portable Obsidian SRS
+# Obsidian SRS
 
-The standalone `view.js` reviewer reads card content exclusively from your vault.
-It needs Obsidian and Dataview on desktop or Android. Python tooling runs on desktop under `tools/` (ongoing usage) and
-`migration/` (Anki import/verification). Python and Node are never used while
-reviewing.
+Review cards from your Obsidian notes, CSV files, and callouts on desktop or
+Android. Requires Obsidian and Dataview with JavaScript queries enabled.
+Python and Node are only needed for desktop tools.
 
-Open the default deck homepage:
+## Open the reviewer
+
+Put this folder at `srs/` in your vault and add this to a note:
 
 ````markdown
 ```dataviewjs
@@ -13,549 +14,123 @@ await dv.view("srs", { root: "srs" });
 ```
 ````
 
-Use your actual folder name for both paths. Existing group calls still work:
-`await dv.view("srs", { root: "srs", group: "example-notes" });`.
+Use your folder name for both paths. Select a deck to study.
+**Bury** skips a card for the session; **Undo review** reverses the latest answer
+when it is still the card's latest state and the last event in that device's log.
+**Cards** provides search, previews, suspension, tags, and review history.
+**Analytics** shows recall, time spent, and repeated Again answers.
 
-The homepage has an expandable deck hierarchy with blue new, red learning/
-relearning, and green review counts. Content-error totals are separate. Opening
-a deck includes its children. Missing sources, required fields, disabled templates,
-and unsupported operations stay visible without reducing scheduling counts.
-**Undo review** reverses the last answer made in the current reviewer session, restoring its prior schedule and daily allowance and removing the answer from the log and training history. It is available only while that answer is still the latest state for its card and the final event in its log. Undo rebuilds the local index. It cannot retract copies already synced to another device; let vault synchronization finish before switching devices.
+## Set up
 
-**Bury** hides a card for this session and changes no schedule, history, or daily counter. Refresh
-rereads the vault and configuration; reopening clears the session's skips.
-
-The first opening indexes review logs in persistent local IndexedDB. Later openings
-process only changed logs. Vault content is resolved once per open view and reused
-while reviewing; source or template changes, or Refresh, invalidate that cache.
-
-Open **Analytics** for review recall by week, time spent by source, and repeated
-Again answers over the last 30, 90, or 365 study days. Click a chart bar to open
-its cards in the same **Cards** browser. Cards supports review filters and sorting
-by Again answers, attempts, time spent, lifetime lapses, or name. Select a card
-for its preview, settings, and expandable review history (latest 100 attempts).
-Recall counts scheduled review attempts only; learning attempts contribute to
-time and failures. Imported Anki manual/rescheduling entries and scheduling
-snapshots are excluded. Concurrent answer branches remain separate recorded
-attempts. Statistics use the collection timezone and study-day rollover.
-Analytics scans the local review index on demand and caches the result until
-reviews change, the study day rolls over, or the period changes; it adds no scan
-to the deck homepage or reviewing path. The first analytics load can take longer
-with a large history. No review logs or scheduling data are changed.
-
-Open **Cards** to search questions, answers, source paths, card IDs, templates,
-and card-specific tags. Filter by deck or suspension status, then select a card
-to suspend/restore it or edit its tags. **Card settings** opens the same editor
-from the reviewer. Settings apply to that individual card, including when a note
-generates several cards. **Use imported defaults** removes its explicit overrides.
-Settings are synced in the device's monthly logs and survive reimports; they do
-not change the card's saved schedule or count as studying. Suspension excludes
-the card from review counts and queues until it is restored.
-
-New answers reference an immutable scheduler configuration under
-`data/scheduler-configs/<sha256>.json`. Identical interval settings share a file;
-changed settings create a new one. Existing inline review configurations remain
-readable. These archive files are retained across reimports and should sync with
-the review logs.
-
-## Local configuration
-
-Only `*.example.json` configuration files belong in Git. Personalized configuration,
-review logs, generated data, and reports stay ignored. Examples contain synthetic data.
-
-For a new setup, copy the examples you need without overwriting existing files:
+From this folder, copy the local settings without overwriting existing files:
 
 ```sh
 cp -n config/local.example.json config/local.json
-cp -n migration/config/exports.example.json migration/config/exports.json
-cp -n migration/config/srs.example.json migration/config/srs.json
 ```
 
-Edit `config/local.json` to set `vault` to your vault directory, or leave it null
-to use the directory containing this repository. Relative paths resolve from the
-local settings file. `--vault` overrides `SRS_VAULT`, which overrides this setting.
-`SRS_SETTINGS` can select a different local settings file.
+Set `vault` to your vault directory, or leave it null to use this folder's parent.
+Leave `timezone` null to use the system timezone. Local configuration and study
+data are ignored by Git; only synthetic `*.example.json` files are tracked.
 
-Leave `timezone` null to use the operating system timezone for new imports.
-`--timezone` overrides the local setting; `TZ` controls system timezone discovery.
-Existing imported history keeps its recorded timezone and scheduling baseline.
-Supply the collection's day-zero date as `--day-zero YYYY-MM-DD`; it is not today's date.
-Verification uses the current system clock unless an explicit reference time is given.
+Choose one starting point:
 
-A fresh Anki import and `init-study` generate your personalized `config/*.json`
-and `data/profiles.json`. Alternatively, copy `sources.example.json`,
-`cards.example.json`, `decks.example.json`, and `profile-rules.example.json` to
-matching filenames without `.example`, and copy `profiles.example.json` to
-`data/profiles.json`. The example source expects an `examples/notes.csv` file
-in your vault with `question` and `answer` columns. Example FSRS weights are
-synthetic; import your own settings or train a profile before real study.
+- **Anki:** follow the import commands below.
+- **Without Anki:** copy `sources`, `cards`, `decks`, and `profile-rules` examples
+  from `config/*.example.json` to matching `.json` filenames. Create `data/` and
+  copy `config/profiles.example.json` to `data/profiles.json`. Supply
+  `examples/notes.csv` in your vault with `question` and `answer` columns, or edit
+  the source rules. The example weights are synthetic; train or supply your own
+  profile before using them for study.
 
-## Source rules, study decks, and profiles
+## Add and update cards
 
-Editable configuration lives in `config/`. Scheduling profiles and generated
-bindings live in `data/`. Vault note content is read on demand; an SRS note is a
-stable identity plus a runtime set of fields, without a second content archive.
+Edit `config/sources.json` for source paths and fields, `config/cards.json` for
+templates, and `config/decks.json` for deck filters. **Sources** shows the current
+rules; **New deck** and **Edit** change deck membership.
 
-| Layer | Defined in |
-| --- | --- |
-| Source → SRS notes | `config/sources.json` |
-| Notes → cards | `config/cards.json` |
-| Cards → study decks | `config/decks.json` |
-| Scheduling profiles and assignment | `data/profiles.json`, `config/profile-rules.json` |
-| Generated identities and source bindings | `data/notes/`, `data/cards/` |
-| Answers and card-specific settings | `data/reviews/` |
+- **Tools → Refresh cards:** discover new notes and update cards.
+- **Sync source file:** update one file from the card menu or **Sources**.
+- **Tools → Check content:** find missing fields, sources, and template errors.
+- **Tools → Prune missing sources:** preview removal of unreviewed local cards
+  whose source identities no longer exist. Imported cards and cards with reviews
+  or settings are protected.
+- **Reload reviewer:** reload existing data without discovering new cards.
 
-These configuration layers are separate, and study deck membership uses filters.
-Stored card records also retain scheduling baselines and imported Anki metadata,
-including original deck IDs; those IDs do not define study deck membership.
-The manifest retains imported scheduling settings and daily counters. The store
-therefore includes scheduling and compatibility metadata alongside identities.
+To enroll a Markdown note, add a blank `srs_note_id:` frontmatter field.
+CSV rows and `[!srs]` / `[!anki]` blocks enroll automatically under matching source
+rules. Refresh fills missing IDs. Keep IDs, source-rule keys, and template keys
+stable when editing. When moving a note between source rules, refresh and map its
+old templates to destination templates in the dialog to preserve card history.
 
-For a fresh Anki import, `migration/migrate.py init-study` creates the same layout
-from the imported metadata and compatibility source registry. It refuses to
-replace existing source rules.
+Run maintenance on one syncing device at a time. Choose a distinct **Device**
+value on each device, sync the vault, `config/`, and all of `data/`, and let syncing
+finish before switching devices. **Tools → Rebuild local index** rebuilds caches.
 
-### Changing a note type
+## Import from Anki
 
-Move the source row or Markdown note into its new source rule and edit its fields,
-keeping its existing note ID. Choose **Tools → Refresh cards** in the reviewer.
-A mapping dialog appears once for each old source rule
-→ new source rule pair, showing the affected note and card counts. Map each old
-template to a destination template, or choose **Retire**, then confirm the batch.
-Mappings apply to this refresh only.
-
-Mapped cards keep their card IDs, scheduling state, profile assignments, settings,
-review history, and creation timestamps. New destination templates create new
-cards. Retired cards retain their history and leave the study queue. Note IDs
-in `data/notes/` also remain stable. Study deck membership follows the new source
-bindings and filters. Ambiguous mappings and cancellation stop catalog publication;
-source discovery can still seed IDs for unrelated new notes before prompting.
-
-### Configuration and storage locations
-
-All paths below are relative to this reviewer directory.
-
-| Layer | Location | What it defines or stores |
-| --- | --- | --- |
-| Anki → vault conversion | Your external converter; compatibility adapter: `migration/config/exports.json` | Legacy import only. Ongoing tools and reviewer do not load this registry. |
-| Vault source identity | Frontmatter / CSV: `anki_note_id`, `srs_note_id` (legacy `srs_uid` readable); block comments: `ID`, `SRS-ID` | Persistent identity independent of the source file's position. |
-| Obsidian → SRS note | `config/sources.json` → `rules[rule-id]` | Source paths, field names, property mappings, transformations and selection filters. Field `name` names the SRS note field; `source` names the vault property. |
-| SRS note → cards | `config/cards.json` → `rules[rule-id]`, `groups[rule-id].templates` | Selected templates, initial scheduling profile, front/back presentation and optional `when` filters. |
-| SRS note bindings | `data/notes/notes-*.json` | `id`, source `uid`, `rule_id`, and a vault `locator`. One binding per source-rule/note-UID pair, shared by its cards. No export definitions or field recipes. |
-| Note → card ID mapping | `data/cards/cards-*.json` → `note_id`, `id`, `template_key`, ordinal | Each card points to its SRS note binding. Several card IDs may share one `note_id`; no separate mapping file is needed. Existing imported IDs are preserved. |
-| New card ID generation | [tools/srs_tools/core.py](tools/srs_tools/core.py) → `card_uid()` | UUIDv5 from rule/group, persistent source UID and template key; cloze variants also distinguish ordinal. |
-| Card-specific settings | `data/reviews/<device>-YYYY-MM.jsonl` → `kind: "card_settings"` | Suspension, tags and optional profile override. |
-| Profile assignment rules | `config/profile-rules.json` → `rules` | First matching filter assigns a profile. Precedence: explicit card override → matching rule → initial card profile → default profile. |
-| Current scheduling profiles | `data/profiles.json` → `profiles`, `default_profile` | Active weights, retention, steps, interval/daily limits. Training updates this file only. |
-| Card scheduling state | Card partition → `baseline`; latest answer event → `state` | Due date, stability, difficulty and other scheduling state. |
-| Historical scheduler settings | `data/scheduler-configs/<hash>.json` | Immutable settings referenced by answers through `scheduler_config_id`. |
-| Study decks | `config/decks.json` → `decks` | Named card filters and parents. UI deck edits save here. |
-| Catalog pointer and imported scheduling baseline | `data/manifest.json` | Catalog change token, partition counts, study-day timing and frozen imported limits/counters required for Anki parity. |
-
-The pipeline is **Obsidian source → SRS note fields → template/card variants →
-card scheduling and reviews**. Notes hold source bindings, templates hold
-presentation, decks select cards, and profiles schedule them. Generated card
-records contain no source paths, field mappings, preparation functions or
-export definitions. Runtime objects join these layers only in memory.
-
-Schemas: [configuration](schemas/config.schema.json),
-[data](schemas/data.schema.json). The old combined
-[study schema](schemas/study.schema.json) documents the compatibility/runtime
-composition; it is no longer the persistent configuration format.
-
-There is no separate handwritten ID-map file. New card IDs are UUIDv5 values
-from `(source-rule/group key, persistent source note UID, template key)` in
-`tools/srs_tools/core.py:card_uid`; generated cloze variants additionally distinguish
-their ordinal. Persisted imported card IDs are preserved, including previously
-unmapped cards that later acquire a source/template. File paths and CSV row
-positions do not define identity. Existing legacy `deck_id` fields remain in
-scheduling metadata to preserve imported daily counters and deck/parent limits.
-
-Profile assignment uses a card-specific override, then the first matching
-`profile_rules` entry, then its source-assigned `profile_id`, then
-`default_profile`. Imported deck retention overrides remain effective while a
-card uses that deck's original preset profile. Imported daily counters, deck
-limits and parent limits are preserved. Updating an imported profile's daily
-settings changes its preset defaults; explicit deck overrides still win.
-New cards have a profile-specific scheduling ledger and share its daily budget.
-A per-card profile override changes interval settings, not its existing ledger.
-Study filters never create additional daily allowances.
-
-Filters support `paths` (exact paths or directory prefixes), `groups`,
-`templates`, source/card `tags`, `properties`, `card_ids`, and legacy `deck_ids`.
-Values in a list are alternatives, except `tags` and `tag_prefixes`, which require all listed tags.
-`tags` matches exactly; `tag_prefixes` matches a tag and its descendants (e.g. `oa/math` includes `oa/math/categories`). Prefix matching treats Anki `::` and Obsidian `/` as equivalent separators.
-Different fields are combined with AND. Compose filters with `all`, `any`, and
-`not`. Properties use exact values or `{"exists": true}` / `{"exists": false}`.
-For example, replace an imported deck filter in `config/decks.json` with:
-
-```json
-{"paths": ["examples/notes.csv"], "templates": ["recognition"]}
-```
-
-This includes existing and future recognition cards from that CSV. A filter such
-as `{"groups": ["example-notes"]}` instead selects cards by their SRS note’s
-source-rule ID, including unresolved sources. Add `templates` to select particular
-cards generated from those notes. Parent decks include the union of their children.
-
-Imported filters initially use legacy deck IDs. They can be replaced with source-rule
-and template filters when those describe the intended membership. Splits of the same
-source/template need an explicit property or tag; legacy filters can preserve those
-splits until that distinction is defined. New cards always appear in **All cards**.
-Use **New deck** or a deck’s **Edit** button for path/template/tag filters;
-advanced compositions are editable in `config/decks.json`; source rules in `config/sources.json`. **Sources** summarizes the configured paths, templates and initial profiles.
-See [schemas/config.schema.json](schemas/config.schema.json).
-
-## Add cards without Anki
-
-Keep adding your normal Obsidian notes, CSV rows, or callouts. Choose
-**Tools → Refresh cards** in the reviewer on desktop or Android. This scans source
-rules and publishes metadata partitions of at most 250 cards, preserving schedules
-and review logs. No Python, Node, or Anki runtime is required. Maintenance runs
-only when selected. **Reload reviewer** reloads existing data without discovering cards.
-FSRS training still runs through the desktop Python tools.
-
-For a single file, choose **Sync source file** in the current card’s dropdown,
-or open **Sources**, search for its path or rule name, and click **Sync** beside
-a source row. File links appear inside the expandable source rows. The row’s
-**Sync** button syncs its matching files; individual files also have a **Sync**
-button. Expand a row to see its configuration and files. File lists show 30 entries at a time. Searching lists
-configured files without parsing their contents.
-It uses the shared maintenance cache to generate cards from that file and retire
-cards it no longer generates, keeping their identities, schedules, and history.
-Restoring the source/template and syncing again restores the retired cards.
-For a CSV or Markdown file with multiple notes, this syncs the entire file.
-Missing identities trigger a lookup across configured sources to avoid retiring
-moved notes; if an identity moved elsewhere, use **Tools → Refresh cards** to
-reconcile it. File sync still reads the catalog, but normally parses only the
-selected source file. This action needs no Obsidian plugin.
-
-Structural Markdown notes are eligible only when they have an existing
-`anki_note_id` or a `srs_note_id` field. To opt a new note in, add a blank field:
-
-```yaml
-srs_note_id:
-```
-
-Discovery fills that field with a stable UUID. Notes without either marker are
-skipped and left untouched, even when their directory matches a source rule.
-Existing Anki IDs take precedence and receive no extra ID.
-
-All CSV rows and explicit `[!srs]` / `[!anki]` blocks are eligible. CSV rows
-without an identity receive `srs_note_id`; blocks without an ID receive
-`<!-- SRS-ID: <uuid> -->`. Legacy `srs_uid` identities remain readable, but that
-field alone does not enroll a structural note. Identities survive content changes,
-CSV reordering and file moves. After moving sources, update the source rule paths
-and run discovery again. Discovery preserves existing catalog entries and reviews;
-changing eligibility does not automatically delete previously generated cards.
-
-Choose **Tools → Prune missing sources** to preview accidental additions whose
-source identities no longer exist. Inspect removable and protected records, then
-use **Remove these cards and notes** to apply the preview. Imported cards, reviewed cards, and cards with settings
-log entries are preserved. Review logs remain unchanged. All configured source
-locations must be available; cleanup refuses an incomplete mount. Source identity
-is checked across the configured locations, so a moved note with the same ID is
-preserved. Content errors alone do not make a card removable. A source ID that
-still exists keeps the card; cleanup does not infer unwanted enrollment from age.
-
-Each enabled template listed in a source rule generates a card. Optional
-`when` filters on templates select variants using source properties, e.g.
-`"when": {"properties": {"production": true}}`. Cloze templates generate the
-ordinals present in the mapped cloze field. Missing content stays visible as a
-card error, with rating disabled. Missing source paths are reported while other sources continue to scan.
-Discovery does not delete existing cards when a source or rule disappears; suspend them explicitly when desired. Removing a
-source rule does not change an existing card's identity or history. Template
-keys and source-rule keys are identity-bearing names; keep them stable when
-editing presentation.
-
-## Train FSRS without Anki
-
-Training uses the standalone
-[fsrs-rs-python bindings](https://github.com/open-spaced-repetition/fsrs-rs-python)
-to the Rust FSRS optimizer. Neither Anki nor PyTorch is a training dependency.
-From `tools/`, select a profile ID from `data/profiles.json` or the **Profiles** screen:
-
-```sh
-uv run python srs.py train --profile preset-1 --output ../training.json
-uv run python srs.py train --profile preset-1 --apply --output ../training.json
-```
-
-Without `--apply`, the command reports trained parameters and evaluation only.
-With it, the profile is updated for future answers. Current due dates, saved
-memory states, card identities, imported baselines and all review logs are
-preserved. The first answer using the updated profile automatically writes its
-immutable scheduler configuration. Existing 19-weight presets remain unchanged
-until explicitly trained/applied; this optimizer produces **21 FSRS-6 weights**,
-with explicit standalone optimizer provenance.
-
-Training retains same-day reviews inside histories but uses only positive-gap
-reviews as prediction targets; its report counts omitted same-day targets.
-Training deduplicates imported/local events, excludes rescheduling observations,
-follows each card's winning answer branch, and computes gaps using your saved
-study timezone and rollover. Cards whose history lacks an initial learning/new
-review are excluded and counted in the report. At least 1,000 long-term training
-examples are required by default. In-sample log loss and RMSE are reported before
-and after fitting; these are not held-out accuracy estimates. Missing parents,
-conflicting event IDs, malformed/incomplete logs and insufficient data produce
-diagnostics rather than silently applying parameters.
-
-Sync `config/`, `data/profiles.json` and `data/scheduler-configs/` alongside the card metadata and
-monthly review logs. The legacy global scheduler does not override these
-profiles. Historical archive files are immutable records, not settings editors.
-
-## Take a desktop snapshot
-
-Synchronize and close Anki before copying `collection.anki2`. The importer refuses
-pending WAL data and never writes to the original collection. In Anki's debug
-console, record the day-zero date before closing:
+First convert note content into your vault using your external converter, keeping
+Anki note IDs. This importer links that content to Anki scheduling and history.
+Synchronize and close Anki, then copy `collection.anki2` to a separate snapshot.
+Before closing, obtain the collection's day-zero date in Anki's debug console:
 
 ```python
 from datetime import datetime, timedelta
 print(datetime.fromtimestamp(mw.col.sched.day_cutoff).date() - timedelta(days=mw.col.sched.today + 1))
 ```
 
-Also record the **exact desktop Anki version**, study timezone, rollover hour,
-and the UTC timestamp of the reference counts. The six 19-weight presets do not
-identify the source application version. Keep the original snapshot outside the
-reviewer store until verification has passed.
-
-## Migrate all decks in one command
-
-Run inside this folder's `migration/` directory. The locked environment includes
-the optional Anki **26.9.4** backend for import/verification:
+From `migration/`:
 
 ```sh
+cp -n config/exports.example.json config/exports.json
+cp -n config/srs.example.json config/srs.json
 uv sync --locked --extra anki
+uv run --extra anki python migrate.py inspect --collection /path/to/snapshot.anki2
 ```
 
-If your source Anki has a different version, update the managed dependency with
-`uv add` using that exact version (substitute the actual version):
-
-```sh
-uv add --optional anki 'anki==26.9.4'
-```
-
-This updates `pyproject.toml`, `uv.lock`, and the environment together. Run all
-desktop Python commands through `uv run` as before.
-
-For a directory named `srs` directly inside your vault:
+Customize the source mappings and templates in those local configuration files,
+then import and verify:
 
 ```sh
 uv run --extra anki python migrate.py migrate \
-  --collection /absolute/path/to/snapshot.anki2 \
-  --anki-version 26.9.4 \
+  --collection /path/to/snapshot.anki2 --anki-version 26.9.4 \
   --day-zero YYYY-MM-DD
-```
-
-Replace the version, paths and timing with the recorded values. For another
-layout, add `--vault /path/to/vault --output /path/to/srs/data`. The importer
-checks that the installed backend version matches `--anki-version`.
-
-This imports every card and deck, including unresolved sources, suspended cards,
-and cards without saved memory. It generates editable templates for all mapped
-source/notetype/card-ordinal combinations in `config/cards.json` in one pass. Existing
-template keys, edits, card UIDs, and answer logs are preserved. Source mappings
-remain in `migration/config/exports.json`.
-
-CSV rows resolve through `anki_note_id`, `srs_note_id`, or legacy `srs_uid`. Markdown frontmatter uses
-the same identities; ID-linked `[!anki]` callouts are supported too. Mapped text,
-media, vocabulary, taxonomy, and structured source transformations run against
-live vault properties. Note bindings retain source locators; configuration retains transformations.
-Neither stores note field values. **Tools → Refresh cards** automatically assigns missing CSV
-identities while preserving existing IDs; no separate seeding command is needed.
-
-Templates support fields, nested conditional/inverted sections, `FrontSide`,
-`cloze:` and `text:` filters, and vault media references. Unknown fields, `type:`
-inputs and unsupported filters produce visible card errors and
-prevent rating. Cloze ordinals remain the existing Anki ordinals. Editing the
-front/back presentation does not create new identities or rewrite history.
-
-Template JavaScript is disabled by default. To enable it, set the top-level
-`"allow_javascript": true` in `config/cards.json` and reload the reviewer.
-Inline scripts run after each question, revealed answer, or browser preview is
-displayed. `document.getElementById`, `querySelector`, and `querySelectorAll`
-look within that displayed side, so question and answer IDs do not interfere.
-Scripts run with the reviewer's privileges; this is not a sandbox. Only enable
-templates you trust. External and module scripts are unsupported. Content checks
-validate templates but do not execute scripts; execution errors appear when displayed.
-
-## Verify against native Anki
-
-Verification needs a desktop Node executable as well as the Python environment.
-No JavaScript packages are needed for the verification command. It opens a
-**disposable copy** of the snapshot and deletes that copy afterward. The retained
-report contains counts and scheduling metadata, without note fields or rendered
-Anki questions/answers.
-
-```sh
+uv run python migrate.py init-study
 uv run --extra anki python migrate.py verify \
-  --collection /absolute/path/to/snapshot.anki2 \
-  --data ../data --anki-version 26.9.4 \
-  --output verification.json
+  --collection /path/to/snapshot.anki2 --anki-version 26.9.4 \
+  --data ../data --output ../verification.json
 ```
 
-Verification uses the current system time. Pass `--at` only for a reproducible
-reference time. `--node /path/to/node` selects an executable outside PATH.
+Use your actual version and day-zero date. The locked backend is Anki 26.9.4;
+for another version, run `uv add --optional anki 'anki==YOUR_VERSION'` first.
+Pass `--timezone` and `--rollover-hour` to `migrate` if the defaults differ from
+Anki. Skip `init-study` if `config/sources.json` already exists. Verification
+requires desktop Node. Future intervals can differ from Anki's fuzz/load balancing.
 
-Every deck and parent must agree **exactly** in all three counts. Missing snapshot
-cards, a different count, missing transition coverage, memory/step differences,
-or deterministic interval differences produce status 2 and detailed diagnostics.
-Content errors do not affect the comparison. A successful count comparison is reported
-separately from scheduling comparisons.
-
-The harness exercises all four ratings for available new, learning, review, and
-relearning representatives in every preset, submits each answer on the disposable
-copy, and undoes it before the next branch. Missing states receive synthetic
-representatives using that preset on the disposable copy; the report labels
-their origin. They never enter the store or reference counts. Saved stability/difficulty, repetitions, lapses,
-learning position, queue, and due are preserved; only missing saved memory uses
-historical reconstruction. Per-deck trained settings and effective retention
-are recorded with each new answer. Legacy parameter fields remain separate from
-the selected native field and source policy; unused native fields are pruned.
-
-Anki's answer-state API uses its wall clock. **`--at` fixes count calculations;
-answer transitions use their separately recorded wall-clock timestamp.** The
-harness applies reference-day unburying through Anki's API and suppresses its
-separate wall-clock unbury pass when obtaining historical reference counts.
-Memory comparison uses an explicit float32 tolerance (absolute 0.0001 or relative
-0.000002). Deterministic intervals are checked independently from native memory
-states. Native fuzz/load-balancing interval differences are retained in the
-report; they are not count differences and do not by themselves fail verification.
-The reviewer deliberately uses deterministic intervals. Filtered-deck cards are
-counted, but answering a card still in a filtered deck is currently disabled;
-return those cards to their original decks in Anki before final migration.
-
-The automated fixture suite verifies backend 26.9.4. Another source version must
-pass its own native verification before cutover. The original snapshot and vault
-sources were not available for final acceptance in this workspace, so its exact
-reference counts and real desktop/Android operation remain to be checked on your
-devices. Do not interpret fixture results as verification of your collection.
-
-## Files and migration safety
-
-See [DATA_FORMAT.md](DATA_FORMAT.md) for field descriptions, event semantics,
-and the [JSON Schema](schemas/data.schema.json) for files in `data/`.
-
-```text
-srs/
-  view.js, view.css          standalone browser reviewer
-  config/
-    sources.json            vault → SRS note rules
-    cards.json              SRS note → card rules and templates
-    decks.json              study deck filters
-    profile-rules.json      scheduling profile assignment filters
-  data/
-    profiles.json           active scheduling profiles
-    manifest.json
-    imports/<revision>/
-      report.json
-    notes/
-      notes-00000.json       source bindings shared by cards
-    cards/
-      cards-00000.json       note/card ID mapping and metadata; at most 250 cards
-    reviews/
-      anki-2026-11.jsonl
-      computer-2026-11.jsonl
-      android-2026-11.jsonl
-      computer-2026-11-002.jsonl
-  tools/                    ongoing CLI, parsers, training, browser build/tests
-    srs.py, build.py
-    srs_tools/, browser/, tests/
-    pyproject.toml, uv.lock
-  migration/                optional Anki import, verification, initial setup
-    migrate.py, lib/, tests/
-    pyproject.toml, uv.lock
-```
-
-All version 2 events use device-specific UTC-month JSONL files, rotating at
-**32 MiB**. Writers use the names `anki`, `computer`, and `android`; choose this
-device in the reviewer's Device selector. Existing UUID-named logs remain readable.
-Historical
-observations deduplicate by collection identity and original revlog ID and retain
-the original review information without invented resulting states. Separate
-baseline events describe imported scheduling. Only new answer events select
-current state or contribute new activity; imported observations never double-count
-activity already in the saved deck counters.
-
-Discovery scans source identities and updates only changed partitions, appending
-new records without moving existing records between files. A recovery journal
-protects interrupted writes; the manifest is updated last. It
-writes no `raw.json`, note-field archive, or `history-*.json`. Existing new-review
-logs and card UIDs survive the version 1 upgrade. Subsequent baseline changes
-are blocked once new answers exist; presentation edits remain dynamic.
-
-The device-local IndexedDB index is disposable and incremental. Unchanged logs
-are not reread; appended logs verify their prefix and index only added records.
-Replaced/deleted logs rebuild the index. Imported history is indexed separately
-and loaded per card only when reconstruction is necessary. Syncthing conflict
-copies remain on disk. Duplicate event IDs with different contents, malformed
-records, and incomplete final lines visibly pause reviewing.
-
-Both offline answer branches remain immutable. The latest `(review_time_ms,
-event_id)` wins with its complete resulting state; losing branches are not replayed
-onto it. Rebuild local index regenerates the cache from the synced files. Each
-device appends only to its own log; Web Locks serialize writes when available.
-Without Web Locks use one active reviewer window per device.
-
-## Development checks
-
-Ongoing tools, browser source fragments, and their tests live under `tools/`.
-Each tooling directory has its own uv project and `.venv`. Neither is required on
-reviewing devices. From `tools/`:
+To preview later reviews from a new snapshot of the same collection:
 
 ```sh
-uv sync --locked --extra test
-uv run --extra test python build.py
-uv run --extra test python -m unittest discover -s tests -v
-uv run --extra test npm ci
-uv run --extra test npm test
+uv run --extra anki python migrate.py import-reviews \
+  --collection /path/to/snapshot.anki2 --anki-version 26.9.4 --data ../data
 ```
 
-The optional `test` extra supplies desktop Node. From `migration/`, run native
-checks separately:
+Add `--apply` to save. Close the reviewer on all devices and finish syncing first.
+This pulls reviews and saved scheduling state for existing cards; it skips cards
+answered locally, adds no cards, and leaves profiles and daily allowances alone.
+See [Anki import details](migration/README.md).
+
+## Train FSRS
+
+From `tools/`, replace `preset-1` with a profile ID from **Profiles**:
 
 ```sh
-uv run --extra anki python -m unittest discover -s tests -v
+uv sync --locked
+uv run python srs.py train --profile preset-1 --output ../training.json
+uv run python srs.py train --profile preset-1 --apply --output ../training.json
 ```
 
-The previous ongoing commands in `migration/migrate.py` remain compatibility
-aliases that forward to `tools/srs.py` using the `tools/` environment. See [tools/README.md](tools/README.md) and
-[migration/README.md](migration/README.md) for the ownership of each command.
+The first command previews; `--apply` updates the profile for future answers.
+Existing due dates and history stay intact. Training needs 1,000 eligible
+long-term examples by default.
 
-The Python suite uses native Anki disposable collections with six distinct trained
-19-weight presets and 96 representative answers, exact deck/parent counts,
-overrides and rollover, plus migration identity, monthly boundaries, rollover,
-and idempotency tests. Node tests use mocked Obsidian/IndexedDB for rendering,
-skipping, template edits, events, conflicts, and incremental indexing. They do
-not replace testing on a physical Android device or a large real Syncthing store.
-
-Queue behavior follows Anki's published [deck tree](https://github.com/ankitects/anki/blob/25.09.2/rslib/src/decks/tree.rs),
-[limits](https://github.com/ankitects/anki/blob/25.09.2/rslib/src/decks/limits.rs), and
-[parameter precedence](https://github.com/ankitects/anki/blob/25.09.2/rslib/src/deckconfig/mod.rs).
-The bundled ts-fsrs library is MIT licensed; see `THIRD_PARTY_LICENSE.txt`.
-
-### Reviewer performance and content checks
-
-The reviewer reads catalog partitions four at a time and builds a scheduling index once per open view. The deck screen reads cached counts in O(decks), without visiting cards. Per-deck ordered indexes select the next card without collecting or sorting every eligible card. An answer updates that card's index entries, daily activity, and counts affected by shared parent limits; it does not reload all review states or rebuild catalog metadata. Queue maintenance uses ordered-tree operations rather than constant-time array scans. Configuration, review projections, deck memberships, and parsed sources stay in memory while the view is open. Relevant vault changes invalidate affected content; unrelated vault edits do not refresh the reviewer. Reviews still check current configuration, source content, and review ancestry before saving. Review-log indexing remains persistent and incremental.
-
-Card questions and answers render when opened. The homepage shows **known content errors** and **unchecked** cards; unchecked does not mean valid. Scheduling counts include both. Use **Tools → Check content** to validate the selected deck/group (or all cards from the unfiltered homepage). Checks run in batches and can be cancelled. Completed results last until the view closes or their dependencies change. In the card browser, **Search card content** explicitly checks the chosen scope and includes rendered text in search; results are incomplete while cards remain unchecked. Opening a card always validates it before enabling ratings.
-
-Use **Tools → Performance details** to inspect recent stage timings and cumulative file-read, source-read, rendering, and index-sync counts. To compare desktop and Android, reopen the view and record the cold-load measurements; then open the same deck twice, Bury a card, and submit a review, inspecting the counters after each operation. Warm navigation should not reread unchanged catalog/configuration/log files or render unvisited cards. Record content-check measurements separately. Performance details also reports `schedulingBuilds`, `cardPreparations`, and scheduling-index counters: ordinary deck switches and answers should leave the first two unchanged. Cold opening, catalog/configuration changes, card-setting changes, study-day rollover, or replaced/deleted logs can rebuild the runtime index. Learning availability changes update the relevant cards via a time-ordered index. Refresh clears runtime caches; Rebuild local index rebuilds review projections. The scheduling index is currently in memory; the review-log index remains persistent across openings.
-
-For a synthetic 30,000-card scheduling benchmark, run `tools/.venv/bin/node tools/tests/benchmark-reviewer.cjs` from the project root. It reports membership/count calculation, warm cache lookup, selected queue, and answer-refresh costs. It does not measure vault I/O or predict device-specific load times.
-
-Maintenance caches hashes and generated identity metadata in device-local IndexedDB;
-source content is never retained there. Unchanged runs skip source-content and
-catalog reads. Changed runs hash touched sources and reparse changed content;
-new/deleted paths, configuration edits, catalog changes, and relevant review logs
-invalidate results. **Rebuild local index** also clears the maintenance cache.
-Progress reports parsed/reused/hashed files. Cancellation before publication leaves
-the catalog unchanged; source IDs already inserted remain. Once publication starts,
-the recovery journal finishes it on reopening. Run maintenance on one syncing
-device at a time; simultaneous maintenance across devices is unsupported.
-
-For a temporary, one-way import of subsequent Anki reviews without rebuilding the
-catalog, use [`migration/migrate.py import-reviews`](migration/README.md#temporary-anki-review-bridge).
-It previews by default, imports saved Anki scheduling states with `--apply`, and
-reports cards reviewed in both systems as conflicts. Imported reviews do not
-update local daily activity allowances or scheduling profiles.
+[Architecture and configuration](ARCHITECTURE.md) · [Data formats](DATA_FORMAT.md) ·
+[Development commands](tools/README.md) · [TODO](TODO.md)
